@@ -7,8 +7,53 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, IndexCommand.self, Search.self, Doctor.self]
     )
+}
+
+/// resound index --vault <path> —— 从 vault 重建检索索引
+struct IndexCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "index", abstract: "从 vault 重建检索索引（切块 → embedding → SQLite/FTS5/vec）")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        try await IndexPipeline(config: cfg).build(
+            vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL)
+    }
+}
+
+/// resound search "<query>" —— hybrid 检索（FTS5 + 向量 + RRF）
+struct Search: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "hybrid 检索：FTS5 关键词 + 向量 + RRF 融合")
+
+    @Argument(help: "查询语句")
+    var query: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Option(name: .long, help: "返回条数")
+    var k: Int = 5
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let hits = try await IndexPipeline(config: cfg).search(
+            query: query, indexPath: indexURL, topK: k)
+        if hits.isEmpty { print("无结果"); return }
+        for (i, h) in hits.enumerated() {
+            let ts = String(format: "%.0f-%.0fs", h.hit.start, h.hit.end)
+            print("\n[\(i + 1)] rrf=\(String(format: "%.4f", h.rrf))  \(h.hit.recordingId) @\(ts)")
+            print("    \(h.hit.text.prefix(160))")
+        }
+    }
 }
 
 /// resound doctor —— 检查关键依赖（先验证 sqlite-vec）
