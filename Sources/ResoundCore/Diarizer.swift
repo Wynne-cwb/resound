@@ -1,43 +1,62 @@
 import Foundation
 import FluidAudio
 
-/// 说话人分割（用 FluidAudio DiarizerManager；offline VBx 管线在本机 Bus error，待修）。
-/// 返回的每段带 embedding + qualityScore，供 Phase B 声纹/匹配使用。
-public func diarizeSmoke(audio: URL, threshold: Float = 0.7,
-                         log: (String) -> Void = { print($0) }) async throws -> String {
-    log("⬇️  准备 diarization 模型（首次下载）…")
-    let models = try await DiarizerModels.downloadIfNeeded()
+public enum DiarBackend: String, CaseIterable {
+    case manager      // FluidAudio DiarizerManager（聚类，分不开相似嗓音）
+    case sortformer   // FluidAudio Sortformer（≤4 人，身份最稳）
+}
 
-    let diarizer = DiarizerManager(config: DiarizerConfig(clusteringThreshold: threshold))
-    diarizer.initialize(models: models)
+public struct DiarSeg {
+    public let spk: String
+    public let start: Double
+    public let end: Double
+}
 
-    log("🎧 解码 16kHz mono…")
+/// 跑分割，返回统一的段列表。
+public func runDiarization(audio: URL, backend: DiarBackend, threshold: Float,
+                           log: (String) -> Void = { print($0) }) async throws -> [DiarSeg] {
     let samples = try AudioConverter().resampleAudioFile(audio)
+    switch backend {
+    case .manager:
+        log("⬇️  DiarizerManager 模型…")
+        let models = try await DiarizerModels.downloadIfNeeded()
+        let d = DiarizerManager(config: DiarizerConfig(clusteringThreshold: threshold))
+        d.initialize(models: models)
+        return try d.performCompleteDiarization(samples).segments.map {
+            DiarSeg(spk: $0.speakerId, start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds))
+        }
+    case .sortformer:
+        log("⬇️  Sortformer 模型（cpuAndGPU）…")
+        let config = SortformerConfig.default
+        let models = try await SortformerModels.loadFromHuggingFace(config: config, computeUnits: .cpuAndGPU)
+        let d = SortformerDiarizer(config: config)
+        d.initialize(models: models)
+        let result = try d.processComplete(samples)
+        return result.speakers.values.flatMap { $0.finalizedSegments }.map {
+            DiarSeg(spk: "\($0.speakerLabel)", start: Double($0.startTime), end: Double($0.endTime))
+        }
+    }
+}
 
-    log("🗣  diarization 中…")
-    let result = try diarizer.performCompleteDiarization(samples)
-
+public func diarizeSmoke(audio: URL, backend: DiarBackend = .sortformer, threshold: Float = 0.7,
+                         log: (String) -> Void = { print($0) }) async throws -> String {
+    log("🗣  diarization（\(backend.rawValue)）…")
+    let segs = try await runDiarization(audio: audio, backend: backend, threshold: threshold, log: log)
     var bySpeaker: [String: (count: Int, dur: Double)] = [:]
-    var lines: [String] = []
-    for seg in result.segments {
-        let spk = seg.speakerId
-        let dur = Double(seg.endTimeSeconds - seg.startTimeSeconds)
-        bySpeaker[spk, default: (0, 0)].count += 1
-        bySpeaker[spk, default: (0, 0)].dur += dur
-        lines.append(String(format: "  %@  %.1f-%.1fs  q=%.2f  emb=%d",
-            spk, Double(seg.startTimeSeconds), Double(seg.endTimeSeconds),
-            Double(seg.qualityScore), seg.embedding.count))
+    for s in segs {
+        bySpeaker[s.spk, default: (0, 0)].count += 1
+        bySpeaker[s.spk, default: (0, 0)].dur += (s.end - s.start)
     }
-    var summary = "说话人数: \(bySpeaker.count)，段数: \(result.segments.count)\n"
+    var out = "说话人数: \(bySpeaker.count)，段数: \(segs.count)\n"
     for (spk, v) in bySpeaker.sorted(by: { $0.value.dur > $1.value.dur }) {
-        summary += String(format: "  %@: %d 段, 共 %.0fs\n", spk, v.count, v.dur)
+        out += String(format: "  %@: %d 段, 共 %.0fs\n", spk, v.count, v.dur)
     }
-    return summary + "--- 前 30 段 ---\n" + lines.prefix(30).joined(separator: "\n")
+    return out
 }
 
 // MARK: - 用 ground-truth 转录评测 diarization
 
-/// 解析 "HH:MM:SS 说话人" 行 → (秒, 说话人)。文本行/中文行不匹配会被跳过。
+/// 解析 "HH:MM:SS 说话人" 行 → (秒, 说话人)。文本/中文行不匹配会被跳过。
 func parseGroundTruth(_ url: URL) -> [(t: Double, speaker: String)] {
     guard let s = try? String(contentsOf: url, encoding: .utf8) else { return [] }
     var out: [(Double, String)] = []
@@ -51,44 +70,33 @@ func parseGroundTruth(_ url: URL) -> [(t: Double, speaker: String)] {
     return out
 }
 
-public func diarizeEval(audio: URL, transcript: URL, threshold: Float = 0.7,
-                        log: (String) -> Void = { print($0) }) async throws -> String {
+public func diarizeEval(audio: URL, transcript: URL, backend: DiarBackend = .sortformer,
+                        threshold: Float = 0.7, log: (String) -> Void = { print($0) }) async throws -> String {
     let gt = parseGroundTruth(transcript)
     let gtSpeakers = Set(gt.map { $0.speaker }).sorted()
     log("📄 ground truth: \(gt.count) 条发言，\(gtSpeakers.count) 人: \(gtSpeakers.joined(separator: "/"))")
 
-    let models = try await DiarizerModels.downloadIfNeeded()
-    let diarizer = DiarizerManager(config: DiarizerConfig(clusteringThreshold: threshold))
-    diarizer.initialize(models: models)
-    let samples = try AudioConverter().resampleAudioFile(audio)
-    log("🗣  diarization（threshold=\(threshold)）…")
-    let segs = try diarizer.performCompleteDiarization(samples).segments
+    log("🗣  diarization（\(backend.rawValue)）…")
+    let segs = try await runDiarization(audio: audio, backend: backend, threshold: threshold, log: log)
 
     func diarAt(_ t: Double) -> String? {
-        if let hit = segs.first(where: { Double($0.startTimeSeconds) <= t && t <= Double($0.endTimeSeconds) }) {
-            return hit.speakerId
-        }
-        return segs.min(by: {
-            abs(Double($0.startTimeSeconds + $0.endTimeSeconds) / 2 - t)
-                < abs(Double($1.startTimeSeconds + $1.endTimeSeconds) / 2 - t)
-        })?.speakerId
+        if let hit = segs.first(where: { $0.start <= t && t <= $0.end }) { return hit.spk }
+        return segs.min(by: { abs(($0.start + $0.end) / 2 - t) < abs(($1.start + $1.end) / 2 - t) })?.spk
     }
 
-    // 每条 GT 发言 → diar 说话人
     var pairs: [(gt: String, diar: String)] = []
     for u in gt { if let d = diarAt(u.t) { pairs.append((u.speaker, d)) } }
 
-    // 每个 diar 簇映射到占比最大的 GT 说话人
     var diarToGt: [String: [String: Int]] = [:]
     for p in pairs { diarToGt[p.diar, default: [:]][p.gt, default: 0] += 1 }
     let mapping = diarToGt.mapValues { $0.max(by: { $0.value < $1.value })!.key }
 
     let correct = pairs.filter { mapping[$0.diar] == $0.gt }.count
     let acc = pairs.isEmpty ? 0 : Double(correct) * 100 / Double(pairs.count)
-    let diarCount = Set(segs.map { $0.speakerId }).count
+    let diarCount = Set(segs.map { $0.spk }).count
 
     var report = """
-    === diarization 评测 ===
+    === diarization 评测（\(backend.rawValue)）===
     GT 说话人数: \(gtSpeakers.count)  |  diar 检出: \(diarCount)  |  段数: \(segs.count)
     发言级标注准确率: \(String(format: "%.1f%%", acc))（\(correct)/\(pairs.count)）
     --- 簇→人 映射 ---

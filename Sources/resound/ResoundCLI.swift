@@ -18,11 +18,15 @@ struct Diarize: AsyncParsableCommand {
     @Argument(help: "音频文件路径")
     var audio: String
 
-    @Option(name: .long, help: "聚类阈值（越高人越少，默认 0.7）")
+    @Option(name: .long, help: "后端：sortformer / manager")
+    var backend: String = "sortformer"
+
+    @Option(name: .long, help: "聚类阈值（manager 用，越高人越少）")
     var threshold: Float = 0.7
 
     func run() async throws {
-        print(try await diarizeSmoke(audio: URL(fileURLWithPath: audio), threshold: threshold))
+        let b = DiarBackend(rawValue: backend) ?? .sortformer
+        print(try await diarizeSmoke(audio: URL(fileURLWithPath: audio), backend: b, threshold: threshold))
     }
 }
 
@@ -36,14 +40,18 @@ struct DiarizeEval: AsyncParsableCommand {
     @Argument(help: "ground-truth 转录（HH:MM:SS 说话人 格式）")
     var transcript: String
 
-    @Option(name: .long, help: "聚类阈值")
+    @Option(name: .long, help: "后端：sortformer / manager")
+    var backend: String = "sortformer"
+
+    @Option(name: .long, help: "聚类阈值（manager 用）")
     var threshold: Float = 0.7
 
     func run() async throws {
+        let b = DiarBackend(rawValue: backend) ?? .sortformer
         print(try await diarizeEval(
             audio: URL(fileURLWithPath: audio),
             transcript: URL(fileURLWithPath: transcript),
-            threshold: threshold))
+            backend: b, threshold: threshold))
     }
 }
 
