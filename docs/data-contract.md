@@ -69,6 +69,7 @@ vault repo 根目录需带 `.gitattributes`：
 ```
 resound-vault/
 ├── resound.yaml                      # vault 配置：schema 版本、默认设置
+├── glossary.txt                      # 用户词表：专有名词偏置 + 别名纠正（事实源）
 ├── people/
 │   └── people.yaml                   # 人物注册表（事实源，声纹身份的锚）
 ├── recordings/
@@ -210,6 +211,24 @@ provenance:
 - `map`：本录音 `spk_N` → 全局 `person_id`，是声纹增量注册和重建声纹库的**金标来源**。
 - `overrides`：人工纠正 diarization 错误的时间段级覆盖（你设计里要的"人工纠正入口"的落盘格式）。
 - `unresolved`：落在双阈值中间地带、还没确认的 speaker，留给 UI 待确认队列。
+
+### 3.8 `glossary.txt`（用户词表 —— 提升专有名词识别）
+
+通用 ASR 对私有专有名词/人名/术语识别差。词表两层兜：①转录前把规范词注入 WhisperKit
+`promptTokens` 做偏置（预防）；②转录后把变体确定性替换成规范词（兜底）。纠正**改写
+transcript.json**，原始音频仍是 ground truth。
+
+```
+# 一行一条，# 为注释
+Resound = Resount             # 规范词 = 变体；转录后变体→规范词
+Qwen3 = 昆3, 坤3              # 多个变体逗号分隔
+rerank = Re-rank
+sherpa-onnx                   # 无 "="：只做偏置、不纠正
+```
+
+- 实测：即便弱模型(small)，别名纠正也能把 `Resount/坤3/Re-rank` 全部纠回。
+- 词表是用户领域事实，随 vault 走；将来可复用给检索做实体归一。
+- CLI `--hint <词>` 可临时叠加偏置词（不写入 glossary、不做纠正）。
 
 ### 3.7 `notes/*.md`（自由笔记）
 
