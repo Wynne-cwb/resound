@@ -60,13 +60,18 @@ public struct IndexPipeline {
 
     // MARK: 检索（hybrid + RRF；rerank 留待下一步）
 
-    public func search(query: String, indexPath: URL, topK: Int = 5, pool: Int = 40)
-        async throws -> [FusedHit] {
+    public func search(query: String, indexPath: URL, topK: Int = 5, pool: Int = 40,
+                       rerank: Bool = false, rerankModel: String? = nil,
+                       rerankCandidates: Int = 15) async throws -> [SearchHit] {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         let qvec = try await EmbeddingClient(config: config).embedQuery(query)
         let vHits = try index.vectorSearch(qvec, k: pool)
         let fHits = try index.ftsSearch(query, k: pool)
-        return rrf([vHits, fHits], topK: topK)
+        let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
+        guard rerank else { return Array(fused.prefix(topK)) }
+
+        let chat = ChatClient(config: config, modelOverride: rerankModel ?? config.rerankModel)
+        return try await Reranker(chat: chat).rerank(query: query, candidates: fused, topK: topK)
     }
 }
 

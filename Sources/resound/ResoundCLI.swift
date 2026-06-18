@@ -42,16 +42,23 @@ struct Search: AsyncParsableCommand {
     @Option(name: .long, help: "返回条数")
     var k: Int = 5
 
+    @Flag(name: .long, inversion: .prefixedNo, help: "LLM 重排（默认开，--no-rerank 关）")
+    var rerank = true
+
+    @Option(name: .long, help: "重排模型（默认 .env 的 RERANK_MODEL=flash；A/B 时可填 deepseek-v4-pro）")
+    var rerankModel: String?
+
     func run() async throws {
         let cfg = try Config.load()
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         let hits = try await IndexPipeline(config: cfg).search(
-            query: query, indexPath: indexURL, topK: k)
+            query: query, indexPath: indexURL, topK: k,
+            rerank: rerank, rerankModel: rerankModel)
         if hits.isEmpty { print("无结果"); return }
         for (i, h) in hits.enumerated() {
-            let ts = String(format: "%.0f-%.0fs", h.hit.start, h.hit.end)
-            print("\n[\(i + 1)] rrf=\(String(format: "%.4f", h.rrf))  \(h.hit.recordingId) @\(ts)")
-            print("    \(h.hit.text.prefix(160))")
+            let ts = String(format: "%.0f-%.0fs", h.start, h.end)
+            print("\n[\(i + 1)] \(h.recordingId) @\(ts)")
+            print("    \(h.text.prefix(160))")
         }
     }
 }
