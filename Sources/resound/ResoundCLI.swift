@@ -97,6 +97,9 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "临时词表偏置词（叠加 vault 的 glossary.txt）")
     var hint: [String] = []
 
+    @Option(name: .long, help: "温度回退次数（默认 5；调低提速、质量略降）")
+    var maxFallback: Int = 5
+
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
 
@@ -110,6 +113,7 @@ struct Transcribe: AsyncParsableCommand {
                 model: model,
                 language: language,
                 hints: hint,
+                maxFallback: maxFallback,
                 push: push
             )
         print("✅ 完成：\(out.id)")
