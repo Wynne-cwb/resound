@@ -77,6 +77,31 @@ public final class Index {
         guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
     }
 
+    // MARK: contextual 缓存（LLM 派生，按 hash 缓存避免重复付费/保证可复现）
+
+    public func cachedContext(hash: String) -> String? {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select context from enrichment_cache where hash=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, hash)
+        if sqlite3_step(st) == SQLITE_ROW, let c = sqlite3_column_text(st, 0) {
+            return String(cString: c)
+        }
+        return nil
+    }
+
+    public func setCachedContext(hash: String, context: String, model: String) throws {
+        let sql = """
+        insert into enrichment_cache(hash,context,model) values(?,?,?)
+        on conflict(hash) do update set context=excluded.context, model=excluded.model
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, hash); bindText(st, 2, context); bindText(st, 3, model)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
     // MARK: 写入
 
     public func upsertRecording(id: String, title: String, recordedAt: String,

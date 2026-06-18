@@ -10,6 +10,7 @@ public struct Config {
     public var chatKey: String
     public var chatModel: String
     public var rerankModel: String
+    public var contextModel: String
 
     public static func load() throws -> Config {
         let env = loadDotEnv()
@@ -29,7 +30,8 @@ public struct Config {
             chatBaseURL: v("CHAT_BASE_URL") ?? "https://api.deepseek.com/v1",
             chatKey: try req("CHAT_API_KEY"),
             chatModel: v("CHAT_MODEL") ?? "deepseek-v4-pro",
-            rerankModel: v("RERANK_MODEL") ?? "deepseek-v4-flash"
+            rerankModel: v("RERANK_MODEL") ?? "deepseek-v4-flash",
+            contextModel: v("CONTEXT_MODEL") ?? "deepseek-v4-flash"
         )
     }
 }

@@ -21,11 +21,18 @@ struct IndexCommand: AsyncParsableCommand {
     @Option(name: .long, help: "索引文件路径（默认 App Support）")
     var index: String?
 
+    @Flag(name: .long, inversion: .prefixedNo, help: "contextual 增强（默认开，--no-context 关）")
+    var context = true
+
+    @Option(name: .long, help: "上下文生成模型（默认 .env 的 CONTEXT_MODEL=flash）")
+    var contextModel: String?
+
     func run() async throws {
         let cfg = try Config.load()
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         try await IndexPipeline(config: cfg).build(
-            vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL)
+            vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL,
+            enrichContext: context, contextModel: contextModel)
     }
 }
 
