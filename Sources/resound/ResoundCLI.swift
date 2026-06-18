@@ -7,8 +7,21 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
     )
+}
+
+/// resound normalize --vault <path> —— 对已有转录重做繁→简归一 + 别名纠正
+struct Normalize: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "对 vault 内已有 transcript.json 重做繁→简归一+别名纠正")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    func run() async throws {
+        let n = try IngestPipeline(vaultRoot: URL(fileURLWithPath: vault)).normalizeExisting()
+        print("✅ 归一 \(n) 个 transcript（记得重建索引 resound index）")
+    }
 }
 
 /// resound ask "<问题>" —— 检索 + LLM 综合，给带引用的答案

@@ -52,8 +52,9 @@ public struct IngestPipeline {
             .transcribe(audio: audioOut)
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language)")
 
-        // 3. 别名纠正后写 transcript.json（原始音频仍是 ground truth）
-        let (corrected, replacements) = glossary.apply(to: result.transcript)
+        // 3. 繁→简归一 + 别名纠正后写 transcript.json（原始音频仍是 ground truth）
+        let normalized = ZhConverter.shared.normalize(result.transcript)
+        let (corrected, replacements) = glossary.apply(to: normalized)
         if replacements > 0 { log("   ✏️ 别名纠正 \(replacements) 处") }
         let transcriptOut = dir.appendingPathComponent("transcript.json")
         try corrected.jsonData().write(to: transcriptOut)
@@ -88,6 +89,23 @@ public struct IngestPipeline {
         }
 
         return Output(recordingDir: dir, id: id)
+    }
+
+    /// 对 vault 内已有 transcript.json 重新做 繁→简归一 + 别名纠正并改写（免重新转录）。
+    public func normalizeExisting(log: (String) -> Void = { print($0) }) throws -> Int {
+        let glossary = Glossary.load(vaultRoot: vault.root)
+        var count = 0
+        for dir in findRecordings(vault.root) {
+            let tURL = dir.appendingPathComponent("transcript.json")
+            guard let data = try? Data(contentsOf: tURL),
+                  let t = try? JSONDecoder().decode(Transcript.self, from: data) else { continue }
+            let normalized = ZhConverter.shared.normalize(t)
+            let (corrected, _) = glossary.apply(to: normalized)
+            try corrected.jsonData().write(to: tURL)
+            count += 1
+            log("  ✓ \(dir.lastPathComponent)")
+        }
+        return count
     }
 }
 

@@ -24,6 +24,7 @@ let package = Package(
                 "CSQLiteVec",
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ],
+            resources: [.copy("Resources/TSCharacters.txt")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
