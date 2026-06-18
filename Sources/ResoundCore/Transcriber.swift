@@ -35,11 +35,17 @@ public struct Transcriber {
             WhisperKitConfig(model: model, computeOptions: compute)
         )
 
-        var options = DecodingOptions(
-            task: .transcribe,           // 转录原语言，不要翻译成英文
-            language: language,          // 显式指定可避免中英混杂被误判
-            wordTimestamps: true
-        )
+        // 质量优先解码（慢但更准）：温度回退 + 压缩率/logprob/静音阈值触发重试，VAD 分块。
+        var options = DecodingOptions()
+        options.task = .transcribe        // 转录原语言，不要翻译成英文
+        options.language = language        // 显式指定可避免中英混杂被误判
+        options.wordTimestamps = true
+        options.temperature = 0.0
+        options.temperatureFallbackCount = 5          // 识别不确定时逐步升温重试
+        options.compressionRatioThreshold = 2.4       // 检测重复/幻觉 → 触发回退
+        options.logProbThreshold = -1.0               // 平均 logprob 过低 → 触发回退
+        options.noSpeechThreshold = 0.6               // 静音段判定
+        options.chunkingStrategy = .vad               // 按语音活动分块，长音频更稳
 
         // 词表偏置：把高频词编码成 promptTokens 当作解码上文。
         if let prompt, !prompt.isEmpty, let tokenizer = pipe.tokenizer {

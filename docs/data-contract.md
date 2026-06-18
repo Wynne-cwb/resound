@@ -269,8 +269,8 @@ enrichment_cache     -- LLM 派生缓存：key=hash(chunk+prompt+model) → cont
 ```
 schema_version      = resound.index/1
 vault_commit        = <git sha>          -- 索引基于哪个 vault commit 建的
-embedding_model     = Qwen/Qwen3-Embedding-0.6B
-embedding_dim       = 1024
+embedding_model     = Qwen/Qwen3-Embedding-4B
+embedding_dim       = 2560
 normalized          = true
 distance            = cosine
 query_instruction   = "Given a search query, retrieve relevant passages that answer it"
