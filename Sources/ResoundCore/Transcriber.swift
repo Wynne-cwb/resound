@@ -12,14 +12,17 @@ public struct Transcriber {
     public let model: String
     public let language: String?        // nil = 自动检测；中英混杂建议显式 "zh"
     public let computeUnits: MLComputeUnits
+    public let prompt: String?          // 词表偏置：高频专有名词/术语，提示模型按正确拼写输出
 
     /// 默认 computeUnits = .cpuAndGPU：绕开本机 large/small 模型首次 ANE 加载卡死的问题。
     public init(model: String = "large-v3",
                 language: String? = nil,
-                computeUnits: MLComputeUnits = .cpuAndGPU) {
+                computeUnits: MLComputeUnits = .cpuAndGPU,
+                prompt: String? = nil) {
         self.model = model
         self.language = language
         self.computeUnits = computeUnits
+        self.prompt = prompt
     }
 
     public func transcribe(audio: URL) async throws -> TranscribeResult {
@@ -32,11 +35,22 @@ public struct Transcriber {
             WhisperKitConfig(model: model, computeOptions: compute)
         )
 
-        let options = DecodingOptions(
+        var options = DecodingOptions(
             task: .transcribe,           // 转录原语言，不要翻译成英文
             language: language,          // 显式指定可避免中英混杂被误判
             wordTimestamps: true
         )
+
+        // 词表偏置：把高频词编码成 promptTokens 当作解码上文。
+        if let prompt, !prompt.isEmpty, let tokenizer = pipe.tokenizer {
+            let ids = tokenizer.encode(text: " " + prompt)
+                .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
+            if !ids.isEmpty {
+                options.promptTokens = ids
+                options.usePrefillPrompt = true
+            }
+        }
+
         let results = try await pipe.transcribe(audioPath: audio.path, decodeOptions: options)
 
         var segments: [Transcript.Segment] = []

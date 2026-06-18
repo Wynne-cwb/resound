@@ -38,6 +38,9 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测；中英混杂建议填 zh")
     var language: String?
 
+    @Option(name: .long, parsing: .upToNextOption, help: "临时词表偏置词（叠加 vault 的 glossary.txt）")
+    var hint: [String] = []
+
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
 
@@ -50,6 +53,7 @@ struct Transcribe: AsyncParsableCommand {
                 tags: tags,
                 model: model,
                 language: language,
+                hints: hint,
                 push: push
             )
         print("✅ 完成：\(out.id)")
@@ -83,6 +87,9 @@ struct Record: AsyncParsableCommand {
     @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测")
     var language: String?
 
+    @Option(name: .long, parsing: .upToNextOption, help: "临时词表偏置词（叠加 vault 的 glossary.txt）")
+    var hint: [String] = []
+
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
 
@@ -96,6 +103,7 @@ struct Record: AsyncParsableCommand {
                 tags: tags,
                 model: model,
                 language: language,
+                hints: hint,
                 push: push
             )
         print("✅ 完成：\(out.id)")

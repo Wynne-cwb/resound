@@ -19,6 +19,7 @@ public struct IngestPipeline {
         tags: [String],
         model: String,
         language: String? = nil,
+        hints: [String] = [],
         push: Bool,
         log: (String) -> Void = { print($0) }
     ) async throws -> Output {
@@ -39,8 +40,13 @@ public struct IngestPipeline {
         log(String(format: "   时长 %.1fs", duration))
 
         // 2. 转录（词级时间戳）
+        let glossary = loadGlossary(vaultRoot: vault.root) + hints
+        let prompt = glossary.isEmpty ? nil : glossary.joined(separator: ", ")
+        if !glossary.isEmpty { log("🔤 词表偏置：\(glossary.count) 词") }
+
         log("📝 WhisperKit 转录中（模型 \(model)，首次会下载模型）…")
-        let result = try await Transcriber(model: model, language: language).transcribe(audio: audioOut)
+        let result = try await Transcriber(model: model, language: language, prompt: prompt)
+            .transcribe(audio: audioOut)
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language)")
 
         // 3. 写 transcript.json
@@ -84,6 +90,15 @@ public struct IngestPipeline {
 
 func defaultTitle(from audio: URL) -> String {
     audio.deletingPathExtension().lastPathComponent
+}
+
+/// 读 vault 根的 glossary.txt（一行一词，# 开头为注释）。词表是用户领域事实，随 vault 走。
+func loadGlossary(vaultRoot: URL) -> [String] {
+    let f = vaultRoot.appendingPathComponent("glossary.txt")
+    guard let s = try? String(contentsOf: f, encoding: .utf8) else { return [] }
+    return s.split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && !$0.hasPrefix("#") }
 }
 
 func iso8601(_ date: Date) -> String {
