@@ -35,6 +35,9 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, help: "WhisperKit 模型")
     var model: String = "large-v3"
 
+    @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测；中英混杂建议填 zh")
+    var language: String?
+
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
 
@@ -46,6 +49,7 @@ struct Transcribe: AsyncParsableCommand {
                 source: source,
                 tags: tags,
                 model: model,
+                language: language,
                 push: push
             )
         print("✅ 完成：\(out.id)")
@@ -76,6 +80,9 @@ struct Record: AsyncParsableCommand {
     @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")
     var maxSeconds: Double?
 
+    @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测")
+    var language: String?
+
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
 
@@ -88,6 +95,7 @@ struct Record: AsyncParsableCommand {
                 source: source,
                 tags: tags,
                 model: model,
+                language: language,
                 push: push
             )
         print("✅ 完成：\(out.id)")

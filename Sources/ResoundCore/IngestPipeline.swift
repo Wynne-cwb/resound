@@ -18,6 +18,7 @@ public struct IngestPipeline {
         source: String,
         tags: [String],
         model: String,
+        language: String? = nil,
         push: Bool,
         log: (String) -> Void = { print($0) }
     ) async throws -> Output {
@@ -39,7 +40,7 @@ public struct IngestPipeline {
 
         // 2. 转录（词级时间戳）
         log("📝 WhisperKit 转录中（模型 \(model)，首次会下载模型）…")
-        let result = try await Transcriber(model: model).transcribe(audio: audioOut)
+        let result = try await Transcriber(model: model, language: language).transcribe(audio: audioOut)
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language)")
 
         // 3. 写 transcript.json

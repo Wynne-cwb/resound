@@ -1,4 +1,5 @@
 import Foundation
+import CoreML
 import WhisperKit
 
 public struct TranscribeResult {
@@ -9,15 +10,33 @@ public struct TranscribeResult {
 /// WhisperKit 封装：音频 → 词级时间戳转录 → 契约 Transcript。
 public struct Transcriber {
     public let model: String
+    public let language: String?        // nil = 自动检测；中英混杂建议显式 "zh"
+    public let computeUnits: MLComputeUnits
 
-    public init(model: String = "large-v3") {
+    /// 默认 computeUnits = .cpuAndGPU：绕开本机 large/small 模型首次 ANE 加载卡死的问题。
+    public init(model: String = "large-v3",
+                language: String? = nil,
+                computeUnits: MLComputeUnits = .cpuAndGPU) {
         self.model = model
+        self.language = language
+        self.computeUnits = computeUnits
     }
 
     public func transcribe(audio: URL) async throws -> TranscribeResult {
-        let pipe = try await WhisperKit(WhisperKitConfig(model: model))
+        let compute = ModelComputeOptions(
+            melCompute: computeUnits,
+            audioEncoderCompute: computeUnits,
+            textDecoderCompute: computeUnits
+        )
+        let pipe = try await WhisperKit(
+            WhisperKitConfig(model: model, computeOptions: compute)
+        )
 
-        let options = DecodingOptions(wordTimestamps: true)
+        let options = DecodingOptions(
+            task: .transcribe,           // 转录原语言，不要翻译成英文
+            language: language,          // 显式指定可避免中英混杂被误判
+            wordTimestamps: true
+        )
         let results = try await pipe.transcribe(audioPath: audio.path, decodeOptions: options)
 
         var segments: [Transcript.Segment] = []
