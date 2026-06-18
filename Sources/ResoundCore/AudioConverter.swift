@@ -10,7 +10,7 @@ public enum AudioError: Error, CustomStringConvertible {
     }
 }
 
-public struct AudioConverter {
+public struct M4AExporter {
     public init() {}
 
     /// 把任意 AVFoundation 可读音频导出为 m4a (AAC)，返回时长（秒）。

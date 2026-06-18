@@ -7,8 +7,20 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, Diarize.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
     )
+}
+
+/// resound diarize <audio> —— Phase A 冒烟：跑 FluidAudio diarization 看分段
+struct Diarize: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "diarize", abstract: "（冒烟）对音频跑说话人分割，输出分段")
+
+    @Argument(help: "音频文件路径")
+    var audio: String
+
+    func run() async throws {
+        print(try await diarizeSmoke(audio: URL(fileURLWithPath: audio)))
+    }
 }
 
 /// resound normalize --vault <path> —— 对已有转录重做繁→简归一 + 别名纠正

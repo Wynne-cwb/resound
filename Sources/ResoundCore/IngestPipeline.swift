@@ -37,7 +37,7 @@ public struct IngestPipeline {
         // 1. 音频 → m4a（写进 vault）
         let audioOut = dir.appendingPathComponent("audio.m4a")
         log("🎧 导出音频 → audio.m4a …")
-        let duration = try await AudioConverter().exportM4A(from: audioPath, to: audioOut)
+        let duration = try await M4AExporter().exportM4A(from: audioPath, to: audioOut)
         log(String(format: "   时长 %.1fs", duration))
 
         // 2. 转录（词级时间戳）
