@@ -7,8 +7,41 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, IndexCommand.self, Search.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
     )
+}
+
+/// resound ask "<问题>" —— 检索 + LLM 综合，给带引用的答案
+struct Ask: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "问答：检索 + 重排 + LLM 综合，输出带引用的答案")
+
+    @Argument(help: "问题")
+    var query: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Option(name: .long, help: "喂给综合的片段数")
+    var k: Int = 8
+
+    @Option(name: .long, help: "综合模型（默认 .env 的 ANSWER_MODEL=pro）")
+    var answerModel: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let pipeline = IndexPipeline(config: cfg)
+        let hits = try await pipeline.search(query: query, indexPath: indexURL, topK: k, rerank: true)
+        guard !hits.isEmpty else { print("无结果"); return }
+
+        let chat = ChatClient(config: cfg, modelOverride: answerModel ?? cfg.answerModel)
+        let answer = try await Synthesizer(chat: chat).answer(query: query, hits: hits)
+        print(answer)
+        print("\n— 来源 —")
+        for (i, h) in hits.enumerated() {
+            print("[\(i + 1)] \(h.recordingId) @\(Int(h.start))-\(Int(h.end))s")
+        }
+    }
 }
 
 /// resound index --vault <path> —— 从 vault 重建检索索引
