@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode / Swift
+build/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+.swiftpm/
+Package.resolved
+
+# Derived index (NEVER commit — rebuildable from vault)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+index/
+
+# Local config / secrets (API keys, vault paths)
+.env
+*.local
+secrets.*
+
+# Vault working copies (lives in App Support, not in code repo)
+vaults/
