@@ -14,8 +14,14 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CSQLiteVec",
+            cSettings: [.define("SQLITE_CORE")],
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(
             name: "ResoundCore",
             dependencies: [
+                "CSQLiteVec",
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]

@@ -7,8 +7,19 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self]
+        subcommands: [Transcribe.self, Record.self, Doctor.self]
     )
+}
+
+/// resound doctor —— 检查关键依赖（先验证 sqlite-vec）
+struct Doctor: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "自检：sqlite-vec 等关键依赖是否正常"
+    )
+
+    func run() async throws {
+        print(try sqliteVecSmokeTest())
+    }
 }
 
 /// resound transcribe <audio> --vault <path> [...]

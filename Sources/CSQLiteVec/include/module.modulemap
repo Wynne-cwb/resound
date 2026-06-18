@@ -1,0 +1,5 @@
+module CSQLiteVec {
+    umbrella header "csqlitevec.h"
+    link "sqlite3"
+    export *
+}
