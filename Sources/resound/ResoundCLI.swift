@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, Diarize.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, Diarize.self, DiarizeEval.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
     )
 }
 
@@ -18,8 +18,32 @@ struct Diarize: AsyncParsableCommand {
     @Argument(help: "音频文件路径")
     var audio: String
 
+    @Option(name: .long, help: "聚类阈值（越高人越少，默认 0.7）")
+    var threshold: Float = 0.7
+
     func run() async throws {
-        print(try await diarizeSmoke(audio: URL(fileURLWithPath: audio)))
+        print(try await diarizeSmoke(audio: URL(fileURLWithPath: audio), threshold: threshold))
+    }
+}
+
+/// resound diarize-eval <audio> <transcript.txt> —— 用 ground truth 评测 diarization
+struct DiarizeEval: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "diarize-eval", abstract: "用带说话人的转录评测 diarization 准确率")
+
+    @Argument(help: "音频文件")
+    var audio: String
+
+    @Argument(help: "ground-truth 转录（HH:MM:SS 说话人 格式）")
+    var transcript: String
+
+    @Option(name: .long, help: "聚类阈值")
+    var threshold: Float = 0.7
+
+    func run() async throws {
+        print(try await diarizeEval(
+            audio: URL(fileURLWithPath: audio),
+            transcript: URL(fileURLWithPath: transcript),
+            threshold: threshold))
     }
 }
 
