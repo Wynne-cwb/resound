@@ -88,8 +88,11 @@ final class RecordingController: ObservableObject {
                 let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
                     .ingest(audioPath: url, title: nil, source: "meeting", tags: [],
                             model: "large-v3", language: "zh", hints: [], push: false)
+                // 闭环：录完即索引这一条(含说话人标注)，立刻可在问答里搜到
+                try await IndexPipeline(config: cfg).indexRecording(
+                    recDir: out.recordingDir, indexPath: defaultIndexPath())
                 await MainActor.run {
-                    self.toast = "✅ 已转录入库：\(out.id)（记得 resound index 重建索引）"
+                    self.toast = "✅ 已转录+索引：\(out.id) — 现在可在问答里搜到"
                     self.phase = .idle; self.recorder = nil
                 }
             } catch {

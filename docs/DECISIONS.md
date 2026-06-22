@@ -28,6 +28,30 @@
 - 验证:swift build 全过、bundle-app.sh 产出的 .app `codesign --verify` 通过。**GUI 渲染/Chat 实际问答待用户运行(我看不到渲染)**。
 - 待:Chat 实测;录音库页(列表+带说话人转录+播放跳转);设置页(可视化 vault/密钥/说话人);把 record-meeting/watch-meet 接进 UI(菜单栏 + Meet 弹窗);说话人命名 UI。
 
+### App 阶段3-5：录音库页(2026-06-22，编译+打包通过，用户迭代中)
+
+- `VaultBrowser.swift`(ResoundCore 公开):`RecordingSummary` / `listRecordings(vault)` / `loadTranscript` / `renameRecording`(改 recording.yaml title 行) / `deleteRecording`(删目录) / `SpeakerSeg`+`loadDiarization` / `analyzeSpeakers`(冷启动 onlineCluster→匿名「说话人N」→按段标注→缓存 vault `diarization.json`)。
+- Index 加 `chunkPersons(recordingId)`(段级 person)、`deleteRecording(id)`。
+- `LibraryView.swift`:左录音列表 + 右详情(播放条 + 转录)。AVAudioPlayer 播 audio.m4a。
+  - 用户反馈 4 项已做:① 整卡可点(contentShape+onTapGesture,非只文本) ② 右键重命名/删除(alert 确认,删连索引) ③ hover 变手型(`hoverCursor()`=onHover+NSCursor.pointingHand,Theme.swift) ④ 可拖拽进度条(Slider+scrubbing 标志防 timer 抢)+ 转录标 👤说话人(来源:diarization.json>index person;无则「识别说话人」按钮触发 analyzeSpeakers)。
+- 说话人来源优先级:diarization.json(缓存) → index chunk person → 「识别说话人」现算。匿名「说话人N」待命名 UI 改真名+存声纹。
+
+### App 阶段3-4：样式重构 v2(2026-06-22，用户认可方向)
+
+- **方向**(ui-ux-pro-max skill 印证):磨砂玻璃 + 冷蓝点缀(品牌色=waveform蓝+recording红)+ 通透冷调近白底。玻璃拟态要诀:磨砂材质需"可模糊的底"才不发灰 → **背景加极淡蓝色辉光(呼应图标涟漪)治"太闷"**。
+- `Theme.swift`:`accent`冷蓝/`accentGradient`、`AppBackground`(渐变+双辐射辉光,双模式)、`SoftCard`(.ultraThinMaterial+细边+柔光)、`WaveMark`(波形标识)、`hoverCursor()`。
+- 自定义**顶部分段切换器**(磨砂胶囊+matchedGeometry 滑动白药丸)替代系统 TabView tab(用户嫌默认 tab 没设计感)。标签英文:**Ask Resound / Library / Settings**。
+- ChatView:用户气泡蓝渐变+白字+柔光、发送按钮蓝、**输入框实心白底**(.textBackgroundColor,用户嫌磨砂太透)、助手卡片磨砂+波形头像、来源带👤。
+- 双模式:靠系统语义色(.textBackgroundColor/.controlBackgroundColor)+材质自动适配。
+- **坑**:`open build/Resound.app` 若旧实例在跑只切前台不重启 → 改样式看不到,需 `killall Resound` 再 open。
+
+### App 阶段3-3：闭环 — 录完自动索引(2026-06-22)
+
+- IndexPipeline 抽出 `indexOneRecording`(build 与单条共用),新增公开 `indexRecording(recDir:indexPath:)` 只索引一条(chunk→说话人标注→上下文→embed→入库,幂等)。
+- RecordingController.stopAndIngest:ingest 后调 `indexRecording(out.recordingDir)` → 录完即可在问答搜到、带 👤(若已 enroll)。不重嵌全部录音。
+- 验证:`resound index`(走重构后的 indexOneRecording)对 vault 2 条录音(含用户 App 实录的会议)正常入库 26 chunks。**用户实测:问答/Meet弹窗/录音全通过。**
+- 注:用户那条测试录音是在加自动索引前录的,未自动进索引;新版起自动。large-v3 首次 ~13min 编译仍未预热。
+
 ### App 阶段3-2：Meet 检测→弹窗→录音 旗舰功能(2026-06-22，编译+打包通过)
 
 - `MeetingRecorder` 重构出 `startCapture()`/`finishCapture()`(GUI 用开始/停止分离,`record(maxSeconds:)` CLI 便利方法基于其上)。

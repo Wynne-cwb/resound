@@ -1,21 +1,29 @@
 import SwiftUI
 import ResoundCore
 
+enum AppTab: String, CaseIterable, Identifiable {
+    case chat = "Ask Resound", library = "Library", settings = "Settings"
+    var id: String { rawValue }
+}
+
 struct RootView: View {
     @EnvironmentObject var recorder: RecordingController
+    @State private var tab: AppTab = .chat
 
     var body: some View {
-        VStack(spacing: 0) {
-            RecordingBanner()
-            TabView {
-                ChatView()
-                    .tabItem { Label("问答", systemImage: "bubble.left.and.bubble.right") }
-                LibraryView()
-                    .tabItem { Label("录音库", systemImage: "waveform") }
-                SettingsView()
-                    .tabItem { Label("设置", systemImage: "gearshape") }
+        ZStack {
+            AppBackground()
+            VStack(spacing: 0) {
+                RecordingBanner()
+                TopBar(selection: $tab)
+                Group {
+                    switch tab {
+                    case .chat: ChatView()
+                    case .library: LibraryView()
+                    case .settings: SettingsView()
+                    }
+                }
             }
-            .padding(.top, 2)
         }
         .alert("检测到 Google Meet", isPresented: meetDetected) {
             Button("开始录音") { recorder.startRecording() }
@@ -25,15 +33,15 @@ struct RootView: View {
         }
         .overlay(alignment: .bottom) {
             if !recorder.toast.isEmpty {
-                HStack {
+                HStack(spacing: 10) {
                     Text(recorder.toast).font(.callout)
                     Spacer()
                     Button { recorder.toast = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
                 }
-                .padding(10)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                .padding(12)
+                .padding(.vertical, 11).padding(.horizontal, 14)
+                .softCard(corner: 12)
+                .padding(14)
             }
         }
     }
@@ -43,6 +51,40 @@ struct RootView: View {
             get: { if case .meetingDetected = recorder.phase { return true } else { return false } },
             set: { if !$0 { recorder.ignorePrompt() } }
         )
+    }
+}
+
+/// 顶部分段切换器（磨砂胶囊 + 选中白色药丸滑动）。
+struct TopBar: View {
+    @Binding var selection: AppTab
+    @Namespace private var ns
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(AppTab.allCases) { t in
+                let isSel = t == selection
+                Text(t.rawValue)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isSel ? Color.primary : Color.secondary)
+                    .padding(.vertical, 6).padding(.horizontal, 18)
+                    .background {
+                        if isSel {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor))
+                                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+                                .matchedGeometryEffect(id: "sel", in: ns)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { selection = t }
+                    }
+            }
+        }
+        .padding(3)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5))
+        .padding(.top, 8).padding(.bottom, 4)
     }
 }
 
@@ -75,18 +117,6 @@ struct RecordingBanner: View {
     }
 }
 
-/// 录音库（占位：阶段3后续接入录音列表 + 带说话人转录 + 播放跳转）
-struct LibraryView: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "waveform").font(.system(size: 40)).foregroundStyle(.secondary)
-            Text("录音库").font(.title2)
-            Text("待接入：录音列表 / 带说话人标注的转录 / 播放跳转").foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
 /// 设置（占位：显示配置来源是否就绪）
 struct SettingsView: View {
     @State private var status = "检查中…"
@@ -101,6 +131,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear { status = configStatus() }
     }
 

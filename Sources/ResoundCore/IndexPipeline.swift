@@ -33,60 +33,83 @@ public struct IndexPipeline {
 
         var totalChunks = 0
         for recDir in recordings {
-            let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
-            let tURL = recDir.appendingPathComponent("transcript.json")
-            guard let tData = try? Data(contentsOf: tURL),
-                  let transcript = try? JSONDecoder().decode(Transcript.self, from: tData) else {
-                log("  ⚠️ 跳过（无 transcript.json）：\(manifest.id)")
-                continue
-            }
-            let chunks = chunker.chunk(transcript)
-            try index.upsertRecording(id: manifest.id, title: manifest.title,
-                recordedAt: manifest.recordedAt, durationSec: manifest.durationSec,
-                source: manifest.source, language: manifest.language)
-            try index.deleteChunks(recordingId: manifest.id)   // 幂等重建
-
-            // 说话人标注：配置了声纹模型 + index 已有注册声纹时，逐段识别填 person_id（缺一则跳过，不影响检索）
-            var personSpans: [(start: Double, end: Double, name: String)] = []
-            if let spkModel = config.speakerModel {
-                let refs = index.loadSpeakerRefs()
-                let audioURL = recDir.appendingPathComponent(manifest.audioFile)
-                if !refs.isEmpty, FileManager.default.fileExists(atPath: audioURL.path) {
-                    let matcher = SpeakerMatcher(); matcher.setRefs(refs)
-                    let embedder = try SpeakerEmbedder(model: spkModel)
-                    personSpans = try recognizeSpansFromFile(
-                        audio: audioURL,
-                        segments: transcript.segments.map { (start: $0.start, end: $0.end) },
-                        matcher: matcher, embedder: embedder)
-                    let who = Set(personSpans.map { $0.name }).subtracting(["unknown"]).sorted()
-                    log("  🗣 说话人标注：\(who.isEmpty ? "无匹配" : who.joined(separator: "/"))")
-                }
-            }
-
-            var contexts: [Int: String] = [:]
-            if enrichContext {
-                let docText = transcript.segments.map { $0.text }.joined()
-                contexts = try await enrichAll(chunks: chunks, document: docText, index: index,
-                    model: contextModel ?? config.contextModel, log: log)
-            }
-
-            for batch in chunks.chunked(into: 32) {
-                let texts = batch.map { c -> String in
-                    if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
-                    return c.text
-                }
-                let vecs = try await embedder.embedDocuments(texts)
-                for (chunk, vec) in zip(batch, vecs) {
-                    let person = personSpans.isEmpty ? nil : personFor(personSpans, start: chunk.start, end: chunk.end)
-                    try index.insertChunk(recordingId: manifest.id, idx: chunk.index,
-                        text: chunk.text, context: contexts[chunk.index],
-                        start: chunk.start, end: chunk.end, personId: person, embedding: vec)
-                }
-            }
-            totalChunks += chunks.count
-            log("  ✓ \(manifest.id)：\(chunks.count) chunks\(enrichContext ? "（含上下文）" : "")")
+            totalChunks += try await indexOneRecording(
+                recDir: recDir, index: index, embedder: embedder, chunker: chunker,
+                enrichContext: enrichContext, contextModel: contextModel, log: log)
         }
         log("✅ 索引完成：\(recordings.count) 录音 / \(totalChunks) chunks → \(indexPath.path)")
+    }
+
+    /// 只索引单条录音（录完即用：chunk → 说话人标注 → 上下文 → embed → 入库）。幂等。
+    public func indexRecording(recDir: URL, indexPath: URL,
+                               enrichContext: Bool = true, contextModel: String? = nil,
+                               log: (String) -> Void = { print($0) }) async throws {
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        try index.setMeta("embedding_model", config.embeddingModel)
+        try index.setMeta("embedding_dim", String(config.embeddingDim))
+        try index.setMeta("distance", "cosine")
+        let n = try await indexOneRecording(
+            recDir: recDir, index: index, embedder: EmbeddingClient(config: config),
+            chunker: Chunker(), enrichContext: enrichContext, contextModel: contextModel, log: log)
+        log("✅ 已索引：\(recDir.lastPathComponent)（\(n) chunks）")
+    }
+
+    /// 单条录音的索引逻辑（build 与 indexRecording 共用）。返回 chunk 数。
+    private func indexOneRecording(recDir: URL, index: Index, embedder: EmbeddingClient,
+                                   chunker: Chunker, enrichContext: Bool, contextModel: String?,
+                                   log: (String) -> Void) async throws -> Int {
+        let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
+        let tURL = recDir.appendingPathComponent("transcript.json")
+        guard let tData = try? Data(contentsOf: tURL),
+              let transcript = try? JSONDecoder().decode(Transcript.self, from: tData) else {
+            log("  ⚠️ 跳过（无 transcript.json）：\(manifest.id)")
+            return 0
+        }
+        let chunks = chunker.chunk(transcript)
+        try index.upsertRecording(id: manifest.id, title: manifest.title,
+            recordedAt: manifest.recordedAt, durationSec: manifest.durationSec,
+            source: manifest.source, language: manifest.language)
+        try index.deleteChunks(recordingId: manifest.id)   // 幂等重建
+
+        // 说话人标注：配置了声纹模型 + index 已有注册声纹时，逐段识别填 person_id（缺一则跳过，不影响检索）
+        var personSpans: [(start: Double, end: Double, name: String)] = []
+        if let spkModel = config.speakerModel {
+            let refs = index.loadSpeakerRefs()
+            let audioURL = recDir.appendingPathComponent(manifest.audioFile)
+            if !refs.isEmpty, FileManager.default.fileExists(atPath: audioURL.path) {
+                let matcher = SpeakerMatcher(); matcher.setRefs(refs)
+                let spkEmbedder = try SpeakerEmbedder(model: spkModel)
+                personSpans = try recognizeSpansFromFile(
+                    audio: audioURL,
+                    segments: transcript.segments.map { (start: $0.start, end: $0.end) },
+                    matcher: matcher, embedder: spkEmbedder)
+                let who = Set(personSpans.map { $0.name }).subtracting(["unknown"]).sorted()
+                log("  🗣 说话人标注：\(who.isEmpty ? "无匹配" : who.joined(separator: "/"))")
+            }
+        }
+
+        var contexts: [Int: String] = [:]
+        if enrichContext {
+            let docText = transcript.segments.map { $0.text }.joined()
+            contexts = try await enrichAll(chunks: chunks, document: docText, index: index,
+                model: contextModel ?? config.contextModel, log: log)
+        }
+
+        for batch in chunks.chunked(into: 32) {
+            let texts = batch.map { c -> String in
+                if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
+                return c.text
+            }
+            let vecs = try await embedder.embedDocuments(texts)
+            for (chunk, vec) in zip(batch, vecs) {
+                let person = personSpans.isEmpty ? nil : personFor(personSpans, start: chunk.start, end: chunk.end)
+                try index.insertChunk(recordingId: manifest.id, idx: chunk.index,
+                    text: chunk.text, context: contexts[chunk.index],
+                    start: chunk.start, end: chunk.end, personId: person, embedding: vec)
+            }
+        }
+        log("  ✓ \(manifest.id)：\(chunks.count) chunks\(enrichContext ? "（含上下文）" : "")")
+        return chunks.count
     }
 
     // MARK: 就地重打说话人标签（不重嵌入；注册新声纹后调用）

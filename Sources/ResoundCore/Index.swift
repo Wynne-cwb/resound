@@ -221,6 +221,26 @@ public final class Index {
         guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
     }
 
+    /// 某录音的 chunk 时间段 + 说话人（供录音库按段显示 👤；person 可能 nil）。
+    public func chunkPersons(recordingId: String) -> [(start: Double, end: Double, person: String?)] {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select start,end,person_id from chunks where recording_id=? order by start", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, recordingId)
+        var out: [(Double, Double, String?)] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            let p = sqlite3_column_text(st, 2).map { String(cString: $0) }
+            out.append((sqlite3_column_double(st, 0), sqlite3_column_double(st, 1), p))
+        }
+        return out
+    }
+
+    /// 删除某录音的全部索引数据（chunks + recordings 行）。
+    public func deleteRecording(id: String) throws {
+        try deleteChunks(recordingId: id)
+        try exec("delete from recordings where id='\(id.replacingOccurrences(of: "'", with: "''"))'")
+    }
+
     public func allRecordingIds() -> [String] {
         var st: OpaquePointer?
         sqlite3_prepare_v2(db, "select id from recordings", -1, &st, nil)

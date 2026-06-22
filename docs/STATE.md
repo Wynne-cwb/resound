@@ -1,60 +1,40 @@
 # 当前状态 (STATE)
 
-> 这是"现在的快照"。过时就改。细节查 [DECISIONS.md](DECISIONS.md)。
-> 最近更新：2026-06-18
+> "现在的快照"。过时就改。细节查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-06-22
 
 ## 一句话现状
 
-检索/问答 + 说话人识别已打通接入检索(👤)。**App 套壳进行中(SPM 应用+打包脚本)**:SwiftUI App 已编译+打成签名 .app,含 **问答页(接真实 ask)+ 旗舰功能 Meet 检测→弹窗→录音→入库(RecordingController 串起阶段1/2)+ 设置页(配置状态)**;录音库页占位。**⚠️ 全部我只编译/打包验证过,GUI 实际运行待用户测(我看不到渲染)——这是当前最该做的:用户跑一次验证基础再继续堆 UI。**
+CLI 全链路(录音→转录→说话人识别→切块入库→检索问答)已通且验证。**正在做 macOS App 套壳**:SwiftUI 三页(Ask Resound 问答 / Library 录音库 / Settings)+ Meet 检测弹窗录音 + 整套磨砂玻璃样式都已编译打包通过,**用户在迭代视觉与录音库细节**。
 
-## ✅ 已完成（可用）
+## ✅ 已完成且验证（细节见 DECISIONS）
 
-完整 RAG 链路 + CLI：
-```
-transcribe → 繁简归一+glossary 别名纠正 → 切块 → contextual 增强 → embed(8B) → SQLite(FTS5 trigram + sqlite-vec 4096) → RRF → LLM rerank → 带引用问答
-```
-- CLI：`transcribe` / `record` / `normalize` / `index` / `search` / `ask` / `doctor` / `diarize` / `diarize-eval`
-- 真实会议(21.6min)验证过：检索命中相关、`ask` 输出结构化带引用答案。
-- 两个 GitHub repo：App=`Wynne-cwb/resound`(本仓库)，Vault=`Wynne-cwb/wayne-resound`(private)。
+- **检索/问答**:transcribe→繁简归一+glossary→切块→contextual→embed(qwen3-8b)→SQLite(FTS5+sqlite-vec)→RRF→LLM rerank→带引用问答。CLI 全套。
+- **说话人识别**:弃盲聚类,走「ASR段合并≥4s窗→CAM++声纹→注册匹配」。同会议89-92%、跨录音88%、Swift 复现82-85%。接入检索(search/ask 显示👤)。冷启动在线分堆(命名~6次覆盖92%)。sherpa-onnx 静态库(`scripts/build-sherpa-onnx.sh`)。
+- **App**(SPM 应用+`scripts/bundle-app.sh`打签名 .app):
+  - Ask Resound 页(接真实 ask)、Settings 页、Library 录音库(列表+播放条+带👤转录+点句跳播放+重命名/删除+拖拽进度条+识别说话人)
+  - Meet 检测→弹窗→双路录音(麦克风+ScreenCaptureKit对方音)→转录→**自动索引这一条**→可搜
+  - 样式:磨砂玻璃+冷蓝点缀+背景淡蓝辉光+自定义分段切换器,浅深双模式,图标已接
+  - **用户实测过**:问答、Meet弹窗、录音都正常
 
-## ✅ 说话人识别路线已定（Python 实测验证，2026-06-18）
+## 🎯 当前焦点 / 下一步
 
-详见 [DECISIONS.md](DECISIONS.md#说话人识别--决定性结论2026-06-18-python-快验)。要点：
+- **用户正测 Library v2**(4项改进:整卡可点/重命名删除/hover手型/拖拽进度条+说话人标注),等截图反馈迭代。
+- 之后:**说话人命名 UI**(匿名「说话人N」→改真名+存声纹库,闭合"标几次变准");模型预热(large-v3首次~13min);设置可视化;菜单栏常驻。
 
-- **盲聚类失败**(FluidAudio 和 sherpa-onnx 都栽在聚类这步)：GGbond 55%=基线、OS 38.5%。强制 `num_clusters=N` 后两簇仍随机混 → 不是声纹问题，是聚类在真实会议(重叠/短附和/远场)上分不开。
-- **注册匹配成功**：每人标几条最长发言当参考声纹 + 最近邻 → **GGbond 89.4% / OS 92.3%**(CAM++)。参考声纹两两 cosine 0.24~0.66 → 声纹区分力强。**这正是"标几次变准"。**
-- **选定声纹模型：CAM++ `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced`(28MB)** — 准确率打平 ERes2NetV2 但快 5x、区分更干净、中英夹杂专训。
-- **person_id 已在 chunk schema 预留**；`diarize-eval` + `DiarBackend` 抽象已就位。
-- Python 实验环境：`experiments/diar-py/`(gitignored，含 venv+模型+eval.py/enroll_eval.py)。
+## ⚠️ 未提交（用户将 commit 后压缩上下文）
 
-- 落地参数(拒识双门 τ_abs≈0.35/margin、短段处理、注册聚合、增量更新)见 [DECISIONS 工程参数速查](DECISIONS.md#工程参数速查2026-06-18-业界最佳实践调研落-swift-时照此)。业界先例 `whisper-diarization`。
+自 `9b56f42` 之后未提交:闭环自动索引(indexRecording)、整套样式重构(Theme/ChatView/RootView)、Library 页(LibraryView/VaultBrowser/Index chunkPersons+deleteRecording/Config vaultPath)。
 
-### ✅ 已完成并验证(2026-06-18 夜) — 全部 swift build 通过
-- **库**:sherpa-onnx 纯静态库 vendor 到 `Vendor/sherpa-onnx/{lib/libsherpa-onnx.a 14MB + libonnxruntime.a 62MB, include/}`，`scripts/build-sherpa-onnx.sh` 可重建(lib gitignored)。
-- **代码**:`Sources/CSherpaOnnx/`(C target + **相对符号链接 include/sherpa-onnx→Vendor**)、`SherpaSpeaker.swift`(SpeakerEmbedder)、`SpeakerID.swift`(mergeASRSegments / SpeakerMatcher 双门+在线均值守门 / SpeakerStore JSON 持久化 / enrollFromLabeled / recognizeWithStore / speakerIDEval)。链接 flag 已在 Package.swift(`-lsherpa-onnx -lonnxruntime -lc++ -framework Foundation`)。CAM++ dim=192。
-- **CLI**:`speaker-eval`(评测 82.5%/85%复现 Python)、`speaker-enroll`(注册到JSON库,增量累积)、`speaker-recognize`(跨录音识别)。
-- **跨录音闭环冒烟通过**:注册GGbond会议→识别OS会议,Wynne/GGbond 认出、4个陌生人全归 unknown。
+## 📌 运行 / 测试要点
 
-### ✅ 接入检索索引完成并验证(2026-06-22)
-- `speaker_refs` 表(声纹向量存 index)；`speaker-enroll --index` 注册;`speaker-label --vault --index` 就地填 person_id(不重嵌入);`index` build 时若配 SPEAKER_MODEL+有声纹则自动标注;search/ask 显示 👤。
-- 验证:OS会议 25/25 chunk 标注、speaker_refs 6人、search 输出带人名且语义一致。代码零改动首编过。
-- Config 加 `SPEAKER_MODEL`(.env);Index 加 speaker_refs + person_id 进检索;SpeakerID 加 recognizeSpans/personFor/enrollToIndex;IndexPipeline 加 labelExisting。
-
-### 下一步 —— UX 与打磨（核心链路已完整）
-1. **冷启动接入标注流**:`speaker-cluster` 自动分堆已就绪,缺"命名→自动归并到 speaker_refs"的交互闭环(CLI 或等 App UI)。
-2. **数据契约**:把 person 标注写 vault(labels.json,事实源,使 index 可重建);diarization.json / people.yaml schema。现状声纹向量在 index、标注源还没落 vault。
-3. **调参**:开集拒识 τ_abs/margin 在标注集上扫(现默认 0.35/0);chunk 粒度 person 是"该 chunk 多数说话人"(Sara 等少量发言者会被并掉)。
-4. **运维**:加音频到真 vault 前装 git-lfs;App 首启模型预热;SPEAKER_MODEL 需写进 .env(现靠 --model/inline env)。
-
-## 📌 测试数据(ground truth，在 ~/Downloads)
-
-- `2026-06-10 月度 1 on 1 会议 with GGbond.mp3` + `...-transcript.txt`：**2 人**(Wynne+GGbond；转录里的 CR 是误标=GGbond)。1736s。
-- `06-15 ...会签平台OS迁移...mp3` + `...-transcript.txt`：**6 人**(Wynne/GGbond/Carlos/Sierra/ZiYang/Sara)。1296s。已转录入 vault。
-- **Wynne+GGbond 两段都出现** → 跨录音认人基准。
-- transcript 格式：`HH:MM:SS 说话人` 行 + 文本行；diarize-eval 直接吃。
+- App 配置:`.env` 复制到 `~/Library/Application Support/Resound/.env` + 补 `VAULT_PATH`、`SPEAKER_MODEL`(已帮用户写好)。
+- 改完样式必须 `killall Resound` 再 `open build/Resound.app`(旧实例在跑则 open 只切前台)。
+- GUI 渲染我看不到 → 靠用户截图迭代。权限(麦克风/屏幕录制/自动化)需用户授权。
+- 测试数据(ground truth)在 `~/Downloads`:GGbond 2人会议、OS 6人会议(+vault 已有这两条+用户App实录一条)。
+- 实验脚本 `experiments/diar-py/`(venv/模型 gitignored)。
 
 ## 待办/提醒
 
-- 加音频到真 vault 前装 git-lfs(`.gitattributes` 已声明 *.m4a LFS)。
-- app 首启需模型预热(large-v3 首次 Metal 编译 ~13min) + 转录做后台任务(~1.7x 实时)。
-- 待办对比：contextual 的 pro/flash 已比(打平选 flash)；synthesis 的 pro/flash A/B 还没做。
+- 标注落 vault:diarization.json 已做(Library 识别说话人时写);声纹向量在 index。
+- 加音频进真 vault 前装 git-lfs;synthesis pro/flash A/B 未做;拒识阈值 τ 待调。
