@@ -88,6 +88,14 @@ final class LibraryModel: ObservableObject {
     @Published var findOpen = false
     @Published var findQuery = ""
     @Published var replaceText = ""
+    @Published var reindexing = false              // 转录改完后，正在把更正同步进检索索引
+    private var reindexTask: Task<Void, Never>?
+
+    // 文件夹：移动菜单 + 拖拽
+    @Published var moveMenuFor: String?            // 哪条录音打开了「移动到」浮层
+    @Published var dragRecId: String?              // 正在拖拽的录音（拖拽中半透明）
+    @Published var dragOverFolder: String?         // 拖拽悬停到的目标文件夹组
+    private var pendingMoveRecId: String?          // 「新建文件夹…」创建后要落入的录音
 
     // modals
     @Published var renameRec: RenameRecState?
@@ -96,6 +104,7 @@ final class LibraryModel: ObservableObject {
     @Published var importOpen = false
     @Published var importing = false
     @Published var importItems: [ImportItem] = []
+    @Published var pendingImports: [ImportItem] = []   // 已入列、正在后台转写的导入项（显示在录音库顶部）
 
     var selected: RecordingSummary? { recordings.first { $0.id == selectedId } }
     var hasSpeakers: Bool { !speakers.isEmpty }
@@ -129,6 +138,7 @@ final class LibraryModel: ObservableObject {
         selectedId = id
         tab = .summary
         tplMenuOpen = false
+        moveMenuFor = nil; dragRecId = nil
         currentTime = 0; duration = 0
         refreshDetail()
     }
@@ -212,7 +222,8 @@ final class LibraryModel: ObservableObject {
             guard n > 0 else { app?.toast("转录里没有匹配「\(q)」"); return }
             try? Transcript(language: t.language, segments: segs).jsonData().write(to: rec.transcriptURL)
             lines = lines.map { var l = $0; l.text = l.text.replacingOccurrences(of: q, with: r); return l }
-            app?.toast("已替换 \(n) 处（转录）")
+            app?.toast("已替换 \(n) 处（转录）· 正在同步检索…")
+            scheduleReindex(rec)   // 更正后重建该条索引，Ask 才会用到正确文本
         } else {
             guard var s = summaryText else { return }
             let n = s.components(separatedBy: q).count - 1
@@ -222,6 +233,25 @@ final class LibraryModel: ObservableObject {
             try? s.data(using: .utf8)?.write(to: rec.dir.appendingPathComponent("summary.md"))
             try? Index(path: defaultIndexPath(), dim: dim()).setRecordingSummary(id: rec.id, summary: s, template: summaryTemplateId)
             app?.toast("已替换 \(n) 处（摘要）")
+        }
+    }
+
+    /// 转录更正后重建该条录音的检索索引（切块→上下文→embedding，幂等）。
+    /// 防抖 1.5s，连续多次替换合并成一次重建，避免重复嵌入。
+    private func scheduleReindex(_ rec: RecordingSummary) {
+        reindexTask?.cancel()
+        reindexTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.reindexing = true
+            defer { self.reindexing = false }
+            do {
+                let cfg = try Config.load()
+                try await IndexPipeline(config: cfg).indexRecording(recDir: rec.dir, indexPath: defaultIndexPath())
+                app?.toast("检索已同步，Ask 将用更正后的内容")
+            } catch {
+                app?.toast("同步检索失败：\(error.localizedDescription)")
+            }
         }
     }
 
@@ -255,15 +285,21 @@ final class LibraryModel: ObservableObject {
     func isCollapsed(_ key: String) -> Bool { query.isEmpty && collapsed.contains(key) }
     func toggleCollapse(_ key: String) { if collapsed.contains(key) { collapsed.remove(key) } else { collapsed.insert(key) } }
 
-    func openNewFolder() { folderEditor = FolderEditor(folderId: nil, name: "") }
+    func openNewFolder(moveRec: String? = nil) { pendingMoveRecId = moveRec; moveMenuFor = nil; folderEditor = FolderEditor(folderId: nil, name: "") }
     func openRenameFolder(_ id: String) { if let f = folders.first(where: { $0.id == id }) { folderEditor = FolderEditor(folderId: id, name: f.name) } }
+    func openMoveMenu(_ id: String) { moveMenuFor = (moveMenuFor == id) ? nil : id }
+    func closeMoveMenu() { moveMenuFor = nil }
     func saveFolder() {
         guard let e = folderEditor else { return }
         let name = e.name.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { folderEditor = nil; return }
+        guard !name.isEmpty else { folderEditor = nil; pendingMoveRecId = nil; return }
         if let id = e.folderId { folders = folders.map { $0.id == id ? LibraryFolder(id: id, name: name) : $0 } }
-        else { folders.append(LibraryFolder(id: "f\(Int(Date().timeIntervalSince1970 * 1000))", name: name)) }
-        folderEditor = nil; saveOrg()
+        else {
+            let nf = LibraryFolder(id: "f\(Int(Date().timeIntervalSince1970 * 1000))", name: name)
+            folders.append(nf)
+            if let rid = pendingMoveRecId { assign[rid] = nf.id }   // 「新建文件夹…」后把这条移进去
+        }
+        pendingMoveRecId = nil; folderEditor = nil; saveOrg()
         app?.toast("文件夹已保存")
     }
     func confirmDeleteFolder() {
@@ -275,6 +311,7 @@ final class LibraryModel: ObservableObject {
     }
     func move(_ recId: String, to folderId: String?) {
         if let folderId { assign[recId] = folderId } else { assign[recId] = nil }
+        moveMenuFor = nil; dragRecId = nil; dragOverFolder = nil
         saveOrg()
         app?.toast(folderId == nil ? "已移出文件夹" : "已移到「\(folders.first { $0.id == folderId }?.name ?? "")」")
     }
@@ -453,36 +490,41 @@ final class LibraryModel: ObservableObject {
     }
     func removeImport(_ id: UUID) { if !importing { importItems.removeAll { $0.id == id } } }
 
+    /// 导入：立即入列 + 关闭弹窗，转写/索引/摘要全部放后台异步进行（适合批量迁移，不再卡等）。
     func startImport() {
-        guard !importItems.isEmpty, !importing, let vault = vaultURL() else { return }
-        importing = true
+        guard !importItems.isEmpty, let vault = vaultURL() else { return }
+        let queued = importItems.map { ImportItem(url: $0.url, name: $0.name, status: .transcribing) }
+        importItems = []; importOpen = false; importing = false
+        pendingImports.append(contentsOf: queued)
+        app?.toast("已加入 \(queued.count) 个文件，正在后台转写…")
         Task {
             let cfg = try? Config.load()
-            for i in importItems.indices {
-                let item = importItems[i]
+            for p in queued {
                 do {
-                    setImportStatus(item.id, .transcribing)
+                    setPendingStatus(p.id, .transcribing)
                     let out = try await IngestPipeline(vaultRoot: vault)
-                        .ingest(audioPath: item.url, title: nil, source: "import", tags: [],
+                        .ingest(audioPath: p.url, title: nil, source: "import", tags: [],
                                 model: "large-v3", language: "zh", hints: [], push: false)
-                    setImportStatus(item.id, .identifying)
+                    setPendingStatus(p.id, .identifying)
                     if let cfg {
                         let pipeline = IndexPipeline(config: cfg)
                         try await pipeline.indexRecording(recDir: out.recordingDir, indexPath: defaultIndexPath())
                         _ = try? await pipeline.summarizeRecording(recDir: out.recordingDir, indexPath: defaultIndexPath())
                     }
-                    setImportStatus(item.id, .done)
-                } catch { setImportStatus(item.id, .failed) }
+                    pendingImports.removeAll { $0.id == p.id }   // 真录音已生成，移除占位
+                    load()
+                } catch {
+                    setPendingStatus(p.id, .failed)
+                }
             }
-            let n = importItems.filter { $0.status == .done }.count
-            importing = false; importOpen = false; importItems = []
-            load()
-            app?.toast("已导入 \(n) 个录音并完成转写")
+            let failed = pendingImports.filter { $0.status == .failed }.count
+            app?.toast(failed == 0 ? "导入转写完成" : "导入完成，\(failed) 个失败")
         }
     }
-    private func setImportStatus(_ id: UUID, _ s: ImportItem.Status) {
-        if let i = importItems.firstIndex(where: { $0.id == id }) { importItems[i].status = s }
+    private func setPendingStatus(_ id: UUID, _ s: ImportItem.Status) {
+        if let i = pendingImports.firstIndex(where: { $0.id == id }) { pendingImports[i].status = s }
     }
+    func dismissPending(_ id: UUID) { pendingImports.removeAll { $0.id == id } }
 
     // MARK: 播放器
 

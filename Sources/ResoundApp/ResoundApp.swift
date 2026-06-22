@@ -8,6 +8,7 @@ struct ResoundApp: App {
     @StateObject private var recorder = RecordingController()
     @StateObject private var library = LibraryModel()
     @StateObject private var settings = SettingsModel()
+    @StateObject private var chat = ChatVM()
 
     var body: some Scene {
         WindowGroup("Resound", id: "main") {
@@ -16,12 +17,15 @@ struct ResoundApp: App {
                 .environmentObject(recorder)
                 .environmentObject(library)
                 .environmentObject(settings)
+                .environmentObject(chat)
                 .frame(minWidth: 940, minHeight: 620)
                 .preferredColorScheme(app.isDark ? .dark : .light)
                 .onAppear {
                     recorder.app = app
                     library.app = app
                     settings.app = app
+                    chat.app = app
+                    chat.loadHistory()
                     MeetingPanelController.shared.configure(recorder: recorder, app: app)
                     recorder.startWatching()
                 }

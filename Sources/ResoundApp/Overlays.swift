@@ -7,6 +7,7 @@ struct OverlayHost: View {
     @EnvironmentObject var rec: RecordingController
     @EnvironmentObject var library: LibraryModel
     @EnvironmentObject var settings: SettingsModel
+    @EnvironmentObject var chat: ChatVM
     @Environment(\.palette) var pal
 
     var body: some View {
@@ -21,9 +22,39 @@ struct OverlayHost: View {
             importModal
             folderEditorModal
             folderDeleteModal
+            sessionRenameModal
+            sessionDeleteModal
             toast
         }
         .animation(.easeOut(duration: 0.16), value: app.toastText)
+    }
+
+    // MARK: 对话（Ask 历史）
+
+    @ViewBuilder private var sessionRenameModal: some View {
+        if chat.renameSession != nil {
+            ModalScrim(pal: pal, onClose: { chat.renameSession = nil }) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("重命名对话").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
+                    TextField("对话名称", text: Binding(get: { chat.renameSession?.value ?? "" }, set: { chat.renameSession?.value = $0 }))
+                        .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(pal.text)
+                        .padding(.horizontal, 13).frame(height: 40).background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.borderStrong, corner: 10)
+                        .padding(.top, 15).onSubmit { chat.saveRenameSession() }
+                    HStack(spacing: 9) { Spacer(); secondaryBtn("取消") { chat.renameSession = nil }; primaryBtn("保存") { chat.saveRenameSession() } }.padding(.top, 20)
+                }
+                .frame(width: 380)
+            }
+        }
+    }
+
+    @ViewBuilder private var sessionDeleteModal: some View {
+        if chat.confirmDeleteSessionId != nil {
+            ModalScrim(pal: pal, onClose: { chat.confirmDeleteSessionId = nil }) {
+                confirmCard(title: "删除这段对话？",
+                            message: AttributedString("对话记录会被永久删除，相关的录音和转录不受影响。"),
+                            confirm: "删除", onCancel: { chat.confirmDeleteSessionId = nil }, onConfirm: { chat.confirmDeleteSession() })
+            }
+        }
     }
 
     // MARK: 说话人命名

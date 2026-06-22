@@ -19,7 +19,7 @@ struct RootView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(pal.bg)
                 }
-                .overlay(alignment: .topLeading) { sidebarToggle(pal) }
+                .overlay(alignment: .bottomLeading) { sidebarToggle(pal) }
             }
             OverlayHost()
         }
@@ -39,17 +39,17 @@ struct RootView: View {
     /// 折叠按钮：圆形，圆心正好落在侧栏右边框上（跨边框浮动）。
     private func sidebarToggle(_ pal: Palette) -> some View {
         let sidebarWidth: CGFloat = app.sidebarCollapsed ? 64 : 218
-        let d: CGFloat = 24
+        let d: CGFloat = 26
         return Button { app.toggleSidebar() } label: {
             Image(systemName: app.sidebarCollapsed ? "chevron.right" : "chevron.left")
-                .font(.system(size: 10, weight: .bold)).foregroundStyle(pal.text2)
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(pal.text2)
                 .frame(width: d, height: d)
                 .background(pal.elev, in: Circle())
                 .overlay(Circle().strokeBorder(pal.borderStrong, lineWidth: 1))
         }
         .buttonStyle(.plainHit).hoverCursor()
         .help(app.sidebarCollapsed ? "展开侧栏" : "折叠侧栏")
-        .offset(x: sidebarWidth - d / 2, y: 21)   // 圆心：x=侧栏右边框；y 与 Logo 中心齐平
+        .offset(x: sidebarWidth - d / 2, y: -88)   // 圆心 x=侧栏右边框；放在边框下方（footer 卡片之上）
     }
 }
 
@@ -212,19 +212,19 @@ struct Sidebar: View {
         let collapsed = app.sidebarCollapsed
         VStack(alignment: collapsed ? .center : .leading, spacing: 0) {
             if collapsed {
-                BrandIcon(pal: pal, size: 30)
+                BrandIcon(pal: pal, size: 30, bordered: true)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 4).padding(.bottom, 16)
             } else {
                 HStack(spacing: 9) {
-                    BrandIcon(pal: pal, size: 30)
+                    BrandIcon(pal: pal, size: 30, bordered: true)
                     Text("Resound").font(.system(size: 14.5, weight: .bold)).foregroundStyle(pal.text)
                     Spacer()
                 }
                 .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 14)
             }
 
-            VStack(spacing: collapsed ? 4 : 2) {
+            VStack(spacing: collapsed ? 6 : 2) {
                 navRow(.ask, "Ask Resound", "bubble.left")
                 navRow(.library, "Library", "waveform", trailingCount: library.recordings.count)
                 navRow(.settings, "Settings", "slider.horizontal.3", attn: settings.needsAttention)
@@ -258,11 +258,11 @@ struct Sidebar: View {
         let on = app.page == page
         Button { withAnimation(.easeOut(duration: 0.12)) { app.page = page } } label: {
             if app.sidebarCollapsed {
-                Image(systemName: icon).font(.system(size: 15, weight: .medium))
+                Image(systemName: icon).font(.system(size: 17, weight: .medium))
                     .foregroundStyle(on ? .white : pal.text2)
-                    .frame(width: 44, height: 38)
-                    .background(on ? pal.accent : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(alignment: .topTrailing) { if attn { Circle().fill(pal.warn).frame(width: 6, height: 6).offset(x: -5, y: 5) } }
+                    .frame(width: 40, height: 40)
+                    .background(on ? pal.accent : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(alignment: .topTrailing) { if attn { Circle().fill(pal.warn).frame(width: 7, height: 7).offset(x: -5, y: 5) } }
                     .contentShape(Rectangle())
             } else {
                 HStack(spacing: 11) {

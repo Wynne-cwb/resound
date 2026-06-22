@@ -20,7 +20,7 @@ public struct QueryPlanner {
     }
 
     /// 规划。失败一律回退到「无时间过滤的普通问答」，不阻断主流程。
-    public func plan(_ question: String, now: Date = Date()) async -> Plan {
+    public func plan(_ question: String, history: [ChatTurn] = [], now: Date = Date()) async -> Plan {
         let today = localDate(now)
         let weekday = weekdayZh(now)
         let system = """
@@ -31,9 +31,12 @@ public struct QueryPlanner {
           例："昨天"→date_from=date_to=昨天；"上周"→上周一到周日；"这个月"→本月1号到今天；无时间→都为 null。
         - mode：要"汇总/总结/回顾/有哪些会议/都聊了啥"这类**整体概览**→"digest"；问**具体事实/细节**→"qa"。
         - query：去掉时间状语后的核心检索词（如"昨天的1on1聊了什么"→"1on1"）；若纯时间概览可保留原问题。
+        - 若有对话历史，把当前问题里的指代补全进 query（如历史在聊"张三"，问"他还说了啥"→query 写"张三"）。
         """
+        let hist = renderHistory(history)
+        let userMsg = hist.isEmpty ? question : "对话历史：\n\(hist)\n当前问题：\(question)"
         do {
-            let raw = try await chat.complete(system: system, user: question, maxTokens: 300)
+            let raw = try await chat.complete(system: system, user: userMsg, maxTokens: 300)
             return parse(raw, fallback: question)
         } catch {
             return Plan(query: question, dateFrom: nil, dateTo: nil, mode: .qa)

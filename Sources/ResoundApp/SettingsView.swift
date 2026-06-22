@@ -56,7 +56,7 @@ struct SettingsView: View {
                 vocabSection
             }
             .frame(maxWidth: 680, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal, 40).padding(.top, 34).padding(.bottom, 60)
         }
         .onAppear { vm.load() }

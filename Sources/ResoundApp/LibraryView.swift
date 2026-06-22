@@ -8,6 +8,7 @@ struct LibraryView: View {
     @EnvironmentObject var rec: RecordingController
     @Environment(\.palette) var pal
     @State private var hoverId: String?
+    @State private var hoverFolderId: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -54,11 +55,28 @@ struct LibraryView: View {
             ScrollView {
                 LazyVStack(spacing: 2, pinnedViews: []) {
                     if rec.isProcessing { processingRow }
+                    ForEach(vm.pendingImports) { p in importingRow(p) }
                     ForEach(vm.sections()) { sec in
-                        folderHeader(sec)
-                        if !vm.isCollapsed(sec.id) {
-                            ForEach(sec.recordings) { r in recordingRow(r) }
+                        VStack(spacing: 2) {
+                            folderHeader(sec)
+                            if !vm.isCollapsed(sec.id) {
+                                if sec.recordings.isEmpty && vm.query.isEmpty {
+                                    Text("该文件夹暂无录音 · 可拖拽录音到此")
+                                        .font(.system(size: 11.5)).foregroundStyle(pal.text3)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 11).padding(.vertical, 9)
+                                } else {
+                                    ForEach(sec.recordings) { r in recordingRow(r) }
+                                }
+                            }
                         }
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let rid = items.first else { return false }
+                            vm.move(rid, to: sec.folderId); return true
+                        } isTargeted: { over in
+                            vm.dragOverFolder = over ? sec.id : (vm.dragOverFolder == sec.id ? nil : vm.dragOverFolder)
+                        }
+                        .zIndex(vm.moveMenuFor != nil && sec.recordings.contains { $0.id == vm.moveMenuFor } ? 10 : 0)
                     }
                     if vm.sections().allSatisfy({ $0.recordings.isEmpty }) && !vm.query.isEmpty {
                         Text("没有匹配「\(vm.query)」的录音").font(.system(size: 12)).foregroundStyle(pal.text3).padding(.top, 20)
@@ -73,26 +91,48 @@ struct LibraryView: View {
 
     private func folderHeader(_ sec: LibraryModel.Section) -> some View {
         let collapsed = vm.isCollapsed(sec.id)
+        let dragOver = vm.dragOverFolder == sec.id && vm.dragRecId != nil
+        let hovering = hoverFolderId == sec.id
+        let canManage = sec.folderId != nil
         return Button { vm.toggleCollapse(sec.id) } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(pal.text3)
-                    .rotationEffect(.degrees(collapsed ? 0 : 90))
-                Image(systemName: sec.folderId == nil ? "tray" : "folder.fill").font(.system(size: 11)).foregroundStyle(pal.text2)
-                Text(sec.name).font(.system(size: 12, weight: .bold)).foregroundStyle(pal.text2).lineLimit(1)
-                Spacer()
-                Text("\(sec.recordings.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(pal.text3)
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold)).foregroundStyle(pal.text3)
+                    .rotationEffect(.degrees(collapsed ? -90 : 0))
+                Image(systemName: sec.folderId == nil ? "tray" : "folder").font(.system(size: 12)).foregroundStyle(pal.text2)
+                Text(sec.name).font(.system(size: 12.5, weight: .bold)).foregroundStyle(pal.text).lineLimit(1)
+                Spacer(minLength: 4)
+                if canManage && hovering {
+                    HStack(spacing: 1) {
+                        folderAction("pencil") { vm.openRenameFolder(sec.folderId!) }
+                        folderAction("trash", danger: true) { vm.confirmDeleteFolderId = sec.folderId! }
+                    }
+                } else {
+                    Text("\(sec.recordings.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(pal.text3)
+                }
             }
-            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(height: 20)   // 固定行高：hover 出按钮时不撑高，避免列表抖动
+            .padding(.horizontal, 9).padding(.vertical, 6)
+            .background(dragOver ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay { if dragOver { RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.accent) } }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plainHit).hoverCursor()
         .padding(.top, 6)
+        .onHover { hoverFolderId = $0 ? sec.id : (hoverFolderId == sec.id ? nil : hoverFolderId) }
         .contextMenu {
             if let fid = sec.folderId {
                 Button("重命名文件夹") { vm.openRenameFolder(fid) }
                 Button("删除文件夹", role: .destructive) { vm.confirmDeleteFolderId = fid }
             }
         }
+    }
+
+    private func folderAction(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name).font(.system(size: 11, weight: .medium)).foregroundStyle(danger ? pal.rec : pal.text3)
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plainHit).hoverCursor()
     }
 
     @ViewBuilder private func moveMenu(_ r: RecordingSummary) -> some View {
@@ -124,11 +164,34 @@ struct LibraryView: View {
         .padding(.top, 4)
     }
 
+    /// 后台导入中的占位行（转写/识别中显示 spinner；失败可关掉）。
+    private func importingRow(_ p: LibraryModel.ImportItem) -> some View {
+        let failed = p.status == .failed
+        return HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(p.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                Text(failed ? "转写失败" : (p.status == .identifying ? "识别说话人…" : "转写中…"))
+                    .font(.system(size: 11.5)).foregroundStyle(failed ? pal.rec : pal.text2)
+            }
+            Spacer()
+            if failed {
+                Button { vm.dismissPending(p.id) } label: {
+                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(pal.text3).frame(width: 24, height: 24)
+                }.buttonStyle(.plainHit).hoverCursor()
+            } else {
+                Spinner(size: 13, color: pal.accent)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(failed ? pal.recSoft : pal.accentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.top, 4)
+    }
+
     private func recordingRow(_ r: RecordingSummary) -> some View {
         let on = vm.selectedId == r.id
         let identified = FileManager.default.fileExists(atPath: r.dir.appendingPathComponent("diarization.json").path)
-        return Button { vm.select(r.id) } label: {
-            VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 6) {
                 Text(r.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
                 HStack(spacing: 8) {
                     Text(shortDate(r.recordedAt)).font(.system(size: 11.5)).foregroundStyle(pal.text2)
@@ -146,25 +209,73 @@ struct LibraryView: View {
             .padding(.horizontal, 12).padding(.top, 11).padding(.bottom, 12)
             .background(on ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .stroke(on ? pal.accent : .clear, corner: 10)
+            .opacity(vm.dragRecId == r.id ? 0.4 : 1)
             .overlay(alignment: .topTrailing) {
-                if hoverId == r.id {
+                if hoverId == r.id && vm.moveMenuFor != r.id {
                     HStack(spacing: 2) {
+                        iconBtn("folder") { vm.openMoveMenu(r.id) }
                         iconBtn("pencil") { vm.openRenameRec(r.id) }
                         iconBtn("trash", danger: true) { vm.deleteRecId = r.id }
                     }
                     .padding(6)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if vm.moveMenuFor == r.id { movePopover(r) }
+            }
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plainHit).hoverCursor()
-        .onHover { hoverId = $0 ? r.id : (hoverId == r.id ? nil : hoverId) }
+            .background(WindowDragBlocker())   // 否则拖行会被当成「拖窗口」(isMovableByWindowBackground)
+            .onTapGesture { vm.select(r.id) }
+            .hoverCursor()
+            .onHover { hoverId = $0 ? r.id : (hoverId == r.id ? nil : hoverId) }
+            .onDrag { vm.dragRecId = r.id; return NSItemProvider(object: r.id as NSString) }
         .contextMenu {
             moveMenu(r)
             Divider()
             Button("重命名") { vm.openRenameRec(r.id) }
             Button("删除", role: .destructive) { vm.deleteRecId = r.id }
         }
+    }
+
+    /// 「移动到」内联浮层（点行内文件夹图标弹出）。
+    private func movePopover(_ r: RecordingSummary) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("移动到").font(.system(size: 10.5, weight: .semibold)).tracking(0.5).foregroundStyle(pal.text3)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.top, 5).padding(.bottom, 6)
+            ForEach(vm.folders) { f in
+                moveItem(name: f.name, icon: "folder", active: vm.assign[r.id] == f.id) { vm.move(r.id, to: f.id) }
+            }
+            moveItem(name: "未分类", icon: "tray", active: vm.assign[r.id] == nil || !vm.folders.contains { $0.id == vm.assign[r.id] }) { vm.move(r.id, to: nil) }
+            Rectangle().fill(pal.border).frame(height: 1).padding(.vertical, 5)
+            Button { vm.openNewFolder(moveRec: r.id) } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus").font(.system(size: 11, weight: .bold))
+                    Text("新建文件夹…").font(.system(size: 12.5, weight: .semibold))
+                }
+                .foregroundStyle(pal.accent).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plainHit).hoverCursor()
+        }
+        .frame(width: 186)
+        .padding(6)
+        .background(pal.elev, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .stroke(pal.borderStrong, corner: 11)
+        .shadow(color: .black.opacity(0.22), radius: 14, y: 8)
+        .offset(x: -6, y: 36)
+        .onTapGesture { }   // 吞掉点击，避免落到行的选中
+    }
+
+    private func moveItem(name: String, icon: String, active: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(pal.text2)
+                Text(name).font(.system(size: 12.5)).foregroundStyle(pal.text).lineLimit(1)
+                Spacer(minLength: 4)
+                if active { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(pal.accent) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }.buttonStyle(.plainHit).hoverCursor()
     }
 
     private func iconBtn(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
@@ -215,6 +326,9 @@ struct LibraryView: View {
                 Text("全部替换").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 12).frame(height: 30).background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }.buttonStyle(.plainHit).hoverCursor().disabled(vm.findMatchCount == 0)
+            if vm.reindexing {
+                HStack(spacing: 6) { Spinner(size: 12, color: pal.accent); Text("同步检索…").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text2) }
+            }
             Spacer()
             Button { vm.closeFind() } label: {
                 Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text2).frame(width: 28, height: 28)
@@ -241,7 +355,7 @@ struct LibraryView: View {
                     if vm.tab == .summary { summaryTab } else { transcriptTab }
                 }
                 .frame(maxWidth: 780, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 40).padding(.top, 32).padding(.bottom, 60)
             }
             .onChange(of: vm.findQuery) { _, _ in
@@ -594,8 +708,8 @@ extension MarkdownUI.Theme {
                 .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.12)); ForegroundColor(pal.accent) } }
             .heading4 { c in c.label.markdownMargin(top: 12, bottom: 6)
                 .markdownTextStyle { FontWeight(.semibold); FontSize(.em(1.0)); ForegroundColor(pal.accent) } }
-            .paragraph { c in c.label.relativeLineSpacing(.em(0.28)).markdownMargin(top: 0, bottom: 10) }
-            .listItem { c in c.label.markdownMargin(top: .em(0.2)) }
+            .paragraph { c in c.label.relativeLineSpacing(.em(0.45)).markdownMargin(top: 0, bottom: 12) }
+            .listItem { c in c.label.relativeLineSpacing(.em(0.45)).markdownMargin(top: .em(0.4)) }
             .blockquote { c in
                 HStack(spacing: 0) {
                     Rectangle().fill(pal.accent.opacity(0.5)).frame(width: 3)

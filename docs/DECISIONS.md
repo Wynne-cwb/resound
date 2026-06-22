@@ -326,3 +326,31 @@ workflow(7方案) + Kaldi agent 调研排序(契合分)：
 - **现象**：`.buttonStyle(.plain)` 的 Tab/按钮，若 label 背景透明（如未选中的「会议摘要/逐句转录」背景 `.clear`），macOS 上只有不透明文字/图标可点，padding 空白点不动。
 - **根因**：SwiftUI 在 macOS 下 plain button 的命中区取 label 的不透明内容，透明区不计入。
 - **统一对策**：自定义 `PlainHitButtonStyle`（`extension ButtonStyle ... static var plainHit`），`makeBody` 把 `configuration.label` 加 `.contentShape(Rectangle())` + 按下变暗 0.55。全 App 41 处 `.buttonStyle(.plain)` 一次性 sed 换 `.plainHit`。比逐处补 `contentShape` 更彻底，新按钮统一用它。
+
+## Ask 聊天历史 + 多轮上下文（2026-06-22）
+
+- **现状确认**：此前 Ask 每次提问完全独立——`answer()`→`QueryPlanner.plan(question)`/`Synthesizer.answer(query:hits:)` 都只看当前一轮，不带历史；且 ChatVM 是 ChatView 内 `@StateObject`，切页/重启即丢。追问「他还说了啥」无法解析指代。
+- **持久化**：新增 `ChatStore`，对话存 `~/Library/Application Support/Resound/conversations.json`（本地 App 状态，**不进 vault**——vault 数据契约只收音频/转录/标注/人物/笔记，聊天记录是便利日志、非事实源，且非可重建派生物，故独立放 App Support）。模型 `Conversation{id,title,createdAt,updatedAt,messages:[StoredMsg]}`，StoredMsg 连引用/来源一并存，重开可点。
+- **ChatVM 升 App 级**：移到 `ResoundApp` 的 `@StateObject` + environmentObject，切页不丢；新增 conversations/currentId + newChat/open/delete/saveCurrent。每轮提问前存一份（留痕），回答 finalize 后再存一份。title 取首条用户问题截断 30 字。
+- **多轮上下文**：Core 加 `ChatTurn` + `renderHistory`（助手回答截 600 字控 token）。`plan/answer/Synthesizer.answer/digestAnswer` 均加 `history: [ChatTurn] = []`（默认空 → CLI `ask` 不受影响）。规划器用历史补全 query 指代（提升追问检索召回），综合器用历史让答案接上文。ChatVM 取最近 8 条已完成消息为历史。
+- **UI**：Ask 页改双列（仿 Library）：左 240pt 对话列表（新对话按钮/选中高亮/hover 删除/相对时间），右聊天区。
+
+## 转录更正同步进检索（2026-06-22）
+
+- **现象/疑问**：用户在 Library ⌘F 替换错字后，Ask 是否用更正后的数据？
+- **查明**：**摘要**替换会写 `Index.setRecordingSummary` → digest/汇总答案用更正后内容 ✅；**转录**替换只写 vault `transcript.json` + 刷新 UI 行，**不动索引** → qa 检索与引用片段仍是旧错字 ❌（chunk 文本与 embedding 都没更新）。
+- **对策**：转录 `replaceAll` 后调 `scheduleReindex(rec)` —— 防抖 1.5s（连续多次替换合并一次），到点 `IndexPipeline.indexRecording` 幂等重建该条（重切块→上下文(命中缓存只重算变化块)→重 embed），`reindexing` 标志驱动 findBar「同步检索…」spinner + 完成 toast。这样 Ask 的 qa 检索/引用都用更正文本。
+- **取舍**：重建会顺带重跑说话人标注（有声纹库时），比纯改文本重，但只在用户显式改字时触发、单条耗时可接受；防抖避免逐次重嵌入。
+
+## 第二版设计稿还原（2026-06-22）
+
+Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」三块 + 亮色主题色，按新 `Resound.dc.html` 还原：
+
+- **亮色 accent**：`#bd6a2e` → **`#e85f2c`**（accentSoft α0.10）。深色不变 `#e3a35f`。其余 token 与现状一致。
+- **侧栏折叠按钮**：26px 圆形，`top:22 / right:-13`（圆心压在侧栏右边框，比 Logo 中心略低 2px——设计如此）；折叠态导航图标 40×40 r10、icon 17、间距 6。
+- **Library 文件夹**：
+  - 行内「移动到」浮层：行 hover 出 文件夹/改名/删除 三图标，点文件夹图标弹 186pt 浮层（列全部文件夹+未分类+✓当前+「新建文件夹…」）。`moveMenuFor` 控制；行 zIndex 提升避免被下一行盖住。
+  - **拖拽**：行 `.onDrag`(置 `dragRecId`，拖拽中 opacity .4)；每个文件夹组 `.dropDestination(for:String)` 接收 → `move`，`isTargeted` 高亮组头（accentSoft + 虚线 accent）。`dragRecId` 在 move/select 时清，规避取消拖拽残留半透明。
+  - 空文件夹占位「该文件夹暂无录音 · 可拖拽录音到此」；文件夹头 hover 用改名/删除图标替换计数。
+  - 「新建文件夹…」带 `pendingMoveRecId`：建完把该条移入。
+- **Ask 历史**：对话行两行（标题+相对时间 / 首条回答预览 38 字）；hover 出改名/删除；会话**重命名**弹窗 + **删除确认**弹窗（移到 OverlayHost，注入 `ChatVM`）。`Conversation.customTitle` 标记手动改名，`saveCurrent` 不再用首条提问覆盖。列宽 240→236。

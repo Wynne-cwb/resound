@@ -213,17 +213,18 @@ public struct IndexPipeline {
     }
 
     public func answer(question: String, indexPath: URL, topK: Int = 8,
-                       usePlanner: Bool = true, answerModel: String? = nil) async throws -> AnswerResult {
+                       usePlanner: Bool = true, answerModel: String? = nil,
+                       history: [ChatTurn] = []) async throws -> AnswerResult {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         let plan: QueryPlanner.Plan = usePlanner
-            ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel)).plan(question)
+            ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel)).plan(question, history: history)
             : .init(query: question, dateFrom: nil, dateTo: nil, mode: .qa)
 
         // digest：取范围内录音的摘要合并回答（"汇总昨天的会议"）
         if plan.mode == .digest, let range = plan.dateRange {
             let recs = try Index(path: indexPath, dim: config.embeddingDim).recordingsInRange(range)
             if !recs.isEmpty {
-                let text = try await digestAnswer(question: question, recs: recs, chat: chat)
+                let text = try await digestAnswer(question: question, recs: recs, chat: chat, history: history)
                 return AnswerResult(text: text, plan: plan, hits: [], digestRecordings: recs)
             }
         }
@@ -231,11 +232,12 @@ public struct IndexPipeline {
         // qa：（可带日期过滤的）碎片检索 + 综合
         let hits = try await search(query: plan.query, indexPath: indexPath, topK: topK,
                                     rerank: true, dateRange: plan.dateRange)
-        let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits)
+        let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return AnswerResult(text: text, plan: plan, hits: hits, digestRecordings: [])
     }
 
-    private func digestAnswer(question: String, recs: [Index.RecordingRow], chat: ChatClient) async throws -> String {
+    private func digestAnswer(question: String, recs: [Index.RecordingRow], chat: ChatClient,
+                              history: [ChatTurn] = []) async throws -> String {
         var src = ""
         for r in recs {
             let date = String(r.recordedAt.prefix(10))
@@ -245,9 +247,12 @@ public struct IndexPipeline {
         你基于若干场会议的摘要回答用户的汇总类问题。规则：
         - 按时间/会议组织，简洁清楚，用中文。
         - 只用提供的摘要内容，不要臆造；某条没有摘要就注明"该条暂无摘要"。
+        - 如有对话历史，用它理解指代并接着上文说。
         """
+        let hist = renderHistory(history)
+        let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
         return try await chat.complete(system: system,
-            user: "用户问题：\(question)\n\n相关会议摘要：\n\(src)", maxTokens: 3000)
+            user: "\(histBlock)用户问题：\(question)\n\n相关会议摘要：\n\(src)", maxTokens: 3000)
     }
 
     // MARK: contextual 增强（带缓存 + 限并发）

@@ -22,27 +22,36 @@ final class ChatVM: ObservableObject {
     @Published var msgs: [Msg] = []
     @Published var input = ""
     @Published var busy = false
+    @Published var conversations: [Conversation] = []
+    @Published var currentId: UUID?
+    @Published var renameSession: RenameSessionState?
+    @Published var confirmDeleteSessionId: UUID?
     weak var app: AppModel?
 
+    struct RenameSessionState { var id: UUID; var value: String }
+
     private var reveal: Timer?
+    private let store = ChatStore()
 
     func ask(_ question: String) {
         let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !busy else { return }
+        let history = currentHistory()   // 取当前问题之前的对话作上下文
         input = ""
         busy = true
         msgs.append(Msg(isUser: true, full: q))
         var a = Msg(isUser: false); a.phase = .searching
         msgs.append(a)
         let aid = a.id
+        saveCurrent()   // 先存一份（含用户提问），即便回答失败也留痕
 
         Task {
-            defer { busy = false }
+            defer { busy = false; saveCurrent() }
             do {
                 let cfg = try Config.load()
                 let titles = Dictionary(uniqueKeysWithValues: listRecordings(vaultRoot: URL(fileURLWithPath: cfg.vaultPath ?? "")).map { ($0.id, $0.title) })
                 setPhase(aid, .thinking)
-                let r = try await IndexPipeline(config: cfg).answer(question: q, indexPath: defaultIndexPath(), topK: 8)
+                let r = try await IndexPipeline(config: cfg).answer(question: q, indexPath: defaultIndexPath(), topK: 8, history: history)
                 let range = Self.fmtRange(r.plan.dateFrom, r.plan.dateTo)
 
                 if !r.digestRecordings.isEmpty {
@@ -63,6 +72,106 @@ final class ChatVM: ObservableObject {
                 patch(aid) { $0.full = "出错：\(error)"; $0.phase = .done; $0.revealed = 9999 }
             }
         }
+    }
+
+    // MARK: 对话历史（持久化 + 列表 + 多轮上下文）
+
+    /// 把当前已完成的对话转成喂给 LLM 的上下文（取最近 8 条）。
+    private func currentHistory() -> [ChatTurn] {
+        msgs.suffix(8).compactMap { m in
+            switch m.phase {
+            case .searching, .thinking: return nil
+            case .empty, .emptyTime: return m.isUser ? ChatTurn(isUser: true, text: m.full) : ChatTurn(isUser: false, text: "（无相关内容）")
+            default: return m.full.isEmpty ? nil : ChatTurn(isUser: m.isUser, text: m.full)
+            }
+        }
+    }
+
+    func loadHistory() { conversations = store.load() }
+
+    func newChat() {
+        reveal?.invalidate()
+        msgs = []; currentId = nil; input = ""
+    }
+
+    func open(_ conv: Conversation) {
+        guard !busy, conv.id != currentId else { return }
+        reveal?.invalidate()
+        currentId = conv.id
+        msgs = conv.messages.map { sm in
+            var m = Msg(isUser: sm.isUser, full: sm.text)
+            m.revealed = sm.text.count   // 历史消息直接全显，不做打字机
+            m.phase = .done
+            m.timeRange = sm.timeRange
+            m.isDigest = sm.isDigest
+            m.cites = sm.cites.map { Cite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t) }
+            m.sources = sm.sources.map { Source(title: $0.title, date: $0.date, recId: $0.recId) }
+            return m
+        }
+    }
+
+    func deleteConversation(_ id: UUID) {
+        conversations.removeAll { $0.id == id }
+        store.save(conversations)
+        if currentId == id { newChat() }
+    }
+
+    func openRenameSession(_ id: UUID) {
+        renameSession = RenameSessionState(id: id, value: conversations.first { $0.id == id }?.title ?? "")
+    }
+    func saveRenameSession() {
+        guard let r = renameSession else { return }
+        let name = r.value.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty, let i = conversations.firstIndex(where: { $0.id == r.id }) {
+            conversations[i].title = name
+            conversations[i].customTitle = true
+            store.save(conversations)
+        }
+        renameSession = nil
+    }
+    func confirmDeleteSession() {
+        if let id = confirmDeleteSessionId { deleteConversation(id) }
+        confirmDeleteSessionId = nil
+    }
+
+    /// 把当前 msgs 落盘成一条对话（按 currentId 更新或新建），并刷新列表。
+    private func saveCurrent() {
+        let stored = msgs.compactMap { storedMsg(from: $0) }
+        guard !stored.isEmpty else { return }
+        let now = Date()
+        let title = Self.titleFrom(msgs.first { $0.isUser }?.full ?? "新对话")
+        let id = currentId ?? UUID()
+        currentId = id
+        var conv: Conversation
+        if let idx = conversations.firstIndex(where: { $0.id == id }) {
+            conv = conversations[idx]
+            conv.messages = stored; conv.updatedAt = now
+            if conv.customTitle != true { conv.title = title }   // 重命名过的不被自动覆盖
+            conversations.remove(at: idx)
+        } else {
+            conv = Conversation(id: id, title: title, createdAt: now, updatedAt: now, messages: stored, customTitle: false)
+        }
+        conversations.insert(conv, at: 0)   // 最近的排最前
+        store.save(conversations)
+    }
+
+    private func storedMsg(from m: Msg) -> StoredMsg? {
+        let text: String
+        switch m.phase {
+        case .searching, .thinking: return nil   // 进行中不存
+        case .empty: text = "（未找到相关片段）"
+        case .emptyTime: text = "（这段时间没有录音）"
+        default: text = m.full
+        }
+        guard m.isUser || !text.isEmpty else { return nil }
+        return StoredMsg(isUser: m.isUser, text: text, timeRange: m.timeRange, isDigest: m.isDigest,
+                         cites: m.cites.map { StoredCite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t) },
+                         sources: m.sources.map { StoredSource(title: $0.title, date: $0.date, recId: $0.recId) })
+    }
+
+    private static func titleFrom(_ s: String) -> String {
+        let one = s.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        return one.count > 30 ? String(one.prefix(30)) + "…" : (one.isEmpty ? "新对话" : one)
     }
 
     private func startReveal(_ id: UUID) {
@@ -95,11 +204,22 @@ final class ChatVM: ObservableObject {
 struct ChatView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var library: LibraryModel
+    @EnvironmentObject var vm: ChatVM
     @Environment(\.palette) var pal
-    @StateObject private var vm = ChatVM()
     @FocusState private var focused: Bool
+    @State private var hoverConvId: UUID?
+    @State private var expandedCites: Set<UUID> = []   // 引用默认折叠，点「来源」展开
 
     var body: some View {
+        HStack(spacing: 0) {
+            historyColumn
+            Rectangle().fill(pal.border).frame(width: 1)
+            chatArea
+        }
+        .onAppear { vm.app = app; vm.loadHistory() }
+    }
+
+    private var chatArea: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -117,7 +237,80 @@ struct ChatView: View {
             }
             inputBar
         }
-        .onAppear { vm.app = app }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(pal.bg)
+    }
+
+    // MARK: 对话历史列
+
+    private var historyColumn: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("对话").font(.system(size: 17, weight: .bold)).foregroundStyle(pal.text)
+                Spacer()
+                Button { vm.newChat() } label: {
+                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(pal.text).frame(width: 30, height: 30).card(pal, corner: 8)
+                }.buttonStyle(.plainHit).hoverCursor().help("新对话")
+            }
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 10)
+
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(vm.conversations) { c in conversationRow(c) }
+                    if vm.conversations.isEmpty {
+                        VStack(spacing: 11) {
+                            Image(systemName: "bubble.left").font(.system(size: 24, weight: .light)).foregroundStyle(pal.text3)
+                            Text("还没有任何对话。\n提个问题，这里就会留下记录。")
+                                .font(.system(size: 12.5)).foregroundStyle(pal.text2).multilineTextAlignment(.center).lineSpacing(3)
+                        }
+                        .frame(maxWidth: .infinity).padding(.top, 40)
+                    }
+                }
+                .padding(.horizontal, 10).padding(.bottom, 12)
+            }
+        }
+        .frame(width: 236)
+        .background(pal.sidebar)
+    }
+
+    private func conversationRow(_ c: Conversation) -> some View {
+        let on = vm.currentId == c.id
+        return Button { vm.open(c) } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Text(c.title).font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(relTime(c.updatedAt)).font(.system(size: 10.5)).foregroundStyle(pal.text3).fixedSize()
+                }
+                Text(c.preview).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 11).padding(.vertical, 10)
+            .background(on ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .stroke(on ? pal.accent : .clear, corner: 9)
+            .overlay(alignment: .topTrailing) {
+                if hoverConvId == c.id {
+                    HStack(spacing: 1) {
+                        convAction("pencil") { vm.openRenameSession(c.id) }
+                        convAction("trash", danger: true) { vm.confirmDeleteSessionId = c.id }
+                    }
+                    .background(pal.sidebar, in: RoundedRectangle(cornerRadius: 7))
+                    .padding(6)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+        .onHover { hoverConvId = $0 ? c.id : (hoverConvId == c.id ? nil : hoverConvId) }
+    }
+
+    private func convAction(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name).font(.system(size: 11, weight: .medium)).foregroundStyle(danger ? pal.rec : pal.text2)
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plainHit).hoverCursor()
     }
 
     // MARK: 空状态
@@ -175,14 +368,16 @@ struct ChatView: View {
                             .padding(.horizontal, 16).padding(.vertical, 14)
                             .background(pal.inset, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.borderStrong))
-                    case .answering, .done:
-                        Text(String(m.full.prefix(m.revealed)) + (m.phase == .answering ? "▍" : ""))
+                    case .answering:
+                        // 打字机阶段：纯文本 + 光标（逐字渲染 Markdown 会因半截语法闪烁）
+                        Text(String(m.full.prefix(m.revealed)) + "▍")
                             .font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(4)
                             .textSelection(.enabled)
-                        if m.phase == .done {
-                            if m.isDigest, !m.sources.isEmpty { sourcesView(m.sources) }
-                            else if !m.cites.isEmpty { citesView(m.cites) }
-                        }
+                    case .done:
+                        // 完成后整段走 Markdown 富文本（与 Library 摘要一致）
+                        SummaryMarkdown(text: m.full, pal: pal)
+                        if m.isDigest, !m.sources.isEmpty { sourcesView(m.sources, id: m.id) }
+                        else if !m.cites.isEmpty { citesView(m.cites, id: m.id) }
                     }
                 }
                 Spacer(minLength: 40)
@@ -190,55 +385,73 @@ struct ChatView: View {
         }
     }
 
-    private func citesView(_ cites: [ChatVM.Cite]) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("来源 · \(cites.count)").font(.system(size: 11, weight: .semibold)).tracking(0.7).foregroundStyle(pal.text3)
-            ForEach(cites) { c in
-                Button { library.openCitation(recId: c.recId, time: c.t); app.page = .library } label: {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 8) {
-                            Text(c.speaker).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.accent)
-                            Text("·").foregroundStyle(pal.text3)
-                            Text(c.meeting).font(.system(size: 12)).foregroundStyle(pal.text2).lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(c.time).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
-                                .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(pal.inset, in: RoundedRectangle(cornerRadius: 5))
-                        }
-                        Text("“\(c.snippet)”").font(.system(size: 13)).italic().foregroundStyle(pal.text).lineSpacing(2).lineLimit(3)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 13).padding(.vertical, 11)
-                    .card(pal, corner: 11)
-                }
-                .buttonStyle(.plainHit).hoverCursor()
+    /// 折叠/展开来源的标题行。
+    private func citeHeader(_ label: String, id: UUID) -> some View {
+        let expanded = expandedCites.contains(id)
+        return Button {
+            withAnimation(.easeOut(duration: 0.14)) {
+                if expanded { expandedCites.remove(id) } else { expandedCites.insert(id) }
             }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(pal.text3).rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(label).font(.system(size: 10.5, weight: .semibold)).tracking(0.6).foregroundStyle(pal.text3)
+            }
+            .contentShape(Rectangle())
         }
-        .padding(.top, 16)
+        .buttonStyle(.plainHit).hoverCursor()
     }
 
-    private func sourcesView(_ sources: [ChatVM.Source]) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("来源 · \(sources.count) 场会议").font(.system(size: 11, weight: .semibold)).tracking(0.7).foregroundStyle(pal.text3)
-            ForEach(sources) { s in
-                Button { library.openCitation(recId: s.recId, time: 0); app.page = .library } label: {
-                    HStack(spacing: 11) {
-                        ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.accentSoft)
-                            WaveMark(pal: pal, height: 12) }.frame(width: 30, height: 30)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(s.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
-                            Text(s.date).font(.system(size: 11.5)).foregroundStyle(pal.text2)
+    private func citesView(_ cites: [ChatVM.Cite], id: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            citeHeader("来源 · \(cites.count)", id: id)
+            if expandedCites.contains(id) {
+            ForEach(cites) { c in
+                Button { library.openCitation(recId: c.recId, time: c.t); app.page = .library } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 7) {
+                            Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
+                            Text("·").foregroundStyle(pal.text3)
+                            Text(c.meeting).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text(c.time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
                         }
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text3)
+                        Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
                     }
-                    .padding(.horizontal, 13).padding(.vertical, 11)
-                    .card(pal, corner: 11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 11).padding(.vertical, 8)
+                    .card(pal, corner: 9)
                 }
                 .buttonStyle(.plainHit).hoverCursor()
             }
+            }
         }
-        .padding(.top, 16)
+        .padding(.top, 12)
+    }
+
+    private func sourcesView(_ sources: [ChatVM.Source], id: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            citeHeader("来源 · \(sources.count) 场会议", id: id)
+            if expandedCites.contains(id) {
+            ForEach(sources) { s in
+                Button { library.openCitation(recId: s.recId, time: 0); app.page = .library } label: {
+                    HStack(spacing: 9) {
+                        ZStack { RoundedRectangle(cornerRadius: 7, style: .continuous).fill(pal.accentSoft)
+                            WaveMark(pal: pal, height: 10) }.frame(width: 24, height: 24)
+                        Text(s.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                        Text(s.date).font(.system(size: 11)).foregroundStyle(pal.text3).fixedSize()
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text3)
+                    }
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .card(pal, corner: 9)
+                }
+                .buttonStyle(.plainHit).hoverCursor()
+            }
+            }
+        }
+        .padding(.top, 12)
     }
 
     // MARK: 输入
@@ -269,4 +482,14 @@ struct ChatView: View {
     }
 
     private var canSend: Bool { !vm.busy && !vm.input.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// 对话列表的相对时间：今天 HH:mm / 昨天 / M月d日。
+    private func relTime(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) {
+            let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+        }
+        if cal.isDateInYesterday(d) { return "昨天" }
+        let f = DateFormatter(); f.dateFormat = "M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+    }
 }

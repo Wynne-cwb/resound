@@ -5,7 +5,7 @@ public struct Synthesizer {
     let chat: ChatClient
     public init(chat: ChatClient) { self.chat = chat }
 
-    public func answer(query: String, hits: [SearchHit]) async throws -> String {
+    public func answer(query: String, hits: [SearchHit], history: [ChatTurn] = []) async throws -> String {
         guard !hits.isEmpty else { return "没有检索到相关内容。" }
         var src = ""
         for (i, h) in hits.enumerated() {
@@ -18,9 +18,12 @@ public struct Synthesizer {
         - 只用片段中的信息，不要臆造；信息不足就直说"片段中没有足够信息"。
         - 片段标注了日期，回答涉及时间时按日期组织。
         - 在引用处用 [编号] 标注来源。
+        - 如有对话历史，用它理解指代（他/这个/那件事）并接着上文说，但答案内容只基于片段。
         - 用中文，简洁、条理清楚。
         """
-        let user = "问题：\(query)\n\n检索到的片段：\n\(src)\n请基于以上片段回答，并用 [编号] 标注引用。"
+        let hist = renderHistory(history)
+        let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n"
+        let user = "\(histBlock)当前问题：\(query)\n\n检索到的片段：\n\(src)\n请基于以上片段回答，并用 [编号] 标注引用。"
         return try await chat.complete(system: system, user: user, maxTokens: 3000)
     }
 }

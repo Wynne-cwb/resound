@@ -48,7 +48,7 @@ struct Palette {
                 elev: Color(hex: 0xffffff), inset: Color(hex: 0xf3f3f0),
                 text: Color(hex: 0x1d1d1f), text2: Color(hex: 0x6b6b72), text3: Color(hex: 0x9c9ca3),
                 border: Color(hex: 0x000000, alpha: 0.075), borderStrong: Color(hex: 0x000000, alpha: 0.13),
-                accent: Color(hex: 0xbd6a2e), accentSoft: Color(hex: 0xbd6a2e, alpha: 0.10),
+                accent: Color(hex: 0xe85f2c), accentSoft: Color(hex: 0xe85f2c, alpha: 0.10),
                 rec: Color(hex: 0xdd4b35), recSoft: Color(hex: 0xdd4b35, alpha: 0.10),
                 ok: Color(hex: 0x2e9e6b), warn: Color(hex: 0xbf8a1e),
                 warnSoft: Color(hex: 0xbf8a1e, alpha: 0.10), warnBorder: Color(hex: 0xbf8a1e, alpha: 0.25),
@@ -116,6 +116,7 @@ extension ButtonStyle where Self == PlainHitButtonStyle {
 struct BrandIcon: View {
     var pal: Palette
     var size: CGFloat
+    var bordered: Bool = false   // 侧栏上图标偏浅、与底色接近时加描边
 
     private static let image: NSImage? = {
         if let url = Bundle.main.resourceURL?.appendingPathComponent("AppIcon.png"),
@@ -126,10 +127,21 @@ struct BrandIcon: View {
     }()
 
     var body: some View {
-        if let img = Self.image {
-            Image(nsImage: img).resizable().interpolation(.high).frame(width: size, height: size)
-        } else {
-            SidebarLogo(pal: pal, size: size)
+        Group {
+            if let img = Self.image {
+                Image(nsImage: img).resizable().interpolation(.high)
+            } else {
+                SidebarLogo(pal: pal, size: size)
+            }
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            if bordered {
+                // 贴合图标圆角方形（squircle 约占帧 84%、四边留白 ~8%）描一圈细边
+                RoundedRectangle(cornerRadius: size * 0.185, style: .continuous)
+                    .inset(by: size * 0.078)
+                    .strokeBorder(pal.border, lineWidth: 0.75)
+            }
         }
     }
 }
