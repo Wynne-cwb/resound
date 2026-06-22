@@ -95,6 +95,7 @@ public struct IndexPipeline {
                 model: contextModel ?? config.contextModel, log: log)
         }
 
+        let recDate = localDate(fromISO: manifest.recordedAt)
         for batch in chunks.chunked(into: 32) {
             let texts = batch.map { c -> String in
                 if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
@@ -105,7 +106,8 @@ public struct IndexPipeline {
                 let person = personSpans.isEmpty ? nil : personFor(personSpans, start: chunk.start, end: chunk.end)
                 try index.insertChunk(recordingId: manifest.id, idx: chunk.index,
                     text: chunk.text, context: contexts[chunk.index],
-                    start: chunk.start, end: chunk.end, personId: person, embedding: vec)
+                    start: chunk.start, end: chunk.end, personId: person,
+                    recordingDate: recDate, embedding: vec)
             }
         }
         log("  ✓ \(manifest.id)：\(chunks.count) chunks\(enrichContext ? "（含上下文）" : "")")
@@ -158,16 +160,94 @@ public struct IndexPipeline {
 
     public func search(query: String, indexPath: URL, topK: Int = 5, pool: Int = 40,
                        rerank: Bool = false, rerankModel: String? = nil,
-                       rerankCandidates: Int = 15) async throws -> [SearchHit] {
+                       rerankCandidates: Int = 15,
+                       dateRange: Index.DateRange? = nil) async throws -> [SearchHit] {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         let qvec = try await EmbeddingClient(config: config).embedQuery(query)
-        let vHits = try index.vectorSearch(qvec, k: pool)
-        let fHits = try index.ftsSearch(query, k: pool)
+        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange)
+        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange)
         let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
         guard rerank else { return Array(fused.prefix(topK)) }
 
         let chat = ChatClient(config: config, modelOverride: rerankModel ?? config.rerankModel)
         return try await Reranker(chat: chat).rerank(query: query, candidates: fused, topK: topK)
+    }
+
+    // MARK: 摘要
+
+    /// 为单条录音生成 AI 摘要：读转录+说话人+录音时间 → 模板 → 写 summary.md +（可选）入索引。
+    @discardableResult
+    public func summarizeRecording(recDir: URL, indexPath: URL? = nil, templateId: String? = nil,
+                                   log: (String) -> Void = { print($0) }) async throws -> String {
+        let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
+        guard let t = loadTranscript(recDir.appendingPathComponent("transcript.json")) else {
+            throw ConfigError.missing("transcript.json")
+        }
+        let transcriptText = t.segments.map { $0.text }.joined(separator: "\n")
+        var speakers: [String] = []
+        if let diar = loadDiarization(recDir) {
+            speakers = Array(Set(diar.map { $0.speaker })).filter { $0 != "?" }.sorted()
+        }
+        let tmpl = SummaryTemplateStore.template(id: templateId)
+        log("📝 生成摘要（模板：\(tmpl.name)）…")
+        let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel))
+            .summarize(transcript: transcriptText,
+                       meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers),
+                       template: tmpl)
+        try summary.data(using: .utf8)?.write(to: recDir.appendingPathComponent("summary.md"))
+        if let indexPath {
+            let idx = try Index(path: indexPath, dim: config.embeddingDim)
+            try idx.setRecordingSummary(id: manifest.id, summary: summary, template: tmpl.id)
+        }
+        log("   ✓ summary.md")
+        return summary
+    }
+
+    // MARK: 问答编排（查询规划 → digest / qa）
+
+    public struct AnswerResult {
+        public let text: String
+        public let plan: QueryPlanner.Plan
+        public let hits: [SearchHit]                       // qa 模式引用
+        public let digestRecordings: [Index.RecordingRow]  // digest 模式涉及的录音
+    }
+
+    public func answer(question: String, indexPath: URL, topK: Int = 8,
+                       usePlanner: Bool = true, answerModel: String? = nil) async throws -> AnswerResult {
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let plan: QueryPlanner.Plan = usePlanner
+            ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel)).plan(question)
+            : .init(query: question, dateFrom: nil, dateTo: nil, mode: .qa)
+
+        // digest：取范围内录音的摘要合并回答（"汇总昨天的会议"）
+        if plan.mode == .digest, let range = plan.dateRange {
+            let recs = try Index(path: indexPath, dim: config.embeddingDim).recordingsInRange(range)
+            if !recs.isEmpty {
+                let text = try await digestAnswer(question: question, recs: recs, chat: chat)
+                return AnswerResult(text: text, plan: plan, hits: [], digestRecordings: recs)
+            }
+        }
+
+        // qa：（可带日期过滤的）碎片检索 + 综合
+        let hits = try await search(query: plan.query, indexPath: indexPath, topK: topK,
+                                    rerank: true, dateRange: plan.dateRange)
+        let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits)
+        return AnswerResult(text: text, plan: plan, hits: hits, digestRecordings: [])
+    }
+
+    private func digestAnswer(question: String, recs: [Index.RecordingRow], chat: ChatClient) async throws -> String {
+        var src = ""
+        for r in recs {
+            let date = String(r.recordedAt.prefix(10))
+            src += "## \(date) · \(r.title)（\(r.id)）\n\(r.summary ?? "（该条暂无摘要）")\n\n"
+        }
+        let system = """
+        你基于若干场会议的摘要回答用户的汇总类问题。规则：
+        - 按时间/会议组织，简洁清楚，用中文。
+        - 只用提供的摘要内容，不要臆造；某条没有摘要就注明"该条暂无摘要"。
+        """
+        return try await chat.complete(system: system,
+            user: "用户问题：\(question)\n\n相关会议摘要：\n\(src)", maxTokens: 3000)
     }
 
     // MARK: contextual 增强（带缓存 + 限并发）

@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
     )
 }
 
@@ -248,21 +248,78 @@ struct Ask: AsyncParsableCommand {
     @Option(name: .long, help: "综合模型（默认 .env 的 ANSWER_MODEL=pro）")
     var answerModel: String?
 
+    @Flag(name: .long, inversion: .prefixedNo, help: "查询规划：抽时间范围+判定汇总/问答（默认开，--no-plan 关）")
+    var plan = true
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let result = try await IndexPipeline(config: cfg).answer(
+            question: query, indexPath: indexURL, topK: k, usePlanner: plan, answerModel: answerModel)
+
+        if let r = result.plan.dateRange {
+            print("🗓 时间范围：\(r.from) ~ \(r.to)　模式：\(result.plan.mode.rawValue)\n")
+        }
+        print(result.text)
+
+        if result.plan.mode == .digest, !result.digestRecordings.isEmpty {
+            print("\n— 涉及录音 —")
+            for r in result.digestRecordings {
+                print("· \(String(r.recordedAt.prefix(10))) \(r.title)（\(r.id)）\(r.summary == nil ? " ⚠️无摘要" : "")")
+            }
+        } else if !result.hits.isEmpty {
+            print("\n— 来源 —")
+            for (i, h) in result.hits.enumerated() {
+                let who = h.personId.map { " 👤\($0)" } ?? ""
+                let date = h.recordingDate.map { "\($0) " } ?? ""
+                print("[\(i + 1)] \(date)\(h.recordingId) @\(Int(h.start))-\(Int(h.end))s\(who)")
+            }
+        }
+    }
+}
+
+/// resound summarize —— 为录音生成 AI 摘要（模板可选）
+struct Summarize: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "summarize",
+        abstract: "为录音生成 AI 摘要：写 summary.md + 入索引（模板见 summary-templates.json）")
+
+    @Option(name: .long, help: "单条录音目录（含 recording.yaml）；与 --vault 二选一")
+    var rec: String?
+
+    @Option(name: .long, help: "vault 根目录：对全部录音批量摘要")
+    var vault: String?
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Option(name: .long, help: "模板 id（general/one-on-one/team-meeting/brainstorm…默认 general）")
+    var template: String?
+
+    @Flag(name: .long, help: "已有 summary.md 也重做")
+    var force = false
+
     func run() async throws {
         let cfg = try Config.load()
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         let pipeline = IndexPipeline(config: cfg)
-        let hits = try await pipeline.search(query: query, indexPath: indexURL, topK: k, rerank: true)
-        guard !hits.isEmpty else { print("无结果"); return }
 
-        let chat = ChatClient(config: cfg, modelOverride: answerModel ?? cfg.answerModel)
-        let answer = try await Synthesizer(chat: chat).answer(query: query, hits: hits)
-        print(answer)
-        print("\n— 来源 —")
-        for (i, h) in hits.enumerated() {
-            let who = h.personId.map { " 👤\($0)" } ?? ""
-            print("[\(i + 1)] \(h.recordingId) @\(Int(h.start))-\(Int(h.end))s\(who)")
+        var dirs: [URL] = []
+        if let rec { dirs = [URL(fileURLWithPath: rec)] }
+        else if let vault { dirs = listRecordings(vaultRoot: URL(fileURLWithPath: vault)).map { $0.dir } }
+        else { print("需 --rec <目录> 或 --vault <根目录>"); return }
+
+        print("📋 模板：\(SummaryTemplateStore.template(id: template).name)　共 \(dirs.count) 条")
+        for dir in dirs {
+            if !force, FileManager.default.fileExists(atPath: dir.appendingPathComponent("summary.md").path) {
+                print("  ⏭ 已有摘要，跳过：\(dir.lastPathComponent)（--force 重做）"); continue
+            }
+            do {
+                _ = try await pipeline.summarizeRecording(recDir: dir, indexPath: indexURL, templateId: template)
+            } catch {
+                print("  ⚠️ 失败：\(dir.lastPathComponent) — \(error)")
+            }
         }
+        print("✅ 摘要完成")
     }
 }
 
@@ -407,8 +464,8 @@ struct WatchMeet: AsyncParsableCommand {
         let task = Task {
             await watcher.watch(intervalSec: interval, requireMic: requireMic) { ev in
                 switch ev {
-                case .started(let url, let mic):
-                    print("\n🔔 检测到 Google Meet：\(url)  麦克风：\(mic ? "占用中" : "空闲")")
+                case .started(let url, let title, let mic):
+                    print("\n🔔 检测到 Google Meet：\(url)  会议名：\(title ?? "(未知)")  麦克风：\(mic ? "占用中" : "空闲")")
                     print("   → App 里这里会弹窗：「检测到会议，开始录音?」")
                 case .ended:
                     print("\n—— 会议结束")

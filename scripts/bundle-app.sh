@@ -59,7 +59,8 @@ if [ -f "$ICON_SRC" ]; then
     done
     iconutil -c icns "$TMP_ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
     rm -rf "$(dirname "$TMP_ICONSET")"
-    echo "  🎨 已生成 AppIcon.icns"
+    cp "$ICON_SRC" "$APP/Contents/Resources/AppIcon.png"   # 应用内 BrandIcon 直接读这张
+    echo "  🎨 已生成 AppIcon.icns + AppIcon.png"
 else
     echo "  ⚠️ 无 assets/AppIcon.png，跳过图标"
 fi

@@ -20,6 +20,7 @@ public struct SearchHit {
     public let end: Double
     public let score: Double   // 该路的分数（向量=距离；FTS=rank）
     public let personId: String?   // 说话人（声纹识别填；nil=未标注/unknown）
+    public let recordingDate: String?   // 录音本地日期 yyyy-MM-dd（时间检索/引用用）
 }
 
 /// 派生索引：SQLite + FTS5(trigram) + sqlite-vec。向量存前 L2 归一化（L2 排序≈cosine）。
@@ -66,6 +67,22 @@ public final class Index {
         create table if not exists enrichment_cache(hash text primary key, context text, model text);
         create table if not exists speaker_refs(name text primary key, count integer, vec text);
         """)
+        // 增量迁移（旧库 create-if-not-exists 不会加新列）。
+        addColumnIfMissing(table: "chunks", column: "recording_date", decl: "text")
+        addColumnIfMissing(table: "recordings", column: "summary", decl: "text")
+        addColumnIfMissing(table: "recordings", column: "summary_template", decl: "text")
+    }
+
+    /// 若列不存在则 ALTER TABLE 加上（幂等，便于旧索引平滑升级）。
+    private func addColumnIfMissing(table: String, column: String, decl: String) {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "pragma table_info(\(table))", -1, &st, nil)
+        var exists = false
+        while sqlite3_step(st) == SQLITE_ROW {
+            if String(cString: sqlite3_column_text(st, 1)) == column { exists = true }
+        }
+        sqlite3_finalize(st)
+        if !exists { try? exec("alter table \(table) add column \(column) \(decl)") }
     }
 
     // MARK: 声纹库（派生：参考声纹向量由 vault 标注重算；用户决定向量存 index）
@@ -168,16 +185,17 @@ public final class Index {
 
     public func insertChunk(recordingId: String, idx: Int, text: String, context: String?,
                             start: Double, end: Double, personId: String?,
-                            embedding: [Float]) throws {
+                            recordingDate: String?, embedding: [Float]) throws {
         var st: OpaquePointer?
         sqlite3_prepare_v2(db,
-            "insert into chunks(recording_id,idx,text,context,start,end,person_id) values(?,?,?,?,?,?,?)",
+            "insert into chunks(recording_id,idx,text,context,start,end,person_id,recording_date) values(?,?,?,?,?,?,?,?)",
             -1, &st, nil)
         bindText(st, 1, recordingId); sqlite3_bind_int64(st, 2, Int64(idx))
         bindText(st, 3, text)
         if let c = context { bindText(st, 4, c) } else { sqlite3_bind_null(st, 4) }
         sqlite3_bind_double(st, 5, start); sqlite3_bind_double(st, 6, end)
         if let p = personId { bindText(st, 7, p) } else { sqlite3_bind_null(st, 7) }
+        if let d = recordingDate { bindText(st, 8, d) } else { sqlite3_bind_null(st, 8) }
         guard sqlite3_step(st) == SQLITE_DONE else { sqlite3_finalize(st); throw IndexError.sql(lastErr()) }
         sqlite3_finalize(st)
         let rowid = sqlite3_last_insert_rowid(db)
@@ -252,30 +270,39 @@ public final class Index {
 
     // MARK: 检索
 
-    public func vectorSearch(_ queryVec: [Float], k: Int) throws -> [SearchHit] {
+    /// 时间范围（含端点，本地 yyyy-MM-dd）。
+    public typealias DateRange = (from: String, to: String)
+
+    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil) throws -> [SearchHit] {
+        // vec0 的 KNN 不支持前置过滤：带日期时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
+        let knnK = dateRange == nil ? k : max(k, 4000)
+        let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id
+        select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id, c.recording_date
         from chunks_vec v join chunks c on c.id = v.rowid
-        where v.embedding match ? and k = \(k) order by v.distance
+        where v.embedding match ? and k = \(knnK) \(dateClause) order by v.distance limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
         bindText(st, 1, vectorJSON(normalize(queryVec)))
+        if let r = dateRange { bindText(st, 2, r.from); bindText(st, 3, r.to) }
         return readHits(st)
     }
 
-    public func ftsSearch(_ query: String, k: Int) throws -> [SearchHit] {
+    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil) throws -> [SearchHit] {
         let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "") + "\""
+        let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id
+        select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id, c.recording_date
         from chunks_fts f join chunks c on c.id = f.rowid
-        where chunks_fts match ? order by f.rank limit \(k)
+        where chunks_fts match ? \(dateClause) order by f.rank limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
         bindText(st, 1, phrase)
+        if let r = dateRange { bindText(st, 2, r.from); bindText(st, 3, r.to) }
         return readHits(st)
     }
 
@@ -283,6 +310,7 @@ public final class Index {
         var hits: [SearchHit] = []
         while sqlite3_step(st) == SQLITE_ROW {
             let person = sqlite3_column_text(st, 6).map { String(cString: $0) }
+            let date = sqlite3_column_text(st, 7).map { String(cString: $0) }
             hits.append(SearchHit(
                 rowid: sqlite3_column_int64(st, 0),
                 text: String(cString: sqlite3_column_text(st, 1)),
@@ -290,9 +318,64 @@ public final class Index {
                 start: sqlite3_column_double(st, 3),
                 end: sqlite3_column_double(st, 4),
                 score: sqlite3_column_double(st, 5),
-                personId: person))
+                personId: person,
+                recordingDate: date))
         }
         return hits
+    }
+
+    // MARK: 录音级摘要 + 时间筛选（digest 模式用）
+
+    public func setRecordingSummary(id: String, summary: String, template: String?) throws {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "update recordings set summary=?, summary_template=? where id=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, summary)
+        if let t = template { bindText(st, 2, t) } else { sqlite3_bind_null(st, 2) }
+        bindText(st, 3, id)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
+    public struct RecordingRow {
+        public let id: String
+        public let title: String
+        public let recordedAt: String
+        public let summary: String?
+    }
+
+    /// 读某录音已存的摘要正文 + 所用模板 id（录音库摘要页展示用）。
+    public func recordingSummaryInfo(id: String) -> (summary: String?, template: String?) {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select summary, summary_template from recordings where id=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, id)
+        guard sqlite3_step(st) == SQLITE_ROW else { return (nil, nil) }
+        let summary = sqlite3_column_text(st, 0).map { String(cString: $0) }
+        let tmpl = sqlite3_column_text(st, 1).map { String(cString: $0) }
+        return (summary, tmpl)
+    }
+
+    /// 列出某日期范围内的录音（按时间正序），供"汇总昨天/上周"等 digest。
+    public func recordingsInRange(_ range: DateRange) -> [RecordingRow] {
+        // recorded_at 是 ISO8601；用其前 10 位（yyyy-MM-dd）比较。
+        let sql = """
+        select id, title, recorded_at, summary from recordings
+        where substr(recorded_at,1,10) between ? and ? order by recorded_at
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, range.from); bindText(st, 2, range.to)
+        var out: [RecordingRow] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            let summary = sqlite3_column_text(st, 3).map { String(cString: $0) }
+            out.append(RecordingRow(
+                id: String(cString: sqlite3_column_text(st, 0)),
+                title: String(cString: sqlite3_column_text(st, 1)),
+                recordedAt: String(cString: sqlite3_column_text(st, 2)),
+                summary: summary))
+        }
+        return out
     }
 
     private func lastErr() -> String { String(cString: sqlite3_errmsg(db)) }

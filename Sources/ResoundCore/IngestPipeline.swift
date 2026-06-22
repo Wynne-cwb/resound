@@ -46,10 +46,17 @@ public struct IngestPipeline {
             log("🔤 词表：\(glossary.terms.count) 词偏置，\(glossary.corrections.count) 条别名纠正")
         }
 
-        log("📝 WhisperKit 转录中（模型 \(model)，首次会下载模型）…")
-        let result = try await Transcriber(model: model, language: language,
+        let result: TranscribeResult
+        if let cfg = try? Config.load(), cfg.transcribeOnline {
+            log("☁️ 在线转录中（\(cfg.transcribeModel) @ aihubmix）…")
+            result = try await OnlineTranscriber(config: cfg, language: language, prompt: glossary.promptString)
+                .transcribe(audio: audioOut)
+        } else {
+            log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
+            result = try await Transcriber(model: model, language: language,
                                            prompt: glossary.promptString, maxFallback: maxFallback)
-            .transcribe(audio: audioOut)
+                .transcribe(audio: audioOut)
+        }
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language)")
 
         // 3. 繁→简归一 + 别名纠正后写 transcript.json（原始音频仍是 ground truth）

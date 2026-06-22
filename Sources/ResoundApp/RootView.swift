@@ -1,153 +1,298 @@
 import SwiftUI
 import ResoundCore
 
-enum AppTab: String, CaseIterable, Identifiable {
-    case chat = "Ask Resound", library = "Library", settings = "Settings"
-    var id: String { rawValue }
+struct RootView: View {
+    @EnvironmentObject var app: AppModel
+    @EnvironmentObject var rec: RecordingController
+
+    var body: some View {
+        let pal = app.palette
+        ZStack {
+            pal.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                TopBar()
+                StatusBar()
+                HStack(spacing: 0) {
+                    Sidebar()
+                    Rectangle().fill(pal.border).frame(width: 1)
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(pal.bg)
+                }
+                .overlay(alignment: .topLeading) { sidebarToggle(pal) }
+            }
+            OverlayHost()
+        }
+        .environment(\.palette, pal)
+        .background(WindowConfigurator(isDark: app.isDark))
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder private var content: some View {
+        switch app.page {
+        case .ask: ChatView()
+        case .library: LibraryView()
+        case .settings: SettingsView()
+        }
+    }
+
+    /// 折叠按钮：圆形，圆心正好落在侧栏右边框上（跨边框浮动）。
+    private func sidebarToggle(_ pal: Palette) -> some View {
+        let sidebarWidth: CGFloat = app.sidebarCollapsed ? 64 : 218
+        let d: CGFloat = 24
+        return Button { app.toggleSidebar() } label: {
+            Image(systemName: app.sidebarCollapsed ? "chevron.right" : "chevron.left")
+                .font(.system(size: 10, weight: .bold)).foregroundStyle(pal.text2)
+                .frame(width: d, height: d)
+                .background(pal.elev, in: Circle())
+                .overlay(Circle().strokeBorder(pal.borderStrong, lineWidth: 1))
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+        .help(app.sidebarCollapsed ? "展开侧栏" : "折叠侧栏")
+        .offset(x: sidebarWidth - d / 2, y: 21)   // 圆心：x=侧栏右边框；y 与 Logo 中心齐平
+    }
 }
 
-struct RootView: View {
-    @EnvironmentObject var recorder: RecordingController
-    @State private var tab: AppTab = .chat
+// MARK: - 顶部标题栏（透明标题栏下自绘；左侧留出红黄绿交通灯空间）
+
+struct TopBar: View {
+    @EnvironmentObject var app: AppModel
+    @EnvironmentObject var rec: RecordingController
+    @Environment(\.palette) var pal
+
+    private var title: String {
+        switch app.page { case .ask: return "提问 Resound"; case .library: return "录音库"; case .settings: return "设置" }
+    }
 
     var body: some View {
         ZStack {
-            AppBackground()
-            VStack(spacing: 0) {
-                RecordingBanner()
-                TopBar(selection: $tab)
-                Group {
-                    switch tab {
-                    case .chat: ChatView()
-                    case .library: LibraryView()
-                    case .settings: SettingsView()
-                    }
-                }
-            }
-        }
-        .alert("检测到 Google Meet", isPresented: meetDetected) {
-            Button("开始录音") { recorder.startRecording() }
-            Button("忽略", role: .cancel) { recorder.ignorePrompt() }
-        } message: {
-            Text("要录制这场会议吗？（麦克风 + 对方声音）")
-        }
-        .overlay(alignment: .bottom) {
-            if !recorder.toast.isEmpty {
-                HStack(spacing: 10) {
-                    Text(recorder.toast).font(.callout)
-                    Spacer()
-                    Button { recorder.toast = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 11).padding(.horizontal, 14)
-                .softCard(corner: 12)
-                .padding(14)
-            }
-        }
-    }
-
-    private var meetDetected: Binding<Bool> {
-        Binding(
-            get: { if case .meetingDetected = recorder.phase { return true } else { return false } },
-            set: { if !$0 { recorder.ignorePrompt() } }
-        )
-    }
-}
-
-/// 顶部分段切换器（磨砂胶囊 + 选中白色药丸滑动）。
-struct TopBar: View {
-    @Binding var selection: AppTab
-    @Namespace private var ns
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(AppTab.allCases) { t in
-                let isSel = t == selection
-                Text(t.rawValue)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(isSel ? Color.primary : Color.secondary)
-                    .padding(.vertical, 6).padding(.horizontal, 18)
-                    .background {
-                        if isSel {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-                                .matchedGeometryEffect(id: "sel", in: ns)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(pal.text2)
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if rec.isIdle {
+                    Button(action: rec.startRecording) {
+                        HStack(spacing: 7) {
+                            Circle().fill(.white).frame(width: 9, height: 9)
+                            Text("录音").font(.system(size: 12.5, weight: .semibold))
                         }
+                        .foregroundStyle(.white)
+                        .padding(.leading, 11).padding(.trailing, 13)
+                        .frame(height: 30)
+                        .background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
+                    .buttonStyle(.plainHit).hoverCursor()
+                }
+                Button(action: app.toggleTheme) {
+                    Image(systemName: app.isDark ? "sun.max" : "moon")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(pal.text2)
+                        .frame(width: 30, height: 30)
+                        .stroke(pal.border, corner: 8)
+                }
+                .buttonStyle(.plainHit).hoverCursor()
+            }
+            .padding(.trailing, 16)
+        }
+        .frame(height: 46)
+        .padding(.leading, 78)   // 交通灯
+        .background(pal.titlebar)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { zoomMainWindow() }   // 双击标题栏撑满/还原
+        .overlay(alignment: .bottom) { Rectangle().fill(pal.border).frame(height: 1) }
+    }
+}
+
+// MARK: - 全局状态栏（录音 / 处理中）
+
+struct StatusBar: View {
+    @EnvironmentObject var rec: RecordingController
+    @Environment(\.palette) var pal
+
+    var body: some View {
+        if rec.isRecording || rec.isProcessing {
+            HStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    icon
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(rec.isRecording ? "正在录音" : "正在处理录音")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.text)
+                        Text(sub).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if rec.isRecording {
+                    WaveBars(color: pal.rec)
+                    Text(mmss(Double(rec.recSeconds)))
+                        .font(.system(size: 18, weight: .semibold)).monospacedDigit().foregroundStyle(pal.text)
+                    Button(action: rec.stopAndIngest) {
+                        HStack(spacing: 7) {
+                            RoundedRectangle(cornerRadius: 2).fill(.white).frame(width: 9, height: 9)
+                            Text("停止").font(.system(size: 12.5, weight: .semibold))
+                        }
+                        .foregroundStyle(.white).padding(.horizontal, 14).frame(height: 30)
+                        .background(pal.rec, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plainHit).hoverCursor()
+                } else {
+                    HStack(spacing: 8) {
+                        Spinner(size: 14, color: pal.accent)
+                        Text(RecordingController.procLabels[min(rec.procStep, 2)])
+                            .font(.system(size: 12)).foregroundStyle(pal.text2)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .frame(height: 56)
+            .background(rec.isRecording ? pal.recSoft : pal.accentSoft)
+            .overlay(alignment: .bottom) { Rectangle().fill(pal.border).frame(height: 1) }
+        }
+    }
+
+    private var sub: String {
+        rec.isRecording ? "正在采集你的麦克风 + Google Meet 声音 · 全程本地"
+                        : RecordingController.procLabels[min(rec.procStep, 2)]
+    }
+
+    @ViewBuilder private var icon: some View {
+        ZStack {
+            Circle().fill(rec.isRecording ? pal.rec : pal.accentSoft).frame(width: 34, height: 34)
+            if rec.isRecording {
+                PulseDot(color: .white, size: 11)
+            } else {
+                Spinner(size: 16, color: pal.accent)
+            }
+        }
+    }
+}
+
+/// 录音状态栏的跳动波形条。
+struct WaveBars: View {
+    var color: Color
+    @State private var on = false
+    private let delays: [Double] = [0, 0.15, 0.3, 0.45, 0.2]
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(0..<5, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color)
+                    .frame(width: 3.5, height: 18)
+                    .scaleEffect(y: on ? 1 : 0.28, anchor: .bottom)
+                    .animation(.easeInOut(duration: 0.45).repeatForever().delay(delays[i]), value: on)
+            }
+        }
+        .frame(height: 20, alignment: .bottom)
+        .onAppear { on = true }
+    }
+}
+
+/// 呼吸圆点（录音指示）。
+struct PulseDot: View {
+    var color: Color
+    var size: CGFloat = 9
+    @State private var on = false
+    var body: some View {
+        Circle().fill(color).frame(width: size, height: size)
+            .opacity(on ? 0.3 : 1).scaleEffect(on ? 0.8 : 1)
+            .animation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true), value: on)
+            .onAppear { on = true }
+    }
+}
+
+// MARK: - 侧边栏
+
+struct Sidebar: View {
+    @EnvironmentObject var app: AppModel
+    @EnvironmentObject var library: LibraryModel
+    @EnvironmentObject var settings: SettingsModel
+    @Environment(\.palette) var pal
+
+    var body: some View {
+        let collapsed = app.sidebarCollapsed
+        VStack(alignment: collapsed ? .center : .leading, spacing: 0) {
+            if collapsed {
+                BrandIcon(pal: pal, size: 30)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4).padding(.bottom, 16)
+            } else {
+                HStack(spacing: 9) {
+                    BrandIcon(pal: pal, size: 30)
+                    Text("Resound").font(.system(size: 14.5, weight: .bold)).foregroundStyle(pal.text)
+                    Spacer()
+                }
+                .padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 14)
+            }
+
+            VStack(spacing: collapsed ? 4 : 2) {
+                navRow(.ask, "Ask Resound", "bubble.left")
+                navRow(.library, "Library", "waveform", trailingCount: library.recordings.count)
+                navRow(.settings, "Settings", "slider.horizontal.3", attn: settings.needsAttention)
+            }
+
+            Spacer(minLength: 0)
+
+            if collapsed {
+                Circle().fill(pal.ok).frame(width: 8, height: 8).help("运行中 · 全程本地").padding(.bottom, 4)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Circle().fill(pal.ok).frame(width: 7, height: 7)
+                        Text("运行中 · 全程本地").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text2)
+                    }
+                    Text(library.footerText).font(.system(size: 11)).foregroundStyle(pal.text3)
+                }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(pal.inset, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .stroke(pal.border, corner: 9)
+            }
+        }
+        .padding(.horizontal, collapsed ? 10 : 12).padding(.vertical, 14)
+        .frame(width: collapsed ? 64 : 218)
+        .background(pal.sidebar)
+    }
+
+    @ViewBuilder private func navRow(_ page: AppModel.Page, _ label: String, _ icon: String,
+                                     trailingCount: Int? = nil, attn: Bool = false) -> some View {
+        let on = app.page == page
+        Button { withAnimation(.easeOut(duration: 0.12)) { app.page = page } } label: {
+            if app.sidebarCollapsed {
+                Image(systemName: icon).font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(on ? .white : pal.text2)
+                    .frame(width: 44, height: 38)
+                    .background(on ? pal.accent : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(alignment: .topTrailing) { if attn { Circle().fill(pal.warn).frame(width: 6, height: 6).offset(x: -5, y: 5) } }
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { selection = t }
+            } else {
+                HStack(spacing: 11) {
+                    Image(systemName: icon).font(.system(size: 14, weight: .medium)).frame(width: 17)
+                    Text(label).font(.system(size: 13.5, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if let c = trailingCount {
+                        Text("\(c)").font(.system(size: 11)).monospacedDigit()
+                            .foregroundStyle(on ? .white.opacity(0.85) : pal.text3)
                     }
+                    if attn { Circle().fill(pal.warn).frame(width: 7, height: 7) }
+                }
+                .foregroundStyle(on ? .white : pal.text2)
+                .padding(.horizontal, 11).padding(.vertical, 8)
+                .background(on ? pal.accent : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .contentShape(Rectangle())
             }
         }
-        .padding(3)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5))
-        .padding(.top, 8).padding(.bottom, 4)
+        .buttonStyle(.plainHit).hoverCursor().help(app.sidebarCollapsed ? label : "")
     }
 }
 
-/// 录音/处理状态横幅。
-struct RecordingBanner: View {
-    @EnvironmentObject var recorder: RecordingController
+struct SidebarLogo: View {
+    var pal: Palette
+    var size: CGFloat = 30
     var body: some View {
-        switch recorder.phase {
-        case .recording:
-            HStack(spacing: 10) {
-                Circle().fill(.red).frame(width: 10, height: 10)
-                Text("会议录音中…（麦克风 + 对方声音）").foregroundStyle(.white)
-                Spacer()
-                Button("停止并转录") { recorder.stopAndIngest() }
-                    .buttonStyle(.borderedProminent).tint(.white).foregroundStyle(.red)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(Color.red)
-        case .processing:
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("转录入库中…（large-v3，首次较慢）").foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(.quaternary)
-        default:
-            EmptyView()
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.27, style: .continuous).fill(pal.accentSoft)
+            WaveMark(pal: pal, height: size * 0.47, bars: [5, 11, 7, 13])
         }
-    }
-}
-
-/// 设置（占位：显示配置来源是否就绪）
-struct SettingsView: View {
-    @State private var status = "检查中…"
-    var body: some View {
-        Form {
-            Section("配置状态") {
-                Text(status).textSelection(.enabled)
-            }
-            Section("说明") {
-                Text("密钥从 .env 读取（RESOUND_ENV 环境变量 / ~/Library/Application Support/Resound/.env / 仓库根）。后续这里做可视化设置：vault repo、说话人命名、模型与密钥。")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .onAppear { status = configStatus() }
-    }
-
-    private func configStatus() -> String {
-        do {
-            let c = try Config.load()
-            return """
-            ✅ 配置已加载
-            embedding: \(c.embeddingModel) (dim \(c.embeddingDim))
-            chat: \(c.chatModel)
-            speakerModel: \(c.speakerModel ?? "未设置（无法做说话人识别）")
-            vault: \(c.vaultPath ?? "未设置 VAULT_PATH（会议录音无法入库）")
-            索引: \(defaultIndexPath().path)
-            """
-        } catch {
-            return "❌ 配置加载失败：\(error)\n请把仓库 .env 放到 ~/Library/Application Support/Resound/.env，或设 RESOUND_ENV。"
-        }
+        .frame(width: size, height: size)
     }
 }

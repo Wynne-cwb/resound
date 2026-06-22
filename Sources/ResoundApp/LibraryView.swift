@@ -1,283 +1,644 @@
 import SwiftUI
-import AVFoundation
+import MarkdownUI
 import ResoundCore
 
-@MainActor
-final class LibraryViewModel: ObservableObject {
-    struct Line: Identifiable {
-        let id = UUID()
-        let start: Double
-        let end: Double
-        let text: String
-        var speaker: String?
-    }
-
-    @Published var recordings: [RecordingSummary] = []
-    @Published var selected: RecordingSummary?
-    @Published var lines: [Line] = []
-    @Published var isPlaying = false
-    @Published var currentTime: Double = 0
-    @Published var duration: Double = 0
-    @Published var loadError: String?
-    @Published var analyzing = false
-
-    var hasSpeakers: Bool { lines.contains { $0.speaker != nil } }
-
-    private var player: AVAudioPlayer?
-    private var timer: Timer?
-    private var scrubbing = false
-
-    func load() {
-        guard let vault = (try? Config.load())?.vaultPath, !vault.isEmpty else {
-            loadError = "未设置 VAULT_PATH，无法读取录音库（设置页查看）"; return
-        }
-        recordings = listRecordings(vaultRoot: URL(fileURLWithPath: vault))
-        loadError = recordings.isEmpty ? "vault 里还没有录音" : nil
-        if selected == nil || !recordings.contains(where: { $0.id == selected?.id }) {
-            select(recordings.first)
-        }
-    }
-
-    func select(_ rec: RecordingSummary?) {
-        stop()
-        selected = rec
-        lines = []; currentTime = 0; duration = 0
-        guard let rec, let t = loadTranscript(rec.transcriptURL) else { return }
-
-        // 说话人来源：优先 diarization.json（缓存），否则 index 的 chunk person
-        let diar = loadDiarization(rec.dir)
-        let spans: [(start: Double, end: Double, person: String?)] = diar?.map { ($0.start, $0.end, $0.speaker) }
-            ?? (try? Index(path: defaultIndexPath(),
-                           dim: (try? Config.load())?.embeddingDim ?? 4096))?.chunkPersons(recordingId: rec.id)
-            ?? []
-        func speakerAt(_ time: Double) -> String? {
-            spans.first(where: { $0.start <= time && time <= $0.end })?.person
-                ?? spans.min(by: { abs(($0.start + $0.end)/2 - time) < abs(($1.start + $1.end)/2 - time) })?.person
-        }
-        lines = t.segments.map {
-            Line(start: $0.start, end: $0.end, text: $0.text, speaker: speakerAt(($0.start + $0.end)/2))
-        }
-        if let p = try? AVAudioPlayer(contentsOf: rec.audioURL) {
-            p.prepareToPlay(); player = p; duration = p.duration
-        }
-    }
-
-    func analyze() {
-        guard let rec = selected, let model = (try? Config.load())?.speakerModel else {
-            loadError = "未设置 SPEAKER_MODEL，无法识别说话人"; return
-        }
-        analyzing = true
-        Task {
-            defer { analyzing = false }
-            do {
-                let segs = try await analyzeSpeakers(rec, model: model)
-                let byMid: (Double) -> String? = { mid in
-                    segs.first(where: { $0.start <= mid && mid <= $0.end })?.speaker
-                }
-                lines = lines.map { var l = $0; l.speaker = byMid(($0.start + $0.end)/2); return l }
-            } catch {
-                loadError = "识别失败：\(error)"
-            }
-        }
-    }
-
-    func rename(_ rec: RecordingSummary, to title: String) {
-        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-        try? renameRecording(rec, to: t)
-        let keepId = selected?.id
-        load()
-        selected = recordings.first { $0.id == keepId }
-    }
-
-    func delete(_ rec: RecordingSummary) {
-        stop()
-        try? deleteRecording(rec)
-        if let idx = try? Index(path: defaultIndexPath(), dim: (try? Config.load())?.embeddingDim ?? 4096) {
-            try? idx.deleteRecording(id: rec.id)
-        }
-        if selected?.id == rec.id { selected = nil }
-        load()
-    }
-
-    func togglePlay() {
-        guard let p = player else { return }
-        if p.isPlaying { p.pause(); isPlaying = false; stopTimer() }
-        else { p.play(); isPlaying = true; startTimer() }
-    }
-
-    func seek(to time: Double) {
-        guard let p = player else { return }
-        p.currentTime = max(0, min(time, p.duration)); currentTime = p.currentTime
-        if !p.isPlaying { p.play(); isPlaying = true; startTimer() }
-    }
-
-    func scrubBegan() { scrubbing = true }
-    func scrubEnded(to time: Double) {
-        scrubbing = false
-        player?.currentTime = max(0, min(time, duration)); currentTime = player?.currentTime ?? time
-    }
-
-    func stop() { player?.stop(); player = nil; isPlaying = false; stopTimer() }
-
-    private func startTimer() {
-        stopTimer()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, let p = self.player, !self.scrubbing else { return }
-                self.currentTime = p.currentTime
-                if !p.isPlaying { self.isPlaying = false; self.stopTimer() }
-            }
-        }
-    }
-    private func stopTimer() { timer?.invalidate(); timer = nil }
-}
-
 struct LibraryView: View {
-    @StateObject private var vm = LibraryViewModel()
-    @State private var renameTarget: RecordingSummary?
-    @State private var renameText = ""
-    @State private var deleteTarget: RecordingSummary?
+    @EnvironmentObject var app: AppModel
+    @EnvironmentObject var vm: LibraryModel
+    @EnvironmentObject var rec: RecordingController
+    @Environment(\.palette) var pal
+    @State private var hoverId: String?
 
     var body: some View {
         HStack(spacing: 0) {
-            recordingList
-            Divider()
+            listColumn
+            Rectangle().fill(pal.border).frame(width: 1)
             detail
         }
         .onAppear { vm.load() }
-        .alert("重命名录音", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
-            TextField("标题", text: $renameText)
-            Button("保存") { if let r = renameTarget { vm.rename(r, to: renameText) }; renameTarget = nil }
-            Button("取消", role: .cancel) { renameTarget = nil }
-        }
-        .alert("删除这条录音？", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })) {
-            Button("删除", role: .destructive) { if let r = deleteTarget { vm.delete(r) }; deleteTarget = nil }
-            Button("取消", role: .cancel) { deleteTarget = nil }
-        } message: {
-            Text("将删除音频、转录与索引，不可恢复。")
+        .onChange(of: app.libraryReloadToken) { _, _ in vm.load() }
+        .background {
+            Button("") { vm.openFind() }.keyboardShortcut("f", modifiers: .command).hidden()
         }
     }
 
-    private var recordingList: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(vm.recordings) { rec in
-                    let isSel = vm.selected?.id == rec.id
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(rec.title).font(.system(size: 13, weight: .medium))
-                            .lineLimit(2).multilineTextAlignment(.leading)
-                            .foregroundStyle(.primary)
-                        Text("\(shortDate(rec.recordedAt)) · \(mmss(Double(rec.durationSec)))")
-                            .font(.caption).foregroundStyle(.secondary)
+    // MARK: 列表
+
+    private var listColumn: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("录音库").font(.system(size: 17, weight: .bold)).foregroundStyle(pal.text)
+                    Spacer()
+                    Button { vm.openNewFolder() } label: {
+                        Image(systemName: "folder.badge.plus").font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(pal.text).frame(width: 30, height: 30).card(pal, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor().help("新建文件夹")
+                    Button { vm.openImport() } label: {
+                        Image(systemName: "square.and.arrow.down").font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(pal.text).frame(width: 30, height: 30).card(pal, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor().help("导入录音文件")
+                }
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(pal.text3)
+                    TextField("搜索录音…", text: $vm.query)
+                        .textFieldStyle(.plain).font(.system(size: 13)).foregroundStyle(pal.text)
+                    if !vm.query.isEmpty {
+                        Button { vm.query = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(pal.text3) }.buttonStyle(.plainHit)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 9).padding(.horizontal, 11)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(isSel ? Theme.accent.opacity(0.14) : Color.clear)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .onTapGesture { vm.select(rec) }
-                    .hoverCursor()
-                    .contextMenu {
-                        Button("重命名") { renameText = rec.title; renameTarget = rec }
-                        Button("删除", role: .destructive) { deleteTarget = rec }
+                }
+                .padding(.horizontal, 10).frame(height: 30).card(pal, corner: 8, fill: pal.bg)
+            }
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 10)
+
+            ScrollView {
+                LazyVStack(spacing: 2, pinnedViews: []) {
+                    if rec.isProcessing { processingRow }
+                    ForEach(vm.sections()) { sec in
+                        folderHeader(sec)
+                        if !vm.isCollapsed(sec.id) {
+                            ForEach(sec.recordings) { r in recordingRow(r) }
+                        }
+                    }
+                    if vm.sections().allSatisfy({ $0.recordings.isEmpty }) && !vm.query.isEmpty {
+                        Text("没有匹配「\(vm.query)」的录音").font(.system(size: 12)).foregroundStyle(pal.text3).padding(.top, 20)
+                    }
+                }
+                .padding(.horizontal, 10).padding(.bottom, 12)
+            }
+        }
+        .frame(width: 300)
+        .background(pal.sidebar)
+    }
+
+    private func folderHeader(_ sec: LibraryModel.Section) -> some View {
+        let collapsed = vm.isCollapsed(sec.id)
+        return Button { vm.toggleCollapse(sec.id) } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(pal.text3)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+                Image(systemName: sec.folderId == nil ? "tray" : "folder.fill").font(.system(size: 11)).foregroundStyle(pal.text2)
+                Text(sec.name).font(.system(size: 12, weight: .bold)).foregroundStyle(pal.text2).lineLimit(1)
+                Spacer()
+                Text("\(sec.recordings.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(pal.text3)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+        .padding(.top, 6)
+        .contextMenu {
+            if let fid = sec.folderId {
+                Button("重命名文件夹") { vm.openRenameFolder(fid) }
+                Button("删除文件夹", role: .destructive) { vm.confirmDeleteFolderId = fid }
+            }
+        }
+    }
+
+    @ViewBuilder private func moveMenu(_ r: RecordingSummary) -> some View {
+        Menu("移动到") {
+            ForEach(vm.folders) { f in
+                Button { vm.move(r.id, to: f.id) } label: {
+                    if vm.assign[r.id] == f.id { Label(f.name, systemImage: "checkmark") } else { Text(f.name) }
+                }
+            }
+            if !vm.folders.isEmpty { Divider() }
+            Button("未分类") { vm.move(r.id, to: nil) }
+            Divider()
+            Button("新建文件夹…") { vm.openNewFolder() }
+        }
+    }
+
+    private var processingRow: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("正在处理新录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                Text(RecordingController.procLabels[min(rec.procStep, 2)]).font(.system(size: 11.5)).foregroundStyle(pal.text2)
+            }
+            Spacer()
+            Spinner(size: 13, color: pal.accent)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.top, 4)
+    }
+
+    private func recordingRow(_ r: RecordingSummary) -> some View {
+        let on = vm.selectedId == r.id
+        let identified = FileManager.default.fileExists(atPath: r.dir.appendingPathComponent("diarization.json").path)
+        return Button { vm.select(r.id) } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(r.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                HStack(spacing: 8) {
+                    Text(shortDate(r.recordedAt)).font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                    Text("·").font(.system(size: 11)).foregroundStyle(pal.text3)
+                    Text(mmss(Double(r.durationSec))).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
+                    if !identified {
+                        Spacer(minLength: 4)
+                        Text("待识别").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.warn)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(pal.warnSoft, in: Capsule())
                     }
                 }
             }
-            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12).padding(.top, 11).padding(.bottom, 12)
+            .background(on ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .stroke(on ? pal.accent : .clear, corner: 10)
+            .overlay(alignment: .topTrailing) {
+                if hoverId == r.id {
+                    HStack(spacing: 2) {
+                        iconBtn("pencil") { vm.openRenameRec(r.id) }
+                        iconBtn("trash", danger: true) { vm.deleteRecId = r.id }
+                    }
+                    .padding(6)
+                }
+            }
+            .contentShape(Rectangle())
         }
-        .frame(width: 250)
+        .buttonStyle(.plainHit).hoverCursor()
+        .onHover { hoverId = $0 ? r.id : (hoverId == r.id ? nil : hoverId) }
+        .contextMenu {
+            moveMenu(r)
+            Divider()
+            Button("重命名") { vm.openRenameRec(r.id) }
+            Button("删除", role: .destructive) { vm.deleteRecId = r.id }
+        }
     }
 
+    private func iconBtn(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: name).font(.system(size: 12, weight: .medium)).foregroundStyle(pal.text2)
+                .frame(width: 26, height: 26)
+                .background(pal.elev, in: RoundedRectangle(cornerRadius: 6))
+                .stroke(pal.border, corner: 6)
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+    }
+
+    // MARK: 详情
+
     @ViewBuilder private var detail: some View {
-        if let rec = vm.selected {
+        if let sel = vm.selected {
             VStack(spacing: 0) {
-                playerBar(rec)
-                Divider()
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(vm.lines) { transcriptRow($0) }
-                    }
-                    .padding(18)
-                }
+                if vm.findOpen { findBar }
+                detailScroll(sel)
             }
         } else {
             VStack(spacing: 14) {
-                WaveMark(size: 56)
-                Text(vm.loadError ?? "选择左侧一条录音").foregroundStyle(.secondary)
+                WaveMark(pal: pal, height: 40, color: pal.text3)
+                Text(vm.loadError ?? "选择左侧一条录音").foregroundStyle(pal.text2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private func playerBar(_ rec: RecordingSummary) -> some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                Button { vm.togglePlay() } label: {
-                    Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(Theme.accentGradient))
+    @FocusState private var findFocused: Bool
+
+    private var findBar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(pal.text3)
+                TextField("在\(vm.findScopeLabel)中查找…", text: $vm.findQuery)
+                    .textFieldStyle(.plain).font(.system(size: 13)).foregroundStyle(pal.text).frame(width: 150).focused($findFocused)
+                Text(vm.findQuery.isEmpty ? "" : "\(vm.findMatchCount)").font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
+            }
+            .padding(.horizontal, 10).frame(height: 30).card(pal, corner: 8, fill: pal.bg)
+            Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(pal.text3)
+            HStack(spacing: 7) {
+                TextField("替换为…", text: $vm.replaceText)
+                    .textFieldStyle(.plain).font(.system(size: 13)).foregroundStyle(pal.text).frame(width: 150)
+            }
+            .padding(.horizontal, 10).frame(height: 30).card(pal, corner: 8, fill: pal.bg)
+            Button { vm.replaceAll() } label: {
+                Text("全部替换").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 12).frame(height: 30).background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }.buttonStyle(.plainHit).hoverCursor().disabled(vm.findMatchCount == 0)
+            Spacer()
+            Button { vm.closeFind() } label: {
+                Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text2).frame(width: 28, height: 28)
+            }.buttonStyle(.plainHit).hoverCursor().keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 20).padding(.vertical, 9)
+        .background(pal.sidebar)
+        .overlay(alignment: .bottom) { Rectangle().fill(pal.border).frame(height: 1) }
+        .onChange(of: vm.findOpen) { _, open in if open { findFocused = true } }
+        .onAppear { findFocused = true }
+    }
+
+    private func detailScroll(_ sel: RecordingSummary) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(sel.title).font(.system(size: 22, weight: .bold)).foregroundStyle(pal.text)
+                        .textSelection(.enabled)
+                    Text("\(fullDate(sel.recordedAt)) · \(mmss(Double(sel.durationSec)))")
+                        .font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 5)
+                        .textSelection(.enabled)
+                    playerBar(sel).padding(.top, 22)
+                    tabBar.padding(.top, 24)
+                    if vm.tab == .summary { summaryTab } else { transcriptTab }
                 }
-                .buttonStyle(.plain).hoverCursor()
-                Text(rec.title).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                .frame(maxWidth: 780, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 40).padding(.top, 32).padding(.bottom, 60)
+            }
+            .onChange(of: vm.findQuery) { _, _ in
+                if let id = vm.firstMatchLineID() { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+            }
+        }
+    }
+
+    private func playerBar(_ sel: RecordingSummary) -> some View {
+        HStack(spacing: 15) {
+            Button { vm.togglePlay() } label: {
+                Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 46, height: 46).background(pal.accent, in: Circle())
+            }
+            .buttonStyle(.plainHit).hoverCursor()
+            VStack(spacing: 7) {
+                Scrubber(value: vm.currentTime, total: max(vm.duration, 0.1), pal: pal,
+                         onBegin: { vm.scrubBegan() }, onChange: { vm.scrub(to: $0) }, onEnd: { vm.scrubEnded(to: $0) })
+                    .frame(height: 18)
+                HStack {
+                    Text(mmss(vm.currentTime)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                    Spacer()
+                    Text(mmss(max(vm.duration, Double(sel.durationSec)))).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                }
+            }
+        }
+        .padding(.horizontal, 18).padding(.vertical, 16)
+        .card(pal)
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            tab("会议摘要", .summary); tab("逐句转录", .transcript)
+        }
+        .padding(3)
+        .background(pal.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+    private func tab(_ label: String, _ t: LibraryModel.DetailTab) -> some View {
+        let on = vm.tab == t
+        return Button { withAnimation(.easeOut(duration: 0.12)) { vm.tab = t } } label: {
+            Text(label).font(.system(size: 13, weight: .semibold)).foregroundStyle(on ? pal.text : pal.text2)
+                .padding(.horizontal, 16).padding(.vertical, 6)
+                .background(on ? pal.elev : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+    }
+
+    // MARK: 摘要 Tab
+
+    @ViewBuilder private var summaryTab: some View {
+        if vm.summarizing {
+            VStack(spacing: 0) {
+                Spinner(size: 30, color: pal.border)
+                Text("正在生成会议摘要…").font(.system(size: 15, weight: .semibold)).foregroundStyle(pal.text).padding(.top, 16)
+                Text("正在用「\(curTplName)」模板分析这场会议的转录文稿。").font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity).padding(36).card(pal).padding(.top, 18)
+        } else if let text = vm.summaryText {
+            HStack(spacing: 10) {
+                Text("会议摘要").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text).textSelection(.enabled)
+                templateMenu
+                Spacer()
+                Button { vm.regenerate() } label: {
+                    HStack(spacing: 6) { Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold)); Text("重新生成").font(.system(size: 12, weight: .semibold)) }
+                        .foregroundStyle(.white).padding(.horizontal, 13).frame(height: 30)
+                        .background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plainHit).hoverCursor()
+            }
+            .padding(.top, 18)
+            SummaryMarkdown(text: text, pal: pal, highlight: vm.findOpen ? vm.findQuery : "")
+                .padding(22).frame(maxWidth: .infinity, alignment: .leading).card(pal).padding(.top, 14)
+        } else {
+            VStack(spacing: 0) {
+                Image(systemName: "doc.text").font(.system(size: 32)).foregroundStyle(pal.text3)
+                Text("还没有生成会议摘要").font(.system(size: 15, weight: .semibold)).foregroundStyle(pal.text).padding(.top, 14)
+                Text("用一个模板，把这场会议浓缩成概述、要点、决议和行动项。")
+                    .font(.system(size: 13)).foregroundStyle(pal.text2).multilineTextAlignment(.center).frame(maxWidth: 360).padding(.top, 6)
+                HStack(spacing: 10) {
+                    templateMenu
+                    Button { vm.generateSummary() } label: {
+                        HStack(spacing: 7) { Image(systemName: "sparkles").font(.system(size: 13, weight: .semibold)); Text("生成摘要").font(.system(size: 13, weight: .semibold)) }
+                            .foregroundStyle(.white).padding(.horizontal, 16).frame(height: 34)
+                            .background(pal.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }
+                    .buttonStyle(.plainHit).hoverCursor()
+                }
+                .padding(.top, 20)
+            }
+            .frame(maxWidth: .infinity).padding(34)
+            .background(pal.inset, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(pal.borderStrong))
+            .padding(.top, 18)
+        }
+    }
+
+    private var curTplName: String {
+        SummaryTemplateStore.load().first { $0.id == vm.currentTemplateId() }?.name ?? "默认"
+    }
+
+    private var templateMenu: some View {
+        Menu {
+            ForEach(SummaryTemplateStore.load()) { t in
+                Button { vm.chooseTemplate(t.id) } label: {
+                    if t.id == vm.currentTemplateId() { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text2)
+                Text("模板 · ").font(.system(size: 12)).foregroundStyle(pal.text2)
+                + Text(curTplName).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text)
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.text2)
+            }
+            .padding(.horizontal, 11).frame(height: 30).card(pal, corner: 8)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().hoverCursor()
+    }
+
+    // MARK: 转录 Tab
+
+    @ViewBuilder private var transcriptTab: some View {
+        if !vm.hasSpeakers {
+            HStack(spacing: 14) {
+                Image(systemName: "person.crop.circle").font(.system(size: 20)).foregroundStyle(pal.warn)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("尚未识别说话人").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                    Text("运行分析来区分谁说了什么。已认识的声音会被自动匹配。").font(.system(size: 12.5)).foregroundStyle(pal.text2)
+                }
                 Spacer()
                 if vm.analyzing {
-                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text("识别中…").font(.caption).foregroundStyle(.secondary) }
-                } else if !vm.hasSpeakers {
-                    Button { vm.analyze() } label: { Label("识别说话人", systemImage: "person.wave.2") }
-                        .buttonStyle(.bordered).controlSize(.small).hoverCursor()
+                    HStack(spacing: 8) { Spinner(size: 13, color: pal.warn); Text("分析中…").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.warn) }
+                } else {
+                    Button { vm.analyze() } label: {
+                        Text("识别说话人").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 15).frame(height: 32)
+                            .background(pal.warn, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plainHit).hoverCursor()
                 }
             }
-            HStack(spacing: 10) {
-                Text(mmss(vm.currentTime)).font(.caption).foregroundStyle(.secondary).monospacedDigit().frame(width: 40)
-                Slider(value: $vm.currentTime, in: 0...max(vm.duration, 0.1)) { editing in
-                    if editing { vm.scrubBegan() } else { vm.scrubEnded(to: vm.currentTime) }
-                }
-                .tint(Theme.accent)
-                Text(mmss(vm.duration)).font(.caption).foregroundStyle(.secondary).monospacedDigit().frame(width: 40)
-            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(pal.warnSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .stroke(pal.warnBorder, corner: 12)
+            .padding(.top, 18)
+        } else {
+            speakerRoster.padding(.top, 18)
         }
-        .padding(14)
+        transcriptLines.padding(.top, 22)
     }
 
-    private func transcriptRow(_ line: LibraryViewModel.Line) -> some View {
-        let active = vm.currentTime >= line.start && vm.currentTime < line.end
-        return HStack(alignment: .top, spacing: 10) {
-            Text(mmss(line.start)).font(.caption).monospacedDigit()
-                .foregroundStyle(active ? Theme.accent : .secondary)
-                .frame(width: 44, alignment: .leading)
-            VStack(alignment: .leading, spacing: 4) {
-                if let p = line.speaker {
-                    Text("👤\(p)").font(.caption2)
-                        .padding(.vertical, 2).padding(.horizontal, 7)
-                        .background(Theme.accent.opacity(0.14), in: Capsule())
+    private var speakerRoster: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("说话人 · \(vm.speakers.count) 位").font(.system(size: 13, weight: .bold)).foregroundStyle(pal.text)
+                Spacer()
+                if vm.analyzing {
+                    HStack(spacing: 6) { Spinner(size: 12, color: pal.accent); Text("识别中…").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent) }
+                } else {
+                    Button { vm.reidentify() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11, weight: .semibold))
+                            Text("重新识别").font(.system(size: 11.5, weight: .semibold))
+                        }
+                        .foregroundStyle(pal.text2).padding(.horizontal, 9).frame(height: 26).card(pal, corner: 7, fill: pal.bg)
+                    }
+                    .buttonStyle(.plainHit).hoverCursor().help("重聚类并用已记住的声音合并重复说话人、自动套真名")
                 }
-                Text(line.text).lineSpacing(2)
-                    .foregroundStyle(active ? Color.primary : Color.primary.opacity(0.85))
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            Rectangle().fill(pal.border).frame(height: 1)
+            ForEach(vm.speakers) { sp in
+                HStack(spacing: 12) {
+                    rosterAvatar(sp)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 7) {
+                            Text(sp.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                            if sp.isKnown {
+                                HStack(spacing: 4) { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)); Text("已记住 · 自动识别").font(.system(size: 10.5, weight: .semibold)) }
+                                    .foregroundStyle(pal.ok).padding(.horizontal, 8).padding(.vertical, 2).background(pal.ok.opacity(0.12), in: Capsule())
+                            } else if sp.isAnon {
+                                Text("待命名").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(pal.warn)
+                                    .padding(.horizontal, 8).padding(.vertical, 2).background(pal.warnSoft, in: Capsule())
+                            }
+                        }
+                        Text("发言 \(sp.lineCount) 句 · 占比 \(sp.pct)%").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                    }
+                    Spacer()
+                    if vm.namingInProgress == sp.label {
+                        HStack(spacing: 7) {
+                            Spinner(size: 13, color: pal.accent)
+                            Text("保存中…").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.accent)
+                        }
+                        .frame(height: 30).padding(.horizontal, 4)
+                    } else {
+                        Button { vm.playSpeakerSample(sp.label) } label: {
+                            Image(systemName: vm.samplingSpeaker == sp.label ? "pause.fill" : "play.fill")
+                                .font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.accent)
+                                .frame(width: 30, height: 30)
+                                .background(pal.accentSoft, in: Circle())
+                        }
+                        .buttonStyle(.plainHit).hoverCursor().help("试听 TA 的一段发言")
+                        Button { vm.openRenameSpeaker(sp.label) } label: {
+                            HStack(spacing: 6) { Image(systemName: "pencil").font(.system(size: 11, weight: .semibold)); Text(sp.isAnon ? "命名" : "改名").font(.system(size: 12.5, weight: .semibold)) }
+                                .foregroundStyle(sp.isAnon ? .white : pal.text)
+                                .padding(.horizontal, 13).frame(height: 30)
+                                .background(sp.isAnon ? pal.accent : pal.bg, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .stroke(sp.isAnon ? .clear : pal.borderStrong, corner: 8)
+                        }
+                        .buttonStyle(.plainHit).hoverCursor()
+                    }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12)
+                if sp.id != vm.speakers.last?.id { Rectangle().fill(pal.border).frame(height: 1) }
+            }
         }
-        .padding(.vertical, 6).padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(active ? Theme.accent.opacity(0.07) : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture { vm.seek(to: line.start) }
-        .hoverCursor()
+        .card(pal)
+    }
+
+    private func rosterAvatar(_ sp: LibraryModel.SpeakerStat) -> some View {
+        let hues: [Color] = [pal.accent, Color(hex: 0x9b6dc9), Color(hex: 0x3f9d7a), Color(hex: 0xd98a3d), Color(hex: 0xc75d8a)]
+        return ZStack {
+            Circle().fill(sp.isAnon ? pal.inset : hues[sp.index % hues.count])
+            Text(sp.isAnon ? "?" : String(sp.name.prefix(2)))
+                .font(.system(size: 13, weight: .bold)).foregroundStyle(sp.isAnon ? pal.text3 : .white)
+        }
+        .frame(width: 36, height: 36)
+        .overlay { if sp.isAnon { Circle().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3])).foregroundStyle(pal.borderStrong) } }
+    }
+
+    private var transcriptLines: some View {
+        LazyVStack(spacing: 1) {
+            ForEach(vm.lines) { ln in
+                let active = vm.currentTime >= ln.start && vm.currentTime < ln.end
+                Button { vm.seek(to: ln.start) } label: {
+                    HStack(alignment: .top, spacing: 14) {
+                        Text(mmss(ln.start)).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 46, alignment: .leading).padding(.top, 3)
+                        VStack(alignment: .leading, spacing: 3) {
+                            if vm.hasSpeakers, let spk = ln.speaker {
+                                Button { vm.openRenameSpeaker(spk) } label: {
+                                    HStack(spacing: 5) {
+                                        Text(spk).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.accent)
+                                        Image(systemName: "pencil").font(.system(size: 9)).foregroundStyle(pal.accent.opacity(0.45))
+                                    }
+                                }
+                                .buttonStyle(.plainHit).hoverCursor()
+                            }
+                            lineText(ln.text).font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 9)
+                    .background(active ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(alignment: .leading) { if active { RoundedRectangle(cornerRadius: 3).fill(pal.accent).frame(width: 3).padding(.vertical, 6) } }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plainHit).hoverCursor()
+                .id(ln.id)
+            }
+        }
+    }
+
+    /// 转录行文本：查找时高亮命中片段。
+    private func lineText(_ s: String) -> Text {
+        (vm.findOpen && !vm.findQuery.isEmpty) ? highlightedText(s, query: vm.findQuery, pal: pal) : Text(s)
     }
 }
 
-private func mmss(_ s: Double) -> String {
-    let t = Int(s.rounded()); return String(format: "%d:%02d", t / 60, t % 60)
+// MARK: - 进度条（自绘，支持拖拽）
+
+struct Scrubber: View {
+    var value: Double
+    var total: Double
+    var pal: Palette
+    var onBegin: () -> Void
+    var onChange: (Double) -> Void
+    var onEnd: (Double) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let frac = total > 0 ? min(1, max(0, value / total)) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(pal.borderStrong).frame(height: 5)
+                Capsule().fill(pal.accent).frame(width: geo.size.width * frac, height: 5)
+                Circle().fill(.white).frame(width: 13, height: 13)
+                    .stroke(pal.borderStrong, corner: 7)
+                    .offset(x: geo.size.width * frac - 6.5)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .background(WindowDragBlocker())   // 拖动进度条时不带着整个窗口跑
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in onBegin(); onChange(Double(g.location.x / geo.size.width) * total) }
+                .onEnded { g in onEnd(Double(g.location.x / geo.size.width) * total) })
+        }
+    }
 }
 
-private func shortDate(_ iso: String) -> String {
+/// 放在交互控件背后：让 AppKit 不把这里的 mouseDown 当成「拖动窗口」(window.isMovableByWindowBackground)。
+struct WindowDragBlocker: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { BlockerView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    private final class BlockerView: NSView {
+        override var mouseDownCanMoveWindow: Bool { false }
+    }
+}
+
+// MARK: - 摘要 Markdown 渲染（MarkdownUI，GitHub 风：嵌套列表/表格/代码块齐全）
+
+struct SummaryMarkdown: View {
+    let text: String
+    let pal: Palette
+    var highlight: String = ""   // 保留签名兼容；行内查找高亮交给转录页，摘要走完整 Markdown
+
+    init(text: String, pal: Palette, highlight: String = "") {
+        self.text = text; self.pal = pal; self.highlight = highlight
+    }
+
+    var body: some View {
+        Markdown(text)
+            .markdownTheme(.resound(pal))
+            .textSelection(.enabled)
+    }
+}
+
+extension MarkdownUI.Theme {
+    /// 贴合 Resound 调色板的 Markdown 主题：以 GitHub 主题为底（表格/列表/代码块渲染完备），
+    /// 仅覆盖文字/标题/链接/代码的配色与字号。
+    static func resound(_ pal: Palette) -> MarkdownUI.Theme {
+        MarkdownUI.Theme.gitHub
+            .text {
+                ForegroundColor(pal.text)
+                FontSize(13.5)
+            }
+            .strong { FontWeight(.semibold) }
+            .emphasis { FontStyle(.italic) }
+            .link { ForegroundColor(pal.accent) }
+            .code {
+                FontFamilyVariant(.monospaced)
+                FontSize(.em(0.9))
+                ForegroundColor(pal.accent)
+                BackgroundColor(pal.accentSoft)
+            }
+            .heading1 { c in c.label.markdownMargin(top: 16, bottom: 10)
+                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.5)); ForegroundColor(pal.accent) } }
+            .heading2 { c in c.label.markdownMargin(top: 16, bottom: 8)
+                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.28)); ForegroundColor(pal.accent) } }
+            .heading3 { c in c.label.markdownMargin(top: 14, bottom: 6)
+                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.12)); ForegroundColor(pal.accent) } }
+            .heading4 { c in c.label.markdownMargin(top: 12, bottom: 6)
+                .markdownTextStyle { FontWeight(.semibold); FontSize(.em(1.0)); ForegroundColor(pal.accent) } }
+            .paragraph { c in c.label.relativeLineSpacing(.em(0.28)).markdownMargin(top: 0, bottom: 10) }
+            .listItem { c in c.label.markdownMargin(top: .em(0.2)) }
+            .blockquote { c in
+                HStack(spacing: 0) {
+                    Rectangle().fill(pal.accent.opacity(0.5)).frame(width: 3)
+                    c.label.padding(.leading, 12).markdownTextStyle { ForegroundColor(pal.text2) }
+                }
+            }
+    }
+}
+
+/// 把 query 命中的片段加黄色高亮背景（查找时用）。
+func highlightMatches(in input: AttributedString, query: String, pal: Palette) -> AttributedString {
+    let q = query.trimmingCharacters(in: .whitespaces)
+    guard !q.isEmpty else { return input }
+    var attr = input
+    let plain = String(input.characters)
+    var search = plain.startIndex..<plain.endIndex
+    while let r = plain.range(of: q, options: .caseInsensitive, range: search) {
+        if let lo = AttributedString.Index(r.lowerBound, within: attr),
+           let hi = AttributedString.Index(r.upperBound, within: attr) {
+            attr[lo..<hi].backgroundColor = pal.warn.opacity(0.45)
+            attr[lo..<hi].foregroundColor = pal.text
+        }
+        search = r.upperBound..<plain.endIndex
+    }
+    return attr
+}
+
+/// 高亮 query 命中的纯文本 → Text（转录行用）。
+func highlightedText(_ s: String, query: String, pal: Palette) -> Text {
+    Text(highlightMatches(in: AttributedString(s), query: query, pal: pal))
+}
+
+// MARK: - 日期格式
+
+private func isoDate(_ iso: String) -> Date? {
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]
-    guard let d = f.date(from: iso) else { return String(iso.prefix(10)) }
-    let out = DateFormatter(); out.dateFormat = "M月d日 HH:mm"; out.locale = Locale(identifier: "zh_CN")
-    return out.string(from: d)
+    return f.date(from: iso) ?? { let g = ISO8601DateFormatter(); g.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return g.date(from: iso) }()
+}
+func shortDate(_ iso: String) -> String {
+    guard let d = isoDate(iso) else { return String(iso.prefix(10)) }
+    let f = DateFormatter(); f.dateFormat = "M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+}
+func fullDate(_ iso: String) -> String {
+    guard let d = isoDate(iso) else { return String(iso.prefix(10)) }
+    let f = DateFormatter(); f.dateFormat = "yyyy年M月d日 · HH:mm"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
 }

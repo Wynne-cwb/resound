@@ -5,6 +5,56 @@
 
 ---
 
+## UI 全量还原 Claude design 设计稿(2026-06-22，编译+打包+启动验证)
+
+设计稿 `Resound.dc.html`(Claude design 导出的 HTML/CSS/JS mock)→ 按视觉 1:1 还原成 SwiftUI。
+
+- **两处岔路（用户拍板）**:①**窗口外壳=原生窗口 + 菜单栏驻留**(不复刻 mock 里的假交通灯/假系统菜单栏/壁纸相框)。用 `.windowStyle(.hiddenTitleBar)` + 自绘 46px 顶栏(左留 78pt 给真交通灯)+ `WindowConfigurator`(NSViewRepresentable 设 titlebarTransparent/movableByWindowBackground/背景色)+ `MenuBarExtra`(状态/录音开关/模拟会议/主题/退出)。②**两块缺口后端都打通**(见下)。
+- **架构**:四个 App 级 `@MainActor ObservableObject`,经 environmentObject 注入,以便在全窗范围渲染模态——`AppModel`(导航/主题/toast/`libraryReloadToken`)、`RecordingController`(录音引擎,toast 改走 app)、`LibraryModel`、`SettingsModel`。模态浮层全部挂 `OverlayHost`(RootView 顶层 ZStack),`ModalScrim` 半透明背景覆盖侧栏+内容。
+- **配色**:`Palette` struct 把设计稿浅/深两套 token 全量落地(bg/sidebar/elev/inset/text 三档/border 两档/accent·rec·ok·warn + soft 变体),经 `\.palette` Environment 注入;主题开关存 UserDefaults,`preferredColorScheme` 强制。
+- **三页**:Ask(空态 hero+6 chips、流式逐字回答+光标、时间范围徽标、qa 引用/digest 来源卡,全接 `IndexPipeline.answer` 的 `AnswerResult`:digest→sources、hits 空+有 dateRange→emptyTime、否则 cites);Library(列表+导入+自绘 `Scrubber` 播放器+摘要/转录 Tab;摘要读 `summary.md` 用 `SummaryMarkdown` 渲染+模板菜单+重新生成;转录页说话人名册+逐句高亮+点名册/点行命名);Settings(就绪状态/权限[AVCaptureDevice+CGPreflightScreenCaptureAccess]/通用开关/模板 CRUD/词表 CRUD)。
+- **可选模型字段绑定**:模态 TextField 直接 `Binding(get:{model.x?.field ?? ""}, set:{model.x?.field=$0})` 用 Swift 可选链赋值(nil 时 no-op)。**踩坑**:一开始想用 `KeyPath<OverlayHost,_>` 泛型 helper 包装,但那些字段在 env model 上、不在 View 上,编译不过 → 退回内联 Binding。
+- 验证:`swift build` 全过、`bundle-app.sh release` 打包、`open` 后进程存活无崩溃。**视觉细节(像素/间距/手感)待用户实机截图验收**——我看不到 GUI。
+
+### 打通：说话人命名 → 声纹注册（2026-06-22）
+
+- `SpeakerNaming.swift::renameSpeakerInRecording`:①改写该录音 `diarization.json`(oldLabel→真名);②对 index 里**该说话人在 chunk 内占主导**(`personFor` 判定 == 新名)的 chunk `setChunkPerson` 打真名(让问答引用也显示真名,且不覆盖其他说话人/已有声纹标);③勾「记住」时:`mergeASRSegments` 把该说话人的转录段并成窗口→取最长 5 个 `SpeakerEmbedder.embed`→`SpeakerMatcher` setReference/enroll→`Index.upsertSpeakerRef`,以后新录音 `recognizeSpansFromFile` 自动认出(越用越准闭环)。**依据**:diarization.json(匿名 N) 与 index chunk persons(声纹名/nil) 是两套独立标注,所以命名时两边都要动。
+
+### Library 文件夹 + 检索 + 词表内置项（2026-06-22）
+
+- **内置词表**:往 vault/glossary.txt 批量加了 27 个团队/产品术语(AfterShip/Notification/Flow/Shopify/MF/ARR/GSD…),均为裸规范词(只偏置不纠正)。脚本读旧表→去重→追加,保留原条目。
+- **Library 文件夹**:新增组织层 `vault/library.json`(`LibraryStore` + `LibraryFolder`/`LibraryOrganization`:folders[] + assign{recId→folderId}),**不动录音目录/契约**(纯 sidecar)。`LibraryModel` 加 folders/assign/collapsed/query + CRUD/move/sections()。
+- **左列改造**:顶部「新建文件夹 + 导入」图标 + **搜索框**(按标题过滤,带清除);列表按**文件夹分组**(folder.fill 组 + 末尾「未分类/全部录音」托盘组),组头 chevron **可折叠**(搜索时强制展开);组头右键重命名/删除文件夹;录音行右键「移动到 ▸ 文件夹/未分类/新建」。删文件夹→内部录音回未分类(不删录音)。
+- **决策**:文件夹放 Library 左列分组(Apple Notes/语音备忘录式),不放主导航侧栏——主导航保持 3 项简洁;"左侧栏展开折叠"理解为左列文件夹组的折叠。检索 v1 只按标题(快);全文语义检索本就是 Ask Resound 的职责。
+
+### 第三轮优化 + Meet 名称调研（2026-06-22）
+
+1. **摘要模板名没显示**:`templateMenu` 之前 `.menuStyle(.borderlessButton)` 吞了 label 文本/叠了两个箭头。改:label 改成「📄 模板 · <名称> ⌄」单行,加 `.menuIndicator(.hidden)` 去掉系统箭头。
+2. **Cmd+F 查找/替换**(修识别错误):录音详情按 ⌘F 弹查找条,作用于当前 Tab(转录/摘要)。`LibraryModel.replaceAll` 全部替换并写回事实源(transcript.json / summary.md + index summary),刷新展示。**注**:替换 transcript.json 不重嵌入 index chunk(检索向量仍旧);够用于改显示+摘要,要彻底进检索得重建索引。Line.text 改 var。
+3. **Google Meet 会议名(调研 + 落地)**:之前只拿 URL id。**结论:最划算是读 Chrome 标签标题** —— 日历预订的会议,标签标题通常就是事件名(形如 "(3) 团队周会 - Google Meet")。已实现:`MeetWatcher.chromeMeeting()` 同时取 URL+title,`cleanMeetingTitle` 去未读数前缀/「Google Meet」装饰;`Event.started(url,title,mic)`;`RecordingController.meetingTitle` → 入库时作录音标题(替代 UUID),并显示在弹窗副标题。**更准但更重的方案(未做,留备选)**:Google Calendar API(OAuth)按 `conferenceData.entryPoints` 的 meet id 匹配当前事件取 summary —— 能拿到准确事件名+参与者,但要 OAuth+联网+权限,过重;标签标题已覆盖绝大多数日历会议场景。备选②:Chrome「允许 Apple 事件执行 JS」后 `execute javascript` 读 Meet DOM 标题,比标题更脏,不如直接用 tab title。
+
+### 一批 UI/后端优化（2026-06-22，用户反馈第二轮）
+
+1. **转写改在线 turbo**（核心）:本地 WhisperKit 太慢 → 默认改走 aihubmix `whisper-large-v3-turbo`。`OnlineTranscriber.swift` 多部分 POST `{AIHUBMIX_BASE_URL}/audio/transcriptions`(verbose_json + segment 时间戳,复用 embedding 同域同 key),上传 ingest 已导出的 `audio.m4a`(压缩,绕 25MB 限)。Config 加 `transcribeModel`(TRANSCRIBE_MODEL,默认 whisper-large-v3-turbo)+ `transcribeOnline`(TRANSCRIBE_ONLINE,默认 true;设 false 回退本地)。**已用 `say` 生成短 clip curl 实测端点**:返回 `{language,duration,segments:[{start,end,text}]}` 与解码结构吻合。CLI/App 入库都自动走在线。
+2. **菜单栏型 App**:`AppDelegate`(NSApplicationDelegateAdaptor)`applicationShouldTerminateAfterLastWindowClosed=false`;监听 `NSWindow.willCloseNotification`,关掉主窗后若无可见主窗 → `setActivationPolicy(.accessory)`(退出 Dock,只剩菜单栏图标);`WindowConfigurator` 窗口出现时设 `.regular`(恢复 Dock);菜单栏「打开主窗口」先 `.regular` 再 `openWindow("main")`。**澄清**:窗口内顶栏只是自绘标题栏(录音/主题按钮),不是菜单 —— 下拉菜单是系统菜单栏的 `MenuBarExtra` 图标。
+3. **弹窗阴影裁切**:之前 padding(16) < shadow radius(30) → 阴影被 panel 边界裁成硬矩形(看着像半透明渐变底)。改 padding(24) + shadow(radius16,y6),panel 贴 visibleFrame 右上角(留白即视觉边距)。
+4. **摘要可选中复制**:`SummaryMarkdown` 加 `.textSelection(.enabled)`。
+5. **说话人试听**:`LibraryModel` 存 `diarSpans` + `playSpeakerSample(label)`(取该说话人最长 diar 段,seek+play,`stopAt` 到点自停;再点暂停),名册行加播放按钮 —— 标注前快速辨认谁是谁。
+
+### 会议检测弹窗改为屏幕级浮窗（2026-06-22，用户反馈）
+
+- **现象/诉求**:初版把弹窗做成主窗口内的 SwiftUI overlay(OverlayHost),贴 App 右上角;但用户要它贴**屏幕**右上角,且窗口最小化/关闭(App 仍在菜单栏后台)时也要弹。
+- **方案**:`MeetingPanel.swift::MeetingPanelController`(单例)持一个独立 `NSPanel`(`.borderless+.nonactivatingPanel`、`level=.floating`、`collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary,.stationary]`、透明背景由 SwiftUI 卡片自绘),贴 `NSScreen.main.visibleFrame` 右上角。内容 `MeetingPopupCard`(从 OverlayHost 抽出复用)。
+- **关键**:用 **Combine 订阅 `recorder.$phase`**(不是 View 的 onChange)来 show/hide —— 窗口关了 View 不渲染,但单例订阅和 `RecordingController`(App 级 @StateObject)都活着,所以后台仍能弹。`nonactivatingPanel` 让后台点按钮不抢焦点也能用。
+- 顺带:`WindowGroup(id:"main")` + 菜单栏 `openWindow("main")`,窗口被关后能从菜单栏重新打开。
+
+### 打通：专有词表读写（2026-06-22）
+
+- `GlossaryStore.swift`:`GlossaryEntry{canonical,variants}` 结构化读写 `vault/glossary.txt`(沿用 `Glossary` 的 `规范词 = 变体1, 变体2` 格式)。`save` 覆盖写+保留头注释(词表已由 App「设置›专有词表」接管,丢弃用户手写注释)。`Glossary`(消费:偏置+纠正)保持只读不变,本类型只管 CRUD。
+- `Index.recordingSummaryInfo(id:)` 新增:读已存摘要正文+模板 id,供录音库摘要页展示。
+
+---
+
 ## App 套壳阶段决策(2026-06-22，开工前定)
 
 - **形态**:不只是 Chat——三块。①Chat 页(问答,答案带可点引用:录音/时间点/说话人,= `ask`);②录音库页(列表+带说话人标注全文+播放跳转);③录音采集(菜单栏/悬浮窗 + Meet 弹窗);④设置(vault repo/说话人命名/密钥)。心智模型="只懂你自己录音的私人 ChatGPT"。
@@ -249,3 +299,30 @@ workflow(7方案) + Kaldi agent 调研排序(契合分)：
 
 - synthesis(ask) 的 pro vs flash A/B 还没做。
 - diarization 选型实测(workflow 结果回来后)。
+
+## 时间感知检索 + AI Summary（2026-06-22 决策）
+
+**背景**：检索链路里录音时间是"死数据"——`recordings.recorded_at` 已入库但 chunk 表无时间列、检索 SQL 不按时间过滤、问答引用不带日期，LLM 不知道某条是哪天说的。"汇总昨天的 1-on-1" 这类查询本质是 **recording 级时间筛选**，不是 chunk 级语义检索。
+
+**决策**：
+- **时间索引**：`chunks` 加 `recording_date`（本地 `yyyy-MM-dd`，denormalized 便于单表 WHERE）；`recordings` 加 `summary` 列。旧库 `ALTER TABLE ADD COLUMN` 迁移（pragma 检测列是否存在）。
+- **时间检索**：`vectorSearch/ftsSearch/search()` 加 `dateRange` 过滤；`SearchHit` 带 `recordingDate`；`Synthesizer` 引用格式带日期，LLM 看得到时间。vec0 KNN 不支持前置过滤 → 有日期范围时把内部 k 放大（个人 wiki 规模可接受）。
+- **查询规划（LLM 抽取，非规则）**：问答前一步 `QueryPlanner` 让 LLM（传入今天日期+星期）从问题抽出 dateFrom/dateTo + 判定 mode=qa/digest，解析 JSON，失败回退普通问答。能处理"上周三/这个月/五月初"等任意表达。
+- **AI Summary**：转写后生成；**模板列表**（不同场景不同 prompt：1-on-1/团队会/头脑风暴/通用），JSON 存 `~/Library/Application Support/Resound/summary-templates.json`，占位符 `{date}{weekday}{title}{speakers}{transcript}`，传入录音时间作锚点。写 `summary.md`（事实源在 vault）+ 入 `recordings.summary`（可检索）。"汇总昨天"走 summary 合并而非碎片。
+- **依据**：summary 与时间检索咬合——digest 模式直接取范围内录音的 summary，又快又准。模板列表满足"不同场景不同摘要重点"。
+- **顺序**：先做后端链路（Core + CLI + index），UI 展示等新设计回来再接。
+
+## UI 微调：选中遮挡 / 进度条拖窗 / 文本可选中（2026-06-22）
+
+- **Markdown 渲染换库**：自制解析器搞不定嵌套列表层级/表格 → 改用 `gonzalezreal/swift-markdown-ui`（MarkdownUI），以 `.gitHub` 主题为底叠 Resound 调色板。`Package.swift` 加依赖 + ResoundApp 加 product。
+- **主题色**：浅色 accent `#bd6a2e`（赤陶橙，accentSoft α0.10）、深色 `#e3a35f`（暖金，α0.18）。
+- **侧栏折叠按钮**：从头部移出，改圆形浮在侧栏右边框上——`.overlay(alignment:.topLeading)` 加 `offset(x: 侧栏宽-半径, y: 21)`，圆心 x 落边框、y 与 Logo 中心齐平（14 sidebar pad + 4 header pad + 15 半图标 = 33；按钮半高 12 → y=21）。
+- **录音行操作图标遮挡**：原 `if on || hover` 导致选中态 pencil/trash 常驻盖住标题尾巴 → 改 `if hover` 仅悬停出现。
+- **拖进度条带动整窗**：根因 `window.isMovableByWindowBackground=true`，自绘 Scrubber 的 mouseDown 被 AppKit 当成拖窗。**对策**：`WindowDragBlocker`（NSViewRepresentable，内部 NSView `override mouseDownCanMoveWindow { false }`）`.background()` 垫在 Scrubber 下——它是该处最深的 hit NSView，AppKit 据此放弃拖窗，而 SwiftUI 的 DragGesture 仍由 hosting view 处理不受影响。比全局关 movableByWindowBackground 更稳（不牺牲其它区域拖窗）。
+- **文本可选中**：摘要正文早已 `.textSelection`，但标题/日期/「会议摘要」标题是裸 `Text` 不可选 → 各自加 `.textSelection(.enabled)`，与摘要一致可复制。
+
+## 全局按钮命中区：`.plainHit`（2026-06-22）
+
+- **现象**：`.buttonStyle(.plain)` 的 Tab/按钮，若 label 背景透明（如未选中的「会议摘要/逐句转录」背景 `.clear`），macOS 上只有不透明文字/图标可点，padding 空白点不动。
+- **根因**：SwiftUI 在 macOS 下 plain button 的命中区取 label 的不透明内容，透明区不计入。
+- **统一对策**：自定义 `PlainHitButtonStyle`（`extension ButtonStyle ... static var plainHit`），`makeBody` 把 `configuration.label` 加 `.contentShape(Rectangle())` + 按下变暗 0.55。全 App 41 处 `.buttonStyle(.plain)` 一次性 sed 换 `.plainHit`。比逐处补 `contentShape` 更彻底，新按钮统一用它。
