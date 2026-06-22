@@ -5,7 +5,7 @@
 
 ## 一句话现状
 
-检索/问答 + 说话人识别**已打通并接入检索**:enroll 注册声纹→index、`speaker-label` 就地填 chunk.person_id(不重嵌入)、**search/ask 显示 👤说话人**(已验证:OS会议 25/25 chunk 标注、search 输出带人名)。决策已定:标注存 vault(源)/声纹向量存 index(派生)。**下一步是 UX/打磨(见下),核心链路已完整。**
+检索/问答 + 说话人识别已打通接入检索(👤)。**App 套壳进行中(SPM 应用+打包脚本路线)**:阶段1 会议录音器`record-meeting`(用户实测录音成功)、阶段2 Meet 检测`watch-meet`、阶段3 **SwiftUI App 骨架已能编译+打包成签名 .app**(Chat 页接真实 ask 管线;录音库/设置占位)。**下一步:Chat 页用户实测 + 把录音/Meet检测/说话人命名接进 UI。**
 
 ## ✅ 已完成（可用）
 

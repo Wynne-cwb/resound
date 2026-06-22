@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Doctor.self]
     )
 }
 
@@ -386,6 +386,78 @@ struct Transcribe: AsyncParsableCommand {
                 maxFallback: maxFallback,
                 push: push
             )
+        print("✅ 完成：\(out.id)")
+    }
+}
+
+/// resound watch-meet —— 监听 Chrome 开 Google Meet（轮询 URL + 麦克风占用），命中打印（App 里改弹窗）
+struct WatchMeet: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "watch-meet",
+        abstract: "监听 Chrome 是否在开 Google Meet，检测到则提示（需自动化权限控制 Chrome）")
+
+    @Option(name: .long, help: "轮询间隔秒（默认 4）")
+    var interval: Double = 4
+
+    @Flag(name: .long, inversion: .prefixedNo, help: "需麦克风占用才算在通话（默认开，--no-require-mic 仅看标签）")
+    var requireMic = true
+
+    func run() async throws {
+        let watcher = MeetWatcher()
+        print("👀 监听 Google Meet…（首次会请求「控制 Google Chrome」权限）  按 Enter 停止")
+        let task = Task {
+            await watcher.watch(intervalSec: interval, requireMic: requireMic) { ev in
+                switch ev {
+                case .started(let url, let mic):
+                    print("\n🔔 检测到 Google Meet：\(url)  麦克风：\(mic ? "占用中" : "空闲")")
+                    print("   → App 里这里会弹窗：「检测到会议，开始录音?」")
+                case .ended:
+                    print("\n—— 会议结束")
+                }
+            }
+        }
+        _ = readLine()
+        task.cancel()
+        print("⏹  停止监听")
+    }
+}
+
+/// resound record-meeting --vault <path> —— 录会议（麦克风 + 系统/对方音）→ 转录入库
+struct RecordMeeting: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "record-meeting",
+        abstract: "录会议：麦克风 + 系统音频(对方声音)双路 → 混音 → 转录写入 vault。需屏幕录制+麦克风权限")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "标题")
+    var title: String?
+
+    @Option(name: .long, help: "来源类型")
+    var source: String = "meeting"
+
+    @Option(name: .long, parsing: .upToNextOption, help: "标签")
+    var tags: [String] = []
+
+    @Option(name: .long, help: "WhisperKit 模型")
+    var model: String = "large-v3"
+
+    @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")
+    var maxSeconds: Double?
+
+    @Option(name: .long, help: "语言代码（如 zh / en），中英混杂建议 zh")
+    var language: String?
+
+    @Option(name: .long, parsing: .upToNextOption, help: "临时词表偏置词")
+    var hint: [String] = []
+
+    @Flag(name: .long, help: "完成后 git commit + push 回 vault")
+    var push = false
+
+    func run() async throws {
+        let audioURL = try await MeetingRecorder().record(maxSeconds: maxSeconds)
+        let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
+            .ingest(audioPath: audioURL, title: title, source: source, tags: tags,
+                    model: model, language: language, hints: hint, push: push)
         print("✅ 完成：\(out.id)")
     }
 }

@@ -5,7 +5,37 @@
 
 ---
 
-## 架构 & 数据契约
+## App 套壳阶段决策(2026-06-22，开工前定)
+
+- **形态**:不只是 Chat——三块。①Chat 页(问答,答案带可点引用:录音/时间点/说话人,= `ask`);②录音库页(列表+带说话人标注全文+播放跳转);③录音采集(菜单栏/悬浮窗 + Meet 弹窗);④设置(vault repo/说话人命名/密钥)。心智模型="只懂你自己录音的私人 ChatGPT"。
+- **Meet 检测**(用户选):轮询 Chrome 标签 URL(AppleScript/Apple Events 匹配 `meet.google.com/xxx-xxxx-xxx` 会议室)+ 麦克风占用(CoreAudio 输入设备 running)确认在通话 → 弹窗。**无需 Chrome 扩展**,只要自动化权限(TCC)。以后要更准可加扩展+原生消息。
+- **录音范围**(用户选):**麦克风 + 会议对方音双路** → 用 **ScreenCaptureKit**(macOS 13+,抓 Chrome/系统音频)+ 麦克风,混音。需屏幕录制权限。**现 CLI Recorder 只录麦克风,会议录音要新写采集器。**
+- **待定结构岔路**:GUI+TCC 权限(麦克风/屏幕录制/自动化)需要正式 .app bundle。SPM CLI 现状 → 要么建 Xcode app 工程(依赖本地 SPM 包 ResoundCore),要么 SPM+手动打 .app bundle。Claude 不能开 Xcode GUI,影响谁来 build/授权。
+
+### App 阶段1：会议录音器(2026-06-22，代码完成待实测)
+
+- `MeetingRecorder.swift`:系统音频用 **ScreenCaptureKit**(SCStream `capturesAudio`→AVAssetWriter,直接 append CMSampleBuffer 免手动音频格式转换)+ 麦克风用 **AVAudioEngine** input tap→AVAudioFile;停止后两路各用 `AudioConverter().resampleAudioFile` 重采样到 16k 单声道 → 相加(0.8 增益+硬限幅)→ 写 wav。CLI `record-meeting --vault`→混音→走 IngestPipeline.ingest 入库(source 默认 meeting)。
+- **为何后混而非实时混**:避开 SCStream 缓冲实时进 AVAudioEngine 的格式/同步复杂度;复用现成 resampleAudioFile;混音是纯数组运算易正确。代价:16k 单声道存档(够转录/检索,非高保真)——后续要高保真再改实时混/离线 AVMutableComposition。
+- macOS 14:SCStream 抓系统音(13+)、麦克风单独抓(SCStream 抓麦是 15+)。
+- 验证:编译过;沙箱无屏幕录制权限→优雅报 `screenPermission` 错+指引,不崩。**实测待用户授权屏幕录制(系统设置→隐私→屏幕录制 勾选终端)后跑 `record-meeting`**。
+
+### App 阶段3-1：SwiftUI 骨架(2026-06-22，编译+打包通过)
+
+- **工程结构(用户选)**:SPM 应用 + 打包脚本(非 Xcode 工程)。新增 `ResoundApp` executableTarget(SwiftUI,依赖 ResoundCore),product `ResoundApp`。`resound` CLI 与 `ResoundApp` GUI 共存同一包。
+- **界面**:`ResoundApp.swift`(@main App/WindowGroup)、`RootView.swift`(TabView:问答/录音库/设置;后两者占位)、`ChatView.swift`(ChatViewModel 接真实管线:IndexPipeline.search+rerank → Synthesizer,答案带可点来源含 👤说话人)。
+- **打包**:`scripts/bundle-app.sh [debug|release]` → `build/Resound.app`(gitignored):组装 Contents/{MacOS/Resound,Resources/资源bundle,Info.plist} + ad-hoc 签名。**坑**:资源 bundle 放 Contents/Resources(非 MacOS)、签名**去掉 --deep**(纯数据 bundle 不可 --deep 签),否则 codesign 报 "bundle format unrecognized"。Info.plist 含 NSMicrophoneUsageDescription / NSAppleEventsUsageDescription。
+- **配置发现**:Config.loadDotEnv 加 `RESOUND_ENV` 环境变量 + `~/Library/Application Support/Resound/.env`(.app 启动 cwd=/ 找不到仓库 .env)。**用户需把 .env 复制到 App Support**。
+- 验证:swift build 全过、bundle-app.sh 产出的 .app `codesign --verify` 通过。**GUI 渲染/Chat 实际问答待用户运行(我看不到渲染)**。
+- 待:Chat 实测;录音库页(列表+带说话人转录+播放跳转);设置页(可视化 vault/密钥/说话人);把 record-meeting/watch-meet 接进 UI(菜单栏 + Meet 弹窗);说话人命名 UI。
+
+### App 阶段2：Meet 检测器(2026-06-22，代码完成)
+
+- `MeetWatcher.swift`:`chromeMeetingURL()` 用 NSAppleScript 轮询 Chrome 标签(先判 `is running` 不启动 Chrome),正则 `meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}` 匹配会议室(排除落地页);`micInUse()` 用 CoreAudio 查默认输入设备 `kAudioDevicePropertyDeviceIsRunningSomewhere`;`watch()` 状态机进/离会议触发 `started/ended`(requireMic 默认 true=需会议室URL+麦克风占用)。
+- CLI `watch-meet [--interval 4] [--no-require-mic]`:命中打印(App 里改弹窗)。无权限/无 Chrome → 优雅返回 nil 当无会议。
+- 验证:编译过;无 Meet 时跑 7s 无误报、无崩溃、干净停。**检测真实 Meet 待用户授权「控制 Google Chrome」(首次弹 TCC)+ 开个会测**。
+- 录音器与检测器独立;App 阶段3 由 UI 把"检测→弹窗→录音"串起来。
+
+### App 阶段1：会议录音器(2026-06-22，代码完成待实测)
 
 - **三边界**：App(本仓库，纯实现) / Vault(用户自配的数据 repo，事实源) / Index(本地 SQLite，派生物可重建)。不变量：删 Index 能从 Vault 完整重建。
 - **Vault 可配置**：App 不写死数据 repo，用户在设置里指定；App 操作本地工作副本，git 当同步层。音频走 Git LFS。

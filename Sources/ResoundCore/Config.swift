@@ -47,8 +47,17 @@ public enum ConfigError: Error, CustomStringConvertible {
     }
 }
 
-/// 从 cwd 向上找 .env，解析 KEY=VALUE。
+/// 找 .env：① 环境变量 RESOUND_ENV 指定的文件 ② ~/Library/Application Support/Resound/.env
+/// ③ 从 cwd 向上 5 层。App(.app 启动 cwd=/)走①②，CLI 走③。
 func loadDotEnv() -> [String: String] {
+    if let p = ProcessInfo.processInfo.environment["RESOUND_ENV"],
+       let s = try? String(contentsOf: URL(fileURLWithPath: p), encoding: .utf8) {
+        return parseEnv(s)
+    }
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Resound/.env")
+    if let s = try? String(contentsOf: appSupport, encoding: .utf8) { return parseEnv(s) }
+
     var dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     for _ in 0..<5 {
         let f = dir.appendingPathComponent(".env")

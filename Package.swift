@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "resound", targets: ["resound"]),
+        .executable(name: "ResoundApp", targets: ["ResoundApp"]),
         .library(name: "ResoundCore", targets: ["ResoundCore"]),
     ],
     dependencies: [
@@ -46,6 +47,11 @@ let package = Package(
                 "ResoundCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "ResoundApp",
+            dependencies: ["ResoundCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
