@@ -28,6 +28,15 @@
 - 验证:swift build 全过、bundle-app.sh 产出的 .app `codesign --verify` 通过。**GUI 渲染/Chat 实际问答待用户运行(我看不到渲染)**。
 - 待:Chat 实测;录音库页(列表+带说话人转录+播放跳转);设置页(可视化 vault/密钥/说话人);把 record-meeting/watch-meet 接进 UI(菜单栏 + Meet 弹窗);说话人命名 UI。
 
+### App 阶段3-2：Meet 检测→弹窗→录音 旗舰功能(2026-06-22，编译+打包通过)
+
+- `MeetingRecorder` 重构出 `startCapture()`/`finishCapture()`(GUI 用开始/停止分离,`record(maxSeconds:)` CLI 便利方法基于其上)。
+- `RecordingController`(@MainActor ObservableObject):App 启动后台 `MeetWatcher.watch` 监听 → 进会议置 `.meetingDetected` → RootView `.alert` 弹"开始录音?" → `startRecording()`(startCapture)→ 横幅"录音中[停止并转录]" → `stopAndIngest()`(finishCapture → IngestPipeline.ingest 入 vault)。
+- RootView 加录音横幅(红/处理中)+ Meet `.alert` 弹窗 + toast;ResoundApp `@StateObject` 控制器 + onAppear startWatching。
+- Config 加 `vaultPath`(VAULT_PATH);App 录音入库需要 → 用户须在 .env 配 VAULT_PATH。
+- 验证:swift build 全过、bundle-app.sh 产 .app 签名校验通过。**GUI 运行/权限流/Meet 实际弹窗待用户测**。
+- 已知:转录 large-v3 ~1.7x 实时 + 首次 Metal 编译 ~13min(App 需预热,暂未做);录完需手动 `resound index` 重建索引才进检索(后续自动化)。
+
 ### App 阶段2：Meet 检测器(2026-06-22，代码完成)
 
 - `MeetWatcher.swift`:`chromeMeetingURL()` 用 NSAppleScript 轮询 Chrome 标签(先判 `is running` 不启动 Chrome),正则 `meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}` 匹配会议室(排除落地页);`micInUse()` 用 CoreAudio 查默认输入设备 `kAudioDevicePropertyDeviceIsRunningSomewhere`;`watch()` 状态机进/离会议触发 `started/ended`(requireMic 默认 true=需会议室URL+麦克风占用)。

@@ -39,11 +39,30 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>NSMicrophoneUsageDescription</key><string>Resound 需要麦克风来录制你的语音。</string>
     <key>NSAppleEventsUsageDescription</key><string>Resound 需要控制 Google Chrome 来检测 Google Meet。</string>
 </dict>
 </plist>
 PLIST
+
+# App 图标：assets/AppIcon.png → AppIcon.icns（多尺寸 iconset）
+ICON_SRC="$REPO/assets/AppIcon.png"
+if [ -f "$ICON_SRC" ]; then
+    TMP_ICONSET="$(mktemp -d)/AppIcon.iconset"
+    mkdir -p "$TMP_ICONSET"
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" "$ICON_SRC" --out "$TMP_ICONSET/icon_${size}x${size}.png" >/dev/null
+        d2=$((size * 2))
+        sips -z "$d2" "$d2" "$ICON_SRC" --out "$TMP_ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$TMP_ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+    rm -rf "$(dirname "$TMP_ICONSET")"
+    echo "  🎨 已生成 AppIcon.icns"
+else
+    echo "  ⚠️ 无 assets/AppIcon.png，跳过图标"
+fi
 
 # ad-hoc 签名(本地自用足够；TCC 按 bundle id 记权限)。资源 bundle 是纯数据，无需 --deep
 codesign --force --sign - "$APP"

@@ -42,22 +42,19 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
         }
     }
 
-    /// 录到按 Enter 或 maxSeconds，返回混好的 16k 单声道 wav 文件 URL。
-    public func record(maxSeconds: Double?, log: (String) -> Void = { print($0) }) async throws -> URL {
+    /// 开始捕获（麦克风 + 系统音）。GUI 用：配 finishCapture() 由界面控制停止。
+    public func startCapture(log: (String) -> Void = { print($0) }) async throws {
         guard await requestMicPermission() else { throw MeetingRecorderError.micPermission }
         let tmp = FileManager.default.temporaryDirectory
         let uid = UUID().uuidString
         sysURL = tmp.appendingPathComponent("resound-sys-\(uid).m4a")
         micURL = tmp.appendingPathComponent("resound-mic-\(uid).caf")
-
         try await startSystemAudio(log: log)
         try startMic(log: log)
+    }
 
-        log("🔴 会议录音中（麦克风 + 对方音）…  按 Enter 停止" +
-            (maxSeconds.map { String(format: "（或 %.0fs 自动停止）", $0) } ?? ""))
-        await waitForStop(maxSeconds: maxSeconds)
-
-        // 停止两路
+    /// 停止捕获并混音，返回 16k 单声道 wav 文件 URL。
+    public func finishCapture(log: (String) -> Void = { print($0) }) async throws -> URL {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         micFile = nil
@@ -65,8 +62,16 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
         sysInput?.markAsFinished()
         if let writer { await writer.finishWriting() }
         log("⏹  录音结束，混音中…")
-
         return try mixTo16k(log: log)
+    }
+
+    /// 录到按 Enter 或 maxSeconds，返回混好的 16k 单声道 wav 文件 URL（CLI 用）。
+    public func record(maxSeconds: Double?, log: (String) -> Void = { print($0) }) async throws -> URL {
+        try await startCapture(log: log)
+        log("🔴 会议录音中（麦克风 + 对方音）…  按 Enter 停止" +
+            (maxSeconds.map { String(format: "（或 %.0fs 自动停止）", $0) } ?? ""))
+        await waitForStop(maxSeconds: maxSeconds)
+        return try await finishCapture(log: log)
     }
 
     // MARK: 系统音频（ScreenCaptureKit → AVAssetWriter）

@@ -13,6 +13,7 @@ public struct Config {
     public var contextModel: String
     public var answerModel: String
     public var speakerModel: String?   // 声纹模型 .onnx 路径（SPEAKER_MODEL）；缺省则索引不做说话人标注
+    public var vaultPath: String?      // vault 根目录（VAULT_PATH）；App 录音入库用
 
     public static func load() throws -> Config {
         let env = loadDotEnv()
@@ -35,7 +36,8 @@ public struct Config {
             rerankModel: v("RERANK_MODEL") ?? "deepseek-v4-flash",
             contextModel: v("CONTEXT_MODEL") ?? "deepseek-v4-flash",
             answerModel: v("ANSWER_MODEL") ?? "deepseek-v4-pro",
-            speakerModel: v("SPEAKER_MODEL")
+            speakerModel: v("SPEAKER_MODEL"),
+            vaultPath: v("VAULT_PATH")
         )
     }
 }

@@ -2,16 +2,76 @@ import SwiftUI
 import ResoundCore
 
 struct RootView: View {
+    @EnvironmentObject var recorder: RecordingController
+
     var body: some View {
-        TabView {
-            ChatView()
-                .tabItem { Label("问答", systemImage: "bubble.left.and.bubble.right") }
-            LibraryView()
-                .tabItem { Label("录音库", systemImage: "waveform") }
-            SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape") }
+        VStack(spacing: 0) {
+            RecordingBanner()
+            TabView {
+                ChatView()
+                    .tabItem { Label("问答", systemImage: "bubble.left.and.bubble.right") }
+                LibraryView()
+                    .tabItem { Label("录音库", systemImage: "waveform") }
+                SettingsView()
+                    .tabItem { Label("设置", systemImage: "gearshape") }
+            }
+            .padding(.top, 2)
         }
-        .padding(.top, 2)
+        .alert("检测到 Google Meet", isPresented: meetDetected) {
+            Button("开始录音") { recorder.startRecording() }
+            Button("忽略", role: .cancel) { recorder.ignorePrompt() }
+        } message: {
+            Text("要录制这场会议吗？（麦克风 + 对方声音）")
+        }
+        .overlay(alignment: .bottom) {
+            if !recorder.toast.isEmpty {
+                HStack {
+                    Text(recorder.toast).font(.callout)
+                    Spacer()
+                    Button { recorder.toast = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                .padding(12)
+            }
+        }
+    }
+
+    private var meetDetected: Binding<Bool> {
+        Binding(
+            get: { if case .meetingDetected = recorder.phase { return true } else { return false } },
+            set: { if !$0 { recorder.ignorePrompt() } }
+        )
+    }
+}
+
+/// 录音/处理状态横幅。
+struct RecordingBanner: View {
+    @EnvironmentObject var recorder: RecordingController
+    var body: some View {
+        switch recorder.phase {
+        case .recording:
+            HStack(spacing: 10) {
+                Circle().fill(.red).frame(width: 10, height: 10)
+                Text("会议录音中…（麦克风 + 对方声音）").foregroundStyle(.white)
+                Spacer()
+                Button("停止并转录") { recorder.stopAndIngest() }
+                    .buttonStyle(.borderedProminent).tint(.white).foregroundStyle(.red)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(Color.red)
+        case .processing:
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("转录入库中…（large-v3，首次较慢）").foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .background(.quaternary)
+        default:
+            EmptyView()
+        }
     }
 }
 
@@ -52,6 +112,7 @@ struct SettingsView: View {
             embedding: \(c.embeddingModel) (dim \(c.embeddingDim))
             chat: \(c.chatModel)
             speakerModel: \(c.speakerModel ?? "未设置（无法做说话人识别）")
+            vault: \(c.vaultPath ?? "未设置 VAULT_PATH（会议录音无法入库）")
             索引: \(defaultIndexPath().path)
             """
         } catch {
