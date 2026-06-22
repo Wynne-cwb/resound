@@ -24,3 +24,10 @@ secrets.*
 
 # Vault working copies (lives in App Support, not in code repo)
 vaults/
+
+# Python diarization 实验(venv+模型，派生物)
+experiments/diar-py/.venv/
+experiments/diar-py/models/
+
+# sherpa-onnx 静态库(派生物，~百MB，用 scripts/build-sherpa-onnx.sh 重建)
+Vendor/sherpa-onnx/

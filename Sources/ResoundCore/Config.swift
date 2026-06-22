@@ -12,6 +12,7 @@ public struct Config {
     public var rerankModel: String
     public var contextModel: String
     public var answerModel: String
+    public var speakerModel: String?   // 声纹模型 .onnx 路径（SPEAKER_MODEL）；缺省则索引不做说话人标注
 
     public static func load() throws -> Config {
         let env = loadDotEnv()
@@ -33,7 +34,8 @@ public struct Config {
             chatModel: v("CHAT_MODEL") ?? "deepseek-v4-pro",
             rerankModel: v("RERANK_MODEL") ?? "deepseek-v4-flash",
             contextModel: v("CONTEXT_MODEL") ?? "deepseek-v4-flash",
-            answerModel: v("ANSWER_MODEL") ?? "deepseek-v4-pro"
+            answerModel: v("ANSWER_MODEL") ?? "deepseek-v4-pro",
+            speakerModel: v("SPEAKER_MODEL")
         )
     }
 }

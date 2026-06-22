@@ -46,6 +46,23 @@ public struct IndexPipeline {
                 source: manifest.source, language: manifest.language)
             try index.deleteChunks(recordingId: manifest.id)   // 幂等重建
 
+            // 说话人标注：配置了声纹模型 + index 已有注册声纹时，逐段识别填 person_id（缺一则跳过，不影响检索）
+            var personSpans: [(start: Double, end: Double, name: String)] = []
+            if let spkModel = config.speakerModel {
+                let refs = index.loadSpeakerRefs()
+                let audioURL = recDir.appendingPathComponent(manifest.audioFile)
+                if !refs.isEmpty, FileManager.default.fileExists(atPath: audioURL.path) {
+                    let matcher = SpeakerMatcher(); matcher.setRefs(refs)
+                    let embedder = try SpeakerEmbedder(model: spkModel)
+                    personSpans = try recognizeSpansFromFile(
+                        audio: audioURL,
+                        segments: transcript.segments.map { (start: $0.start, end: $0.end) },
+                        matcher: matcher, embedder: embedder)
+                    let who = Set(personSpans.map { $0.name }).subtracting(["unknown"]).sorted()
+                    log("  🗣 说话人标注：\(who.isEmpty ? "无匹配" : who.joined(separator: "/"))")
+                }
+            }
+
             var contexts: [Int: String] = [:]
             if enrichContext {
                 let docText = transcript.segments.map { $0.text }.joined()
@@ -60,15 +77,58 @@ public struct IndexPipeline {
                 }
                 let vecs = try await embedder.embedDocuments(texts)
                 for (chunk, vec) in zip(batch, vecs) {
+                    let person = personSpans.isEmpty ? nil : personFor(personSpans, start: chunk.start, end: chunk.end)
                     try index.insertChunk(recordingId: manifest.id, idx: chunk.index,
                         text: chunk.text, context: contexts[chunk.index],
-                        start: chunk.start, end: chunk.end, personId: nil, embedding: vec)
+                        start: chunk.start, end: chunk.end, personId: person, embedding: vec)
                 }
             }
             totalChunks += chunks.count
             log("  ✓ \(manifest.id)：\(chunks.count) chunks\(enrichContext ? "（含上下文）" : "")")
         }
         log("✅ 索引完成：\(recordings.count) 录音 / \(totalChunks) chunks → \(indexPath.path)")
+    }
+
+    // MARK: 就地重打说话人标签（不重嵌入；注册新声纹后调用）
+
+    public func labelExisting(vaultRoot: URL, indexPath: URL,
+                              log: (String) -> Void = { print($0) }) async throws {
+        guard let spkModel = config.speakerModel else { throw ConfigError.missing("SPEAKER_MODEL") }
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        let refs = index.loadSpeakerRefs()
+        guard !refs.isEmpty else { log("⚠️ 声纹库为空，先 speaker-enroll"); return }
+        log("🗣 声纹库：\(refs.map { $0.name }.joined(separator: "/"))")
+        let embedder = try SpeakerEmbedder(model: spkModel)
+        var dirById: [String: URL] = [:]
+        for d in findRecordings(vaultRoot) {
+            if let m = try? parseManifest(d.appendingPathComponent("recording.yaml")) { dirById[m.id] = d }
+        }
+        var done = 0
+        for recId in index.allRecordingIds() {
+            guard let dir = dirById[recId] else { log("  ⚠️ 找不到目录：\(recId)"); continue }
+            let manifest = try parseManifest(dir.appendingPathComponent("recording.yaml"))
+            let audioURL = dir.appendingPathComponent(manifest.audioFile)
+            let tURL = dir.appendingPathComponent("transcript.json")
+            guard FileManager.default.fileExists(atPath: audioURL.path),
+                  let tData = try? Data(contentsOf: tURL),
+                  let transcript = try? JSONDecoder().decode(Transcript.self, from: tData) else {
+                log("  ⚠️ 跳过（缺音频/转录）：\(recId)"); continue
+            }
+            let matcher = SpeakerMatcher(); matcher.setRefs(refs)
+            let spans = try recognizeSpansFromFile(
+                audio: audioURL, segments: transcript.segments.map { (start: $0.start, end: $0.end) },
+                matcher: matcher, embedder: embedder)
+            var labeled = 0
+            for c in index.chunkTimes(recordingId: recId) {
+                let p = personFor(spans, start: c.start, end: c.end)
+                try index.setChunkPerson(id: c.id, person: p)
+                if p != nil { labeled += 1 }
+            }
+            let who = Set(spans.map { $0.name }).subtracting(["unknown"]).sorted()
+            log("  ✓ \(recId)：\(who.isEmpty ? "无匹配" : who.joined(separator: "/"))（\(labeled) chunk 打标）")
+            done += 1
+        }
+        log("✅ 重打标完成：\(done) 条录音")
     }
 
     // MARK: 检索（hybrid + RRF；rerank 留待下一步）
@@ -135,6 +195,7 @@ func chunkHash(model: String, text: String) -> String {
 struct Manifest {
     let id: String, title: String, recordedAt: String
     let durationSec: Int, source: String, language: String
+    let audioFile: String
 }
 
 func parseManifest(_ url: URL) throws -> Manifest {
@@ -155,7 +216,8 @@ func parseManifest(_ url: URL) throws -> Manifest {
         recordedAt: m["recorded_at"] ?? "",
         durationSec: Int(m["duration_sec"] ?? "0") ?? 0,
         source: m["source"] ?? "",
-        language: m["language"] ?? "")
+        language: m["language"] ?? "",
+        audioFile: m["audio_file"] ?? "audio.m4a")
 }
 
 /// 递归找 recordings/ 下所有含 recording.yaml 的目录。

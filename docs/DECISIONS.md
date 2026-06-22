@@ -47,7 +47,113 @@ transcribe → 繁简归一(ZhConverter) → glossary 别名纠正 → 切块(Ch
 - **AudioConverter 撞名**：FluidAudio 模块里有同名 `AudioConverter` + 命名空间类型 `FluidAudio`，故 `FluidAudio.AudioConverter` 解析失败。把自有的改名 **M4AExporter**，diarizer 里用 FluidAudio 的 `AudioConverter`(不加前缀)。
 - 真实会议转录质量：清晰单人段好；会前闲聊/抢话/远场碎成乱码；繁简混输(已归一)。
 
-## 说话人识别(diarization) — 进行中，结论见下
+## 说话人识别 — 决定性结论(2026-06-18 Python 快验)：弃聚类，走「分割+注册匹配」
+
+**实测翻盘**：sherpa-onnx 盲聚类同样失败，但**声纹注册匹配大获成功**。两段 ground truth(GGbond 2人 / OS 6人)：
+
+| 方法 | GGbond(2人) | OS(6人) | 速度 |
+|---|---|---|---|
+| **盲聚类**(seg + FastClustering，强制 num_clusters=N) | 55% **=基线**(两簇都随机混) | 38.5%(基线29%) | CAM++ RTF0.22 / ERes RTF1.02 |
+| **注册匹配** CAM++(每人挑最长3条发言注册 + 最近邻) | **89.4%** | **92.3%** | 14-16s |
+| **注册匹配** ERes2NetV2 | 87.8% | 93.4% | 73-84s(慢5x) |
+
+- **根因诊断**：`num_clusters=2` 强制分簇后，两簇仍是 Wynne/GGbond 随机混合 → 不是声纹不行，是**聚类那一步**在真实会议(重叠/短附和/远场单麦)上分不开。**而参考声纹两两 cosine 仅 0.24~0.66(CAM++)→ embedding 区分力很强**。换言之 FluidAudio/sherpa 都栽在同一步：聚类。
+- **决定 1：架构弃用盲聚类 diarization，改「分割定边界 + 逐段声纹注册匹配」**。这正好是产品要的「标几次变准」：用户标几条 → 存参考声纹 → 其余段最近邻匹配 → 填 person_id；无匹配(低于阈值)进 unknown 待标。
+- **决定 2：声纹模型选 CAM++ `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced`(28MB)**。准确率与 ERes2NetV2(71MB)打平但快 5x、人间区分更干净(ERes 的 GGbond↔Carlos 高达 0.83，余量小)；中英夹杂专训，正合我们语料。质量>速度在此不冲突——快的反而更准更稳。
+- **决定 3：声纹窗口必须 ≥~4s，不能用原始 ASR 碎片**(2026-06-18 实测修正)。用 vault 真实 ASR 边界(539 段，均 2.4s)跑注册匹配只有 **53.5%**(vs GT 纯轮次长窗口 92%)——碎片太短、跨说话人，声纹被污染。**把相邻 ASR 段(gap<1s)贪婪合并成 ≥4s 窗口 → 回到 85.3%**(≥6s 84.7%、≥8s 83.8%，4s 是甜点)。85% vs 92% 的剩余差距=naive 合并会跨说话人;未来加说话人变化点检测/pyannote-seg 可补回。**工程流程:ASR 段 → 合并 ≥4s 窗口 → 逐窗提声纹 → 匹配 → 把人贴回该窗内所有 ASR 子段**。验证脚本 `asr_enroll_eval.py --merge-to 4`。
+- **决定 4：跨录音注册用 sherpa-onnx `SpeakerEmbeddingManager`**(add 按名注册/同名自动平均、search cosine 检索)或导裸 embedding 自建 sqlite-vec 声纹库(与现有 vec 设施一致)。
+- **误差集中**：短附和("嗯/哦"<1s，GGbond→Wynne 11条)、相似嗓音对(GGbond↔Carlos)。对策：太短的段不强判、可并入相邻同人段；可调匹配阈值，低置信进 unknown。
+- **环境**：`experiments/diar-py/`(gitignored venv)，sherpa-onnx 1.13.3 pip 装；模型在 `experiments/diar-py/models/`；脚本 `eval.py`(盲聚类) / `enroll_eval.py`(GT边界注册) / `asr_enroll_eval.py`(ASR边界+合并)。音频用 macOS `afconvert` 转 16k 单声道(无 ffmpeg)。release tag 拼写是 `speaker-recongition-models`(打错的)。
+
+### 工程参数速查(2026-06-18 业界最佳实践调研，落 Swift 时照此)
+
+业界先例:`whisper-diarization`(MahmoudAshraf97)正是"Whisper 段→逐段提声纹→打标",路线是正路。参数:
+
+| 项 | 推荐值 | 依据 |
+|---|---|---|
+| 声纹窗口 | **合并相邻 ASR 段(gap<1s)到 ≥4s** | 我们实测:碎片53%→合并85% |
+| cosine 绝对拒识门 τ_abs | 起步 **0.35**，标注集扫 0.30–0.45 | EER 阈值经验区间 0.2–0.5，须自标定(我们参考间 cosine 0.24–0.66) |
+| 相对 margin 门 (s1−s2) | **0.06–0.10**，小于判模糊→unknown | 治相似嗓音对(GGbond↔Carlos) |
+| 可信段下限 | **1.5s**(独立打标 + 可更新质心) | <2s SV 显著退化 |
+| 弱段 0.5–1.5s | 降权、**不更新质心** | x-vector 短时退化陡 |
+| 过短段 <0.5s | 不独立判，前后同人→继承标签；异人→时间加权+邻段多数票 | VBx 风格"剔除-重插入" |
+| 注册量 | 每人 3–5 条、单条尽量 ≥3s、累计 ≥10–15s | 多会话 centroid 标配 |
+| 聚合 | **L2归一后求均值(centroid)**；难例可试 keep-all + max | GE2E centroid |
+| 增量更新 | 在线均值 μ_new=(n·μ_old+e_new)/(n+1) 再 L2 归一 | 不必存全部 embedding |
+| 合并守门 | cosine(e_new,μ_old)≥0.45 才并入；<τ_abs 拒并并提示重注册 | 防坏样本污染质心 |
+| score norm | 暂用"减去对其余参考均值"的简化 S-Norm；正式 AS-Norm(top-300 cohort)后置 | 小规模不值得 full AS-Norm |
+| 段内跨人护栏 | 长段(>8s/跨明显停顿)切 1.5–2s 子窗，子窗标签不一致则标"可能跨人"降信度/拆段 | 零成本 |
+| 评测 | 主:段/词级 identification accuracy + 混淆矩阵；补 WDER、按段时长分桶 | DER/JER 是 diarization 指标，confusion 子项最该盯 |
+
+### ✅ Swift 集成完成并验证(2026-06-18 夜)
+
+sherpa-onnx 声纹 C API 已桥进 Swift,`resound speaker-eval` 复现 Python 结论。
+
+- **库构建**:为 macOS arm64 构建 sherpa-onnx **纯静态** C API 库(裁掉 TTS、仅 arm64、deploy 14.0、`BUILD_SHARED_LIBS=OFF`)→ libtool 合并成 `libsherpa-onnx.a`(14MB) + 独立 `libonnxruntime.a`(62MB，cmake 自动下 csukuangfj/onnxruntime-libs 预编译静态库 v1.24.4)。脚本 `scripts/build-sherpa-onnx.sh` 可重建;产物 vendor 到 `Vendor/sherpa-onnx/`(lib gitignored,header 留作 API 契约)。**选静态:免 rpath/dylib 加载/code-signing,单可执行自包含,与 CSQLiteVec 风格一致**。
+- **桥接**:`Sources/CSherpaOnnx` C target(modulemap `header "shim.h"`,shim.h `#include "sherpa-onnx/c-api/c-api.h"`)。**坑:`-I` cSettings 不传播到 Swift importer 触发的 clang module 编译** → 用**相对符号链接** `Sources/CSherpaOnnx/include/sherpa-onnx → ../../../Vendor/sherpa-onnx/include/sherpa-onnx` 让头文件在 target 自己的 include/ 下可见(SPM 只可靠搜 target 自身 include)。
+- **链接 flag**:`-lsherpa-onnx -lonnxruntime` + `.linkedLibrary("c++")` + `.linkedFramework("Foundation")`(onnxruntime 引用了 CF/NSLog 符号,**必须 Foundation**;不需要 Accelerate)。
+- **Swift 封装**:`SherpaSpeaker.swift` 的 `SpeakerEmbedder`(config 4 扁平字段 model/num_threads/debug/provider;`embed([Float])` 提 L2 归一声纹,内存契约 defer 释放)。`SpeakerID.swift`:`mergeASRSegments`(合并≥4s)、`SpeakerMatcher`(centroid + 双门拒识 + 在线均值守门更新)、`speakerIDEval`。音频复用 FluidAudio `AudioConverter().resampleAudioFile`→[Float]@16k。
+- **验证**:`resound speaker-eval` OS 6人会议 **82.5%**(th=0.3→84.4%、0.4→85%、0.5→87.6%、0.6→94.6%),复现 Python merge-to-4 的 85.3%。我写的 Swift 源码**零改动**编译通过。CAM++ dim=192。
+- **混淆**:ZiYang 87.5%/Carlos 72.6% 担主量,Carlos↔Sierra 是主混淆;GGbond 50% 是 n=8 噪声非系统失败。
+
+### ✅ 跨录音认人验证(2026-06-18，产品核心承诺「标几次变准」)
+
+在一段会议用 GT 标注建参考声纹 → 到另一段识别同一批人(Wynne/GGbond 两段都出现)。`cross_eval.py`：
+
+| 方向 | 共同人识别准确率 | 备注 |
+|---|---|---|
+| 注册 GGbond会议 → 测 OS会议 | **88.2%**(15/17) | Wynne 9/10、GGbond 6/7；陌生人(Carlos等)72.8% 被 τ=0.35 拒识为 unknown |
+| 注册 OS会议 → 测 GGbond会议 | 74.4%(96/129) | Wynne 90%(64/71)；GGbond 弱(OS里仅7句短附和→参考声纹差) |
+
+- **结论：跨录音识别成立,Wynne 稳定 ~90%**。弱点=用稀疏/短发言注册时参考差——正是「标几次变准」要解的(累积标注→在线均值更新质心变准)。
+- **开集拒识**：τ=0.35 漏进 ~27% 陌生人(多因 GGbond↔Carlos 相似 0.66)。对策:加相对 margin 门(s1−s2)、或注册质量变好后提高 τ。SpeakerMatcher 已实现双门,默认 margin=0 待调。
+- 验证脚本均在 `experiments/diar-py/`：eval.py(盲聚类)/enroll_eval.py(GT边界)/asr_enroll_eval.py(ASR边界合并)/cross_eval.py(跨录音)。
+
+### ✅ 冷启动自动分堆验证(2026-06-22，解"不能一开始就标所有人")
+
+问题：实际使用时没法预先给每人注册。解法=渐进式(每人首次出现标一次，非预先标全部) + 冷启动靠自动分堆。
+测了**在线增量聚类(leader-follower)**：按时间逐窗，和已见"堆"比 cosine，像就归入更新质心、不像开新堆——用强两两比对(非失败的全局 FastClustering)。`online_eval.py`，OS 6人会议(236窗)：
+
+| 阈值 | 分出堆数 | 纯度 |
+|---|---|---|
+| 0.4 | 15 | 90.7% |
+| 0.5 | 37 | 91.9% |
+| 0.6 | 83 | 95.3% |
+
+- **纯度高(90-95%)=几乎不把不同人混进一堆**(安全错误)；但**过分裂**(6人→15~83堆，同一人拆多堆)。
+- 错误方向是"安全的":不会犯"两人当一人"(不可补救)，只犯"一人拆多堆"(可补救)。
+- **冷启动 UX 决定**：①在线分堆(不混人)→②把最大几堆给用户命名→③剩余小堆用 enrollment matcher 自动归并到已命名的人，只有真新声音再问。→ 不需预先标全部，也不会被错分坑。
+- 待办：过分裂的归并步(命名后自动吸收 / 合并近质心)；阈值调参(0.4~0.5 堆数较少)。
+
+**冷启动闭环数字(coldstart_eval.py / Swift coldStartEval，OS 6人会议)**：命名最大 K 堆→其余按质心归并到已命名人(absorb-th)→算最终。
+
+| 命名次数 K | 覆盖率 | 整体准确率 | 已识部分准确率 | 认出人数 |
+|---|---|---|---|---|
+| 1 | 43% | 42% | 97% | 1 |
+| 3 | ~83% | 72% | 86% | 3 |
+| **6** | **~92%** | **83%** | **~90%** | **6(全)** |
+| 10+ | ~93% | ~84% | ~90% | 6 饱和 |
+
+- **结论:第一条录音点 ~6 次名(≈一人一次)→ 覆盖 92%、命名部分 ~90% 准**。虽自动分 38 堆,但按时长命名,前 6 大堆即含全部 6 人,余 32 小堆自动归并,无需逐堆命名。"命名了就准、不确定留 unknown 问用户"。后续录音这些人已注册→近零点击。
+- **Swift 已复现**(K=6:覆盖93%/整体83.3%/认出6人,≈Python)。
+
+### ✅ 冷启动引擎 Swift 化(2026-06-22)
+- `SpeakerID.swift` 加 `onlineCluster`(leader-follower)、`clusterRecording`(录音→合窗→提声纹→分堆,按时长排序)、`coldStartEval`(命名K vs 准确率闭环评测)。
+- CLI `speaker-cluster <audio> <asr> --model ...`:列出匿名说话人堆(含样例试听时间戳供命名);带 `--ground-truth` 跑闭环评测。
+- 至此 Swift 引擎件齐全:提声纹/合窗/匹配双门/JSON声纹库/注册/识别/在线分堆/冷启动评测。**缺的只是交互命名 UX + 接入 ingest 持久化 person_id**(有设计岔路待用户)。
+
+### ✅ 接入检索索引(2026-06-22)：search/ask 显示说话人
+
+把验证好的说话人识别接进 RAG 检索,enroll→打标→落库→检索展示端到端打通。
+
+- **架构(按用户决策)**:标注=源(应落 vault,待做)；**声纹向量=派生→存 index** 的 `speaker_refs(name, count, vec)` 表。chunks 表 `person_id` 列早已预留。
+- **打标与嵌入解耦**:新 `speaker-label --vault --index` 用声纹库给已有索引**就地 UPDATE person_id,不重跑 embedding**(注册新人后重打标很便宜)。`index` build 时若配 SPEAKER_MODEL + 有声纹库也会自动标注。
+- **person 粒度**:chunk 的 person_id = 该 chunk 时间区间内**重叠时长占多数**的说话人(`personFor`);unknown/无匹配则 nil。代价:少量发言者(如 Sara)会被同 chunk 的主导者并掉——chunk 比说话人轮次粗。
+- **新增**:Config.speakerModel(env SPEAKER_MODEL);Index speaker_refs CRUD + person_id 进检索 SQL + SearchHit.personId;SpeakerID recognizeSpans/recognizeSpansFromFile/personFor/enrollToIndex;IndexPipeline labelExisting + build 内标注;CLI speaker-enroll --index / speaker-label / search·ask 显示 👤。
+- **验证**:OS会议(真实索引副本)enroll 6人→speaker-label→**25/25 chunk 落 person_id**、person 分布 ZiYang11/Carlos9/GGbond2/Sierra2/Wynne1、`search` 输出每条带 👤人名且语义一致。swift 源码**零改动首编过**。
+- **待**:标注写 vault(labels.json)闭合"index 可重建"不变量;冷启动命名→归并交互闭环;τ 调参;SPEAKER_MODEL 入 .env。
+
+## 说话人识别(diarization) — 早期：FluidAudio 阶段(已被上面取代)
 
 - **FluidAudio 不达标**(ground truth 钉死，eval 对齐已验证)：DiarizerManager 2人会议 99%归一簇/55.8%；Offline VBx Bus error 崩；Sortformer 57.4%≈基线且慢。根因：纯聚类无 EEND，分不开相似嗓音/重叠。
 - **eval 工具**：`diarize-eval <audio> <transcript>` 解析 `HH:MM:SS 说话人` 算发言级准确率+簇→人映射。`DiarBackend` 抽象(manager/sortformer)，换库可秒级验。

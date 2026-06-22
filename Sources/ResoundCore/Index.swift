@@ -19,6 +19,7 @@ public struct SearchHit {
     public let start: Double
     public let end: Double
     public let score: Double   // 该路的分数（向量=距离；FTS=rank）
+    public let personId: String?   // 说话人（声纹识别填；nil=未标注/unknown）
 }
 
 /// 派生索引：SQLite + FTS5(trigram) + sqlite-vec。向量存前 L2 归一化（L2 排序≈cosine）。
@@ -63,7 +64,37 @@ public final class Index {
         create virtual table if not exists chunks_fts using fts5(text, tokenize='trigram');
         create virtual table if not exists chunks_vec using vec0(embedding float[\(dim)]);
         create table if not exists enrichment_cache(hash text primary key, context text, model text);
+        create table if not exists speaker_refs(name text primary key, count integer, vec text);
         """)
+    }
+
+    // MARK: 声纹库（派生：参考声纹向量由 vault 标注重算；用户决定向量存 index）
+
+    public func upsertSpeakerRef(name: String, count: Int, centroid: [Float]) throws {
+        let sql = """
+        insert into speaker_refs(name,count,vec) values(?,?,?)
+        on conflict(name) do update set count=excluded.count, vec=excluded.vec
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, name); sqlite3_bind_int64(st, 2, Int64(count)); bindText(st, 3, vectorJSON(centroid))
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
+    public func loadSpeakerRefs() -> [SpeakerRef] {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select name,count,vec from speaker_refs", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        var out: [SpeakerRef] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            let name = String(cString: sqlite3_column_text(st, 0))
+            let count = Int(sqlite3_column_int64(st, 1))
+            let vecStr = String(cString: sqlite3_column_text(st, 2))
+            let centroid = vecStr.dropFirst().dropLast().split(separator: ",").compactMap { Float($0) }
+            out.append(SpeakerRef(name: name, centroid: centroid, count: count))
+        }
+        return out
     }
 
     // MARK: meta
@@ -167,11 +198,43 @@ public final class Index {
         sqlite3_finalize(v)
     }
 
+    // MARK: 就地打说话人标签（不重嵌入；注册新声纹后可重打标）
+
+    public func chunkTimes(recordingId: String) -> [(id: Int64, start: Double, end: Double)] {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select id,start,end from chunks where recording_id=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, recordingId)
+        var out: [(Int64, Double, Double)] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append((sqlite3_column_int64(st, 0), sqlite3_column_double(st, 1), sqlite3_column_double(st, 2)))
+        }
+        return out
+    }
+
+    public func setChunkPerson(id: Int64, person: String?) throws {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "update chunks set person_id=? where id=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        if let p = person { bindText(st, 1, p) } else { sqlite3_bind_null(st, 1) }
+        sqlite3_bind_int64(st, 2, id)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
+    public func allRecordingIds() -> [String] {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select id from recordings", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        var out: [String] = []
+        while sqlite3_step(st) == SQLITE_ROW { out.append(String(cString: sqlite3_column_text(st, 0))) }
+        return out
+    }
+
     // MARK: 检索
 
     public func vectorSearch(_ queryVec: [Float], k: Int) throws -> [SearchHit] {
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, v.distance
+        select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id
         from chunks_vec v join chunks c on c.id = v.rowid
         where v.embedding match ? and k = \(k) order by v.distance
         """
@@ -185,7 +248,7 @@ public final class Index {
     public func ftsSearch(_ query: String, k: Int) throws -> [SearchHit] {
         let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "") + "\""
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, f.rank
+        select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id
         from chunks_fts f join chunks c on c.id = f.rowid
         where chunks_fts match ? order by f.rank limit \(k)
         """
@@ -199,13 +262,15 @@ public final class Index {
     private func readHits(_ st: OpaquePointer?) -> [SearchHit] {
         var hits: [SearchHit] = []
         while sqlite3_step(st) == SQLITE_ROW {
+            let person = sqlite3_column_text(st, 6).map { String(cString: $0) }
             hits.append(SearchHit(
                 rowid: sqlite3_column_int64(st, 0),
                 text: String(cString: sqlite3_column_text(st, 1)),
                 recordingId: String(cString: sqlite3_column_text(st, 2)),
                 start: sqlite3_column_double(st, 3),
                 end: sqlite3_column_double(st, 4),
-                score: sqlite3_column_double(st, 5)))
+                score: sqlite3_column_double(st, 5),
+                personId: person))
         }
         return hits
     }
