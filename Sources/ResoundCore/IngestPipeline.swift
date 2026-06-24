@@ -53,19 +53,31 @@ public struct IngestPipeline {
             log("🔤 词表：\(glossary.terms.count) 词偏置，\(glossary.corrections.count) 条别名纠正")
         }
 
-        let result: TranscribeResult
+        var result: TranscribeResult
         let tTranscribe = Date()
         if let cfg = try? Config.load(), cfg.transcribeOnline {
             log("☁️ 在线转录中（\(cfg.transcribeModel) @ \(cfg.transcribeBaseURL)）…")
-            // 转录前对上传音频做响度归一（仅转录输入；存储/播放的 audio.m4a 不变），改善大会议室小声场景；
-            // 已经够响则自动跳过、用原文件，不增加上传体积。
             var upload = audioOut
-            if let norm = try? await AudioNormalizer.normalizedM4A(of: audioOut) {
-                upload = norm; log("   🔊 已响度归一（仅上传转录用）")
+            var temps: [URL] = []
+            var vadSpans: [VADGate.Span] = []
+            // 转录前 VAD 门控：剪掉长静音/纯噪声段再上传，从根上减少 whisper 在非语音上的幻觉
+            //（「谢谢观看」之类套话/重复）+ 长静音致的时间戳漂移。没多少可剪就退回原文件，零风险。
+            if let r = try? await VADGate.voicedM4A(of: audioOut, log: log) {
+                upload = r.url; temps.append(r.url); vadSpans = r.spans
             }
-            defer { if upload != audioOut { try? FileManager.default.removeItem(at: upload) } }
+            // 转录前对上传音频做响度归一（在剪辑后的音频上做；仅转录输入，存储/播放的 audio.m4a 不变），
+            // 改善大会议室小声场景；已经够响则自动跳过、用原文件，不增加上传体积。
+            if let norm = try? await AudioNormalizer.normalizedM4A(of: upload) {
+                upload = norm; temps.append(norm); log("   🔊 已响度归一（仅上传转录用）")
+            }
+            defer { for u in temps { try? FileManager.default.removeItem(at: u) } }
             result = try await OnlineTranscriber(config: cfg, language: language, prompt: glossary.promptString)
                 .transcribe(audio: upload)
+            // 剪辑过 → 段落/词时间戳从压缩轴映射回原始轴（与原音频、说话人分割对齐）
+            if !vadSpans.isEmpty {
+                result = TranscribeResult(transcript: VADGate.remap(result.transcript, spans: vadSpans),
+                                          modelName: result.modelName)
+            }
         } else {
             log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
             result = try await Transcriber(model: model, language: language,
