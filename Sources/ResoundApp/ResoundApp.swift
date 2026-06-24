@@ -9,6 +9,7 @@ struct ResoundApp: App {
     @StateObject private var library = LibraryModel()
     @StateObject private var settings = SettingsModel()
     @StateObject private var chat = ChatVM()
+    @StateObject private var providers = ProvidersModel()
 
     var body: some Scene {
         WindowGroup("Resound", id: "main") {
@@ -18,6 +19,7 @@ struct ResoundApp: App {
                 .environmentObject(library)
                 .environmentObject(settings)
                 .environmentObject(chat)
+                .environmentObject(providers)
                 .frame(minWidth: 940, minHeight: 620)
                 .preferredColorScheme(app.isDark ? .dark : .light)
                 .onAppear {
@@ -25,11 +27,15 @@ struct ResoundApp: App {
                     recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
                     library.app = app
                     settings.app = app
+                    providers.app = app
+                    providers.load()             // 迁移旧 .env → providers.json；决定是否首启引导
+                    app.showOnboarding = providers.needsOnboarding
                     settings.load()          // 预载模板等，侧栏 Templates 计数即时正确
                     chat.app = app
                     chat.loadHistory()
                     MeetingPanelController.shared.configure(recorder: recorder, app: app)
                     recorder.startWatching()
+                    Perf.start()   // 性能埋点：卡顿看门狗 + body 重算计数 → resound.log
                 }
         }
         .windowStyle(.hiddenTitleBar)

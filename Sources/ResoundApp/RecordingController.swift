@@ -165,7 +165,10 @@ final class RecordingController: ObservableObject {
         recTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.phase == .recording else { return }
-                self.recSeconds = Int(Date().timeIntervalSince(self.recStart))
+                // 相等守卫：整数秒没变就不发 objectWillChange。否则 0.25s 一次 @Published 写入 →
+                // 观察 RecordingController 的 RootView 每秒被失效 4 次（4×/s → 1×/s）。
+                let v = Int(Date().timeIntervalSince(self.recStart))
+                if v != self.recSeconds { self.recSeconds = v }
             }
         }
     }

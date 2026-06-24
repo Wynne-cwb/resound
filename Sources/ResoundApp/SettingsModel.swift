@@ -15,15 +15,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var templates: [SummaryTemplate] = []
     @Published var defaultTplId: String { didSet { UserDefaults.standard.set(defaultTplId, forKey: Self.defKey) } }
-    @Published var vocab: [GlossaryEntry] = []
-    @Published var vocabFilter = ""             // 词表搜索（按规范词/变体过滤），词条多时免长滚动
-    var filteredVocab: [GlossaryEntry] {
-        let q = vocabFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return vocab }
-        return vocab.filter { e in
-            e.canonical.lowercased().contains(q) || e.variants.contains { $0.lowercased().contains(q) }
-        }
-    }
+    @Published var vocab: [GlossaryEntry] = []   // 词表搜索过滤已下沉到 VocabBrowser 子视图本地 @State
 
     @Published var editTpl: EditTpl?
     @Published var aiBusy = false               // 模板提示词 AI 协助进行中
@@ -37,7 +29,8 @@ final class SettingsModel: ObservableObject {
     @Published var needsAttention = false
 
     // 连接与模型配置（写 App Support .env，运行时即时生效，无需重 build）
-    struct EditConfig {
+    // Equatable：供 ConnectionSection 子视图 onChange 同步本地草稿用。
+    struct EditConfig: Equatable {
         var chatKey = "", chatBaseURL = ""
         var embeddingKey = "", embeddingBaseURL = ""
         var transcribeOnline = true
@@ -99,8 +92,8 @@ final class SettingsModel: ObservableObject {
         editConfig = c
     }
 
-    func saveConfig() {
-        let c = editConfig
+    func saveConfig(_ c: EditConfig) {
+        editConfig = c   // 子视图本地草稿回写 vm，保持与导入/选路径一致
         let updates: [String: String?] = [
             "CHAT_API_KEY": c.chatKey, "CHAT_BASE_URL": c.chatBaseURL,
             "AIHUBMIX_API_KEY": c.embeddingKey, "AIHUBMIX_BASE_URL": c.embeddingBaseURL,

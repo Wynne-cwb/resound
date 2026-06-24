@@ -5,6 +5,48 @@
 
 ---
 
+## 开源化第一步：AI Provider 配置 + 验证 + 首启引导（2026-06-25）
+
+**触发**：要把 Resound 做成开源可下载软件。原配置为个人写死（chat=DeepSeek、embedding=AIHUBMIX），无 provider 概念、不能验证、新用户无从下手。
+
+**用户拍板（AskUserQuestion）**：① provider 范围 = **OpenAI 兼容预设 + 自定义**（不做原生 Anthropic，Claude 经 AIHUBMIX/OpenRouter 兼容端点用）；② 首启 = **引导页 + 强制门禁**，但**转写是可选 Provider，不配则兜底本地 WhisperKit**（只有 chat+embedding 强制）；③ 验证 = **chat+embedding 实时验证**，**填了转写也要验证**。
+
+**架构决策**：`Config` 作为运行时契约**不动**（CLI+App 20+ 处零改动），背后换数据源——新增 `providers.json`（App Support）作为 GUI 真源，`Config.load()` **优先读它（chat+embedding 配齐时）、否则回退旧 `.env`**（dev/CLI 无缝）。vault 路径等非 provider 项仍留 `.env`。**能力中心式**建模（不做"provider 池+指派"那套）：chat/embedding/转写三个能力各管一条专属 provider（id `p-chat`/`p-embed`/`p-transcribe`），契合用户"至少一个 chat、一个 embedding"的原话、UI 最简。
+
+**落地**：
+- Core 新增 [Providers.swift](../Sources/ResoundCore/Providers.swift)（`AIProvider`/`ModelRef`/`ProvidersConfig`/`ProvidersStore` + `ProviderPreset.all` 七个预设：OpenAI/DeepSeek/OpenRouter/Groq/SiliconFlow/AIHUBMIX/Ollama，各带 baseURL+建议模型+取 key 链接 + `.env→providers.json` 一次性迁移）、[ProviderProbe.swift](../Sources/ResoundCore/ProviderProbe.swift)（chat/embedding/transcribe 三种实时探测；统一把 401/404/超时/TLS 翻译成中文；embedding 顺带返回真实维度取代写死 4096；transcribe 在内存合成 0.3s/16k WAV 测 `/audio/transcriptions`，零打包资源）。改 [Config.swift](../Sources/ResoundCore/Config.swift)：`load()` 加 providers.json 优先分支，旧逻辑抽成 `loadFromEnv`。
+- App 新增 [ProvidersModel.swift](../Sources/ResoundApp/ProvidersModel.swift)（能力增删改/验证/落盘/导入导出 providers.json/`needsOnboarding`）、[ProvidersView.swift](../Sources/ResoundApp/ProvidersView.swift)（可复用 `CapabilityCard`：预设芯片+Base URL+Key+模型下拉+测试✓✗，本地 @State 草稿仅在提交点回写——沿用性能约定 + 设置页 `ProvidersSection`）、[OnboardingView.swift](../Sources/ResoundApp/OnboardingView.swift)（单页三卡，chat+embedding 验证通过才解锁"进入"）。Settings 旧"连接与模型"裸字段 → `ProvidersSection`+`StorageSection`（vault 仍走 .env）。RootView 加 `app.showOnboarding` 门禁。
+- **迁移保真踩坑**：旧 `loadFromEnv` 里 `correctModel`/`rerankModel`/`contextModel` 缺省硬编码 `deepseek-v4-flash`（省成本），.env 没这些键 → 初版迁移回退到 `chat.model`(pro)= 把 AI 校对偷偷升级、更贵更慢。修：迁移时精确补回 flash 默认，零行为变更。
+
+**验证**：编译通过；删旧 providers.json 后重启实测——迁移正确生成（chat=DeepSeek/deepseek-v4-pro、embedding=AIHUBMIX/qwen3-embedding-8b 维度 4096、transcribe=AIHUBMIX/whisper-large-v3-turbo、correctModel/rerankModel=flash、summaryModel=nil→回退 pro），老用户 isComplete=true 故不弹引导。**待用户实机验收**：①Settings 三张能力卡是否正确预填+「测试连接」对各 provider 真能报通/报错；②临时删 providers.json 重启是否进引导、配 OpenAI 等异构 provider 能否走通；③embedding 验证后维度是否自动写对。
+
+## 性能审计 #2：三页卡顿根因 + 深度优化（2026-06-25）
+
+**触发**：用户报 Ask 折叠按钮折叠时卡、切 Library 卡、Settings 偏卡。用 workflow（`resound-perf-audit`）并行审计四区（Ask/Library/Settings/公共层）→ 逐条敌对验证 → 统合，确认 7 条真卡点，找到跨页**共同根因**。
+
+**共同根因（最高优先，亲自核对属实）**：`Palette` 是**非 Equatable** struct（Theme.swift），且 `AppModel.palette` 每次访问都 `.make(dark:)` 现造新实例（AppModel.swift），`RootView.body` 又把它 `.environment(\.palette,)` 注入全树。SwiftUI 对非 Equatable 的 environment 值无法判等 → 每次注入都当变更 → 所有读 `@Environment(\.palette)` 的子视图（几乎整棵树）失效。RootView 同时观察 AppModel + RecordingController，于是**侧栏折叠动画（每帧改 sidebarCollapsed）/ toast / 录音计时器**都会每帧重建 Palette → 整棵树（含 Ask 的 Markdown）重渲染。**这正是「折叠按钮折叠时很卡」的元凶**（折叠按钮= RootView 里的侧栏 toggle，带 withAnimation）。
+
+**修复（7 项，按优先级）**：
+1. **Palette: Equatable + AppModel 缓存**（共同根因，几行）：`struct Palette: Equatable`（成员全 Bool/Color 自动合成）；AppModel 把 palette 存成 `@Published private(set)`，仅 isDark.didSet 时重建。→ 折叠/toast/录音时即便 RootView.body 重算、注入的 Palette 相等，SwiftUI 跳过全树环境失效。**单点掐断三页放大器**。
+2. **录音计时器相等守卫**（RecordingController.swift）：`if v != recSeconds { recSeconds = v }`，4×/s → 1×/s 的 @Published 通知。
+3. **Ask 消息行抽 `MessageRow: View, Equatable`**（ChatView.swift）：打字机 ~60fps 改 `@Published msgs` + 折叠 `expandedCites` 都会重算 ChatView.body，原 messageRow 是 @ViewBuilder 函数无法剪枝 → 每次重求值所有历史消息（含 SummaryMarkdown 重跑 cmark）。改 `.equatable()`（比较 id/phase/revealed/full/cites.count/expanded/pal）→ 只重渲染变化的那一行，其余整片剪枝。
+4. **Ask 输入栏抽 `InputBar: View, Equatable`**（本地 @State 文本）：键入不再写 `$vm.input`（@Published）→ 不失效消息列表；resetToken=currentId 切换对话时清草稿。
+5. **Settings 抽 `ConnectionSection` + `VocabBrowser` 子视图**（各持本地 @State）：原 API Key/URL 字段绑 `$vm.editConfig.*`（整 @Published struct）、搜索框绑 `$vm.vocabFilter`，每敲一字重算整页（权限/通用/词表 ScrollView）。下沉到本地草稿，仅「保存」时回写 vm（`saveConfig(_:)`），导入/选路径经 `onChange(of: vm.editConfig)` 同步。`EditConfig: Equatable`；删掉 vm 上的 vocabFilter/filteredVocab 死代码。子视图自带精简 helper 与父视图隔离（不动父视图既有 helper，最低风险）。
+6. **Library 切页幂等**（LibraryModel.swift）：`load()` 加 `didInitialLoad` 守卫——切到 Library 不再无条件 `reload→refreshDetail`（原会先把转录/名册塌空再后台重解码 JSON+flatten+roster，啥都没改也重算两轮）。拾取新录音改由 `libraryReloadToken` → `refresh()`。
+7. **Library 日期格式化器单例化**（LibraryView.swift）：ISO8601/DateFormatter 提为文件级 `let` 单例（创建昂贵），原每行每次重绘现建 3 个。
+
+**追加修复（用户反馈「打开对话后频繁切 Ask↔Library 仍很卡」）**：上面 7 项降的是「重渲染」成本，没动「重建」成本。根因在 [RootView.swift](../Sources/ResoundApp/RootView.swift) 的 `content` 用 `switch app.page` 返回不同视图类型 → **每次切页旧页整个销毁、新页从零重建**：打开了对话的 Ask 切回来要把整段对话所有 Markdown 重新解析+重新布局（`MessageRow.equatable` 只在「已存在视图重渲染」时剪枝，对「从零创建」无效）。**修复**：改成「懒挂载 + 保活」——`mounted: Set<Page>`（只增不减，默认含 .ask），content 用 ZStack 把**访问过的页面常驻**，切页只切 `pageVisible`（opacity + allowsHitTesting + disabled + zIndex），不再销毁重建。`disabled(!visible)` 同时屏蔽隐藏页的快捷键（防隐藏 Library 抢 ⌘F）。懒挂载避免启动即扫盘 Library / 全载 Settings。注：模型都是 App 根级 @StateObject（[ResoundApp.swift](../Sources/ResoundApp/ResoundApp.swift)），保活的是视图树、状态本就持久。SettingsView 不观察 app 故切页不重算；ChatView/LibraryView 观察 app 切页会重跑 body，但有 equatable/sections 缓存兜底只构造结构、不重渲 Markdown，成本可接受。
+
+**再追加修复（用户反馈「切导航/折叠仍卡，且都发生在 Ask、Library 显示 Markdown 时」）**：定位到真正的大头——**MarkdownUI 在 body 里解析 cmark，而 ChatView/LibraryView 都 `@EnvironmentObject var app`，于是 app 上任意 @Published 变化（尤其侧栏折叠动画每帧改 `sidebarCollapsed`、toast 显隐）都让两页 body 频繁重跑**。Library detail 的 `SummaryMarkdown`（[LibraryView.swift](../Sources/ResoundApp/LibraryView.swift):491）**没有 Equatable 边界** → 每帧重新解析整段摘要 = 卡（Ask 的消息行有 MessageRow.equatable 保护，但 `==` 里比较整个 Palette 25 个 Color、×N 条也有成本）。**修复**：①`SummaryMarkdown: View, Equatable`（比较 text+highlight+pal.isDark；text 同实例时 == 走 O(1) 缓冲区判等）+ 调用处加 `.equatable()` → 容器 body 重跑也不重解析；②所有 Equatable 视图（MessageRow/InputBar/SummaryMarkdown）的 `==` 一律用 `pal.isDark`（O(1)）而非整个 Palette。**关键认知**：keep-alive 解决了「切页重建」，但没解决「容器因观察 app 而 body 频繁重跑时，内部重内容（Markdown）被重新构造解析」——重内容必须有自己的 Equatable 边界才能在父 body 重跑时被剪枝。
+
+**最终修复（埋点实测后定位，推翻前几轮猜测）**：前几轮（Equatable/keep-alive/瞬时折叠）凭推理改，用户反馈「反而更卡」。遂加性能埋点 [Perf.swift](../Sources/ResoundApp/Perf.swift)（主线程卡顿看门狗 + 各 view body 计数 + 关键块计时 → 写 resound.log，`Perf.enabled` 开关；排查完置 false），让用户复现后读数据。**数据结论（颠覆性）**：①body 重算次数全程个位数、`SummaryMarkdown(parse)` 每秒 0~2 → Equatable 优化早已生效，**根本没在疯狂重渲染**；②但主线程卡顿高达 500ms~1.8s，**与 body 次数无关** → 真凶是 **MarkdownUI「构建+布局一篇文档」单次就要 500ms~1s**（主线程），keep-alive/瞬时折叠只是挪动「何时布局」、没减少布局本身。**真正的大杀器**：Ask 消息列表是**饿汉 `VStack`**——打开长对话时**一次性给每一条消息的 Markdown 做布局**（N×单篇成本，叠成几秒）。改成 **`LazyVStack`** 后只渲染屏幕内可见的几条 → 切换 Ask↔Library 从 460~950ms 卡顿降到多数 0、偶尔 100~300ms。配套保留：keep-alive（切页不重建视图状态）+ 瞬时折叠（避免动画逐帧重排）。残留：停在 Library 摘要页折叠时，那**一篇**摘要仍重排一次（~300~600ms 单次 hitch），用户拍板可接受、暂不处理（彻底解需让内容区宽度不随折叠变，或换原生 AttributedString 渲染——有取舍）。**最大教训：性能优化必须先埋点测量，不要凭 SwiftUI 直觉猜——这轮前三次改动方向基本都偏了，数据一上来 5 分钟定位。**
+
+**方法论沉淀**：SwiftUI 卡顿五大反模式（第 4、5 条为本轮追加）：⑤**饿汉 VStack 装可变长列表**——尤其每行含重内容（Markdown）时，一次性布局全部 = 卡；列表一律用 LazyVStack（只渲染可见）。④用 `switch` 做主导航 → 切页销毁重建重内容页。前三条——④用 `switch` 做主导航 → 切页销毁重建重内容页（Markdown/长列表从零重解析）。修法：访问过的页面用 ZStack + opacity 常驻保活，别用 switch 换 identity。前三条————①非 Equatable 的 environment 值注入全树（每注入即全树失效）；②单个大 ObservableObject 承载高频/输入状态（一字一失效全页）；③重内容（Markdown/大列表）所在视图不是 Equatable 子视图、无法被 diff 剪枝。修法对应：environment 值 Equatable + 缓存、状态下沉到本地 @State 子视图、重内容抽 `Equatable` struct 用 `.equatable()`。
+
+全部编译+打包（Resound Dev 签名）+启动通过。**待用户实机验收**：①侧栏折叠是否顺；②切 Library 是否不再卡；③Settings/Ask 输入是否跟手；④Ask 折叠「来源」是否顺。
+
+---
+
 ## 转写失败兜底：可诊断 + 不丢音频 + 可重试（2026-06-25）
 
 **背景**：用户昨晚一条导入转写失败，无报错、无重试、无法取回音频，重新导入才成功，现已无法复现。来查日志。

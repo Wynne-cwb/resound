@@ -16,7 +16,11 @@ extension Color {
 
 // MARK: - 调色板（还原设计稿的浅/深双套 token）
 
-struct Palette {
+// Equatable 是性能关键：Palette 作为 environment 值注入全树，SwiftUI 只有在它「可判等且不等」时
+// 才会让下游 @Environment(\.palette) 读者失效。非 Equatable 时 SwiftUI 保守地把每次注入都当变更 →
+// 侧栏折叠/toast/切页等任一 AppModel 变更都会每帧重建 Palette → 整棵树（含 Ask 的 Markdown）重渲染。
+// 成员全是 Bool/Color（均 Equatable），编译器自动合成 == 即可。
+struct Palette: Equatable {
     let isDark: Bool
     let bg, sidebar, titlebar, elev, inset: Color
     let text, text2, text3: Color

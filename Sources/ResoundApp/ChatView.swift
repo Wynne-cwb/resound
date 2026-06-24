@@ -206,17 +206,23 @@ struct ChatView: View {
     @EnvironmentObject var library: LibraryModel
     @EnvironmentObject var vm: ChatVM
     @Environment(\.palette) var pal
-    @FocusState private var focused: Bool
     @State private var hoverConvId: UUID?
     @State private var expandedCites: Set<UUID> = []   // 引用默认折叠，点「来源」展开
 
     var body: some View {
-        HStack(spacing: 0) {
+        let _ = Perf.body("ChatView")
+        return HStack(spacing: 0) {
             historyColumn
             Rectangle().fill(pal.border).frame(width: 1)
             chatArea
         }
         .onAppear { vm.app = app; vm.loadHistory() }
+    }
+
+    private func toggleCite(_ id: UUID) {
+        withAnimation(.easeOut(duration: 0.14)) {
+            if expandedCites.contains(id) { expandedCites.remove(id) } else { expandedCites.insert(id) }
+        }
     }
 
     private var chatArea: some View {
@@ -225,8 +231,17 @@ struct ChatView: View {
                 ScrollView {
                     if vm.msgs.isEmpty { emptyState }
                     else {
-                        VStack(spacing: 26) {
-                            ForEach(vm.msgs) { msg in messageRow(msg).id(msg.id) }
+                        // LazyVStack（非 VStack）是关键：长对话只渲染**屏幕内可见的几条**消息，
+                        // 而非一次性给整段对话的每条 Markdown 做布局（实测单条 Markdown 布局 500ms~1s，
+                        // 饿汉 VStack 会把它们全部叠加 → 打开长对话/切回 Ask 卡几秒）。
+                        // MessageRow 仍是 Equatable：可见行在折叠/打字机时也只重渲变化的那条。
+                        LazyVStack(spacing: 26) {
+                            ForEach(vm.msgs) { msg in
+                                MessageRow(pal: pal, msg: msg, expanded: expandedCites.contains(msg.id),
+                                           onToggle: { toggleCite(msg.id) },
+                                           onOpenCite: { recId, t in library.openCitation(recId: recId, time: t); app.page = .library })
+                                    .equatable().id(msg.id)
+                            }
                         }
                         .frame(maxWidth: 720)
                         .frame(maxWidth: .infinity)
@@ -235,7 +250,8 @@ struct ChatView: View {
                 }
                 .onChange(of: vm.msgs.count) { _, _ in if let l = vm.msgs.last { withAnimation { proxy.scrollTo(l.id, anchor: .bottom) } } }
             }
-            inputBar
+            // InputBar 持本地 @State 文本：键入不再写 ChatVM.@Published → 不失效整个消息列表。
+            InputBar(pal: pal, busy: vm.busy, resetToken: vm.currentId) { vm.ask($0) }.equatable()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(pal.bg)
@@ -322,12 +338,44 @@ struct ChatView: View {
         .padding(.horizontal, 32).padding(.top, 90).padding(.bottom, 40)
     }
 
-    // MARK: 消息
+    /// 对话列表的相对时间：今天 HH:mm / 昨天 / M月d日。
+    private func relTime(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) {
+            let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+        }
+        if cal.isDateInYesterday(d) { return "昨天" }
+        let f = DateFormatter(); f.dateFormat = "M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+    }
+}
 
-    @ViewBuilder private func messageRow(_ m: ChatVM.Msg) -> some View {
-        if m.isUser {
+// MARK: - 单条消息（Equatable 子视图）
+//
+// 抽成独立 Equatable struct 是性能关键：ChatView.body 在「打字机逐字（~60fps 改 msgs[i].revealed）」
+// 和「折叠/展开来源（expandedCites 变更）」时都会整体重算，原先 messageRow 是 @ViewBuilder 函数、
+// 无法被 diff 剪枝 → 每次都重求值所有历史消息（含 SummaryMarkdown 重跑 cmark）。
+// 改成 .equatable() 后，SwiftUI 只重渲染「内容/展开态真正变化的那一行」，其余整片剪枝。
+private struct MessageRow: View, Equatable {
+    let pal: Palette
+    let msg: ChatVM.Msg
+    let expanded: Bool
+    let onToggle: () -> Void
+    let onOpenCite: (String, Double) -> Void
+
+    // 只比较影响渲染的值（忽略闭包）。msg.cites/sources 设定后不再变，比 count 足矣。
+    static func == (a: MessageRow, b: MessageRow) -> Bool {
+        a.pal.isDark == b.pal.isDark && a.expanded == b.expanded &&   // 主题仅随 isDark 变，O(1) 判等
+        a.msg.id == b.msg.id && a.msg.phase == b.msg.phase && a.msg.revealed == b.msg.revealed &&
+        a.msg.full == b.msg.full && a.msg.timeRange == b.msg.timeRange && a.msg.isDigest == b.msg.isDigest &&
+        a.msg.cites.count == b.msg.cites.count && a.msg.sources.count == b.msg.sources.count
+    }
+
+    var body: some View {
+        let _ = Perf.body("MessageRow")
+        return Group {
+        if msg.isUser {
             HStack { Spacer(minLength: 50)
-                Text(m.full).font(.system(size: 14)).foregroundStyle(.white).lineSpacing(2)
+                Text(msg.full).font(.system(size: 14)).foregroundStyle(.white).lineSpacing(2)
                     .padding(.vertical, 11).padding(.horizontal, 15)
                     .background(pal.accent, in: UnevenRoundedRectangle(topLeadingRadius: 15, bottomLeadingRadius: 15, bottomTrailingRadius: 4, topTrailingRadius: 15, style: .continuous))
                     .frame(maxWidth: 540, alignment: .trailing)
@@ -337,7 +385,7 @@ struct ChatView: View {
                 ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.accentSoft)
                     WaveMark(pal: pal, height: 11) }.frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 0) {
-                    if let tr = m.timeRange, m.phase != .searching, m.phase != .thinking {
+                    if let tr = msg.timeRange, msg.phase != .searching, msg.phase != .thinking {
                         HStack(spacing: 6) {
                             Image(systemName: "calendar").font(.system(size: 11, weight: .semibold))
                             Text("时间范围 · \(tr)").font(.system(size: 12, weight: .semibold))
@@ -346,10 +394,10 @@ struct ChatView: View {
                         .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .padding(.bottom, 11)
                     }
-                    switch m.phase {
+                    switch msg.phase {
                     case .searching, .thinking:
                         HStack(spacing: 9) { Spinner(size: 15, color: pal.text2)
-                            Text(m.phase == .searching ? "正在检索你的录音…" : "正在阅读相关片段…")
+                            Text(msg.phase == .searching ? "正在检索你的录音…" : "正在阅读相关片段…")
                                 .font(.system(size: 13.5)).foregroundStyle(pal.text2) }.frame(height: 24)
                     case .empty:
                         Text("在你的录音里没有找到匹配的片段。试试换个更宽泛的说法，或者把相关的会议录下来。")
@@ -365,29 +413,24 @@ struct ChatView: View {
                             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.borderStrong))
                     case .answering:
                         // 打字机阶段：纯文本 + 光标（逐字渲染 Markdown 会因半截语法闪烁）
-                        Text(String(m.full.prefix(m.revealed)) + "▍")
+                        Text(String(msg.full.prefix(msg.revealed)) + "▍")
                             .font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(4)
                             .textSelection(.enabled)
                     case .done:
                         // 完成后整段走 Markdown 富文本（与 Library 摘要一致）
-                        SummaryMarkdown(text: m.full, pal: pal)
-                        if m.isDigest, !m.sources.isEmpty { sourcesView(m.sources, id: m.id) }
-                        else if !m.cites.isEmpty { citesView(m.cites, id: m.id) }
+                        SummaryMarkdown(text: msg.full, pal: pal)
+                        if msg.isDigest, !msg.sources.isEmpty { sourcesView }
+                        else if !msg.cites.isEmpty { citesView }
                     }
                 }
                 Spacer(minLength: 40)
             }
         }
+        }   // close Group（Perf 埋点用）
     }
 
-    /// 折叠/展开来源的标题行。
-    private func citeHeader(_ label: String, id: UUID) -> some View {
-        let expanded = expandedCites.contains(id)
-        return Button {
-            withAnimation(.easeOut(duration: 0.14)) {
-                if expanded { expandedCites.remove(id) } else { expandedCites.insert(id) }
-            }
-        } label: {
+    private func citeHeader(_ label: String) -> some View {
+        Button(action: onToggle) {
             HStack(spacing: 5) {
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
                     .foregroundStyle(pal.text3).rotationEffect(.degrees(expanded ? 90 : 0))
@@ -398,67 +441,85 @@ struct ChatView: View {
         .buttonStyle(.plainHit).hoverCursor()
     }
 
-    private func citesView(_ cites: [ChatVM.Cite], id: UUID) -> some View {
+    private var citesView: some View {
         VStack(alignment: .leading, spacing: 5) {
-            citeHeader("来源 · \(cites.count)", id: id)
-            if expandedCites.contains(id) {
-            ForEach(cites) { c in
-                Button { library.openCitation(recId: c.recId, time: c.t); app.page = .library } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 7) {
-                            Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
-                            Text("·").foregroundStyle(pal.text3)
-                            Text(c.meeting).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(c.time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
+            citeHeader("来源 · \(msg.cites.count)")
+            if expanded {
+                ForEach(msg.cites) { c in
+                    Button { onOpenCite(c.recId, c.t) } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 7) {
+                                Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
+                                Text("·").foregroundStyle(pal.text3)
+                                Text(c.meeting).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(c.time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
+                            }
+                            Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
                         }
-                        Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 11).padding(.vertical, 8)
+                        .card(pal, corner: 9)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 11).padding(.vertical, 8)
-                    .card(pal, corner: 9)
+                    .buttonStyle(.plainHit).hoverCursor()
                 }
-                .buttonStyle(.plainHit).hoverCursor()
-            }
             }
         }
         .padding(.top, 12)
     }
 
-    private func sourcesView(_ sources: [ChatVM.Source], id: UUID) -> some View {
+    private var sourcesView: some View {
         VStack(alignment: .leading, spacing: 5) {
-            citeHeader("来源 · \(sources.count) 场会议", id: id)
-            if expandedCites.contains(id) {
-            ForEach(sources) { s in
-                Button { library.openCitation(recId: s.recId, time: 0); app.page = .library } label: {
-                    HStack(spacing: 9) {
-                        ZStack { RoundedRectangle(cornerRadius: 7, style: .continuous).fill(pal.accentSoft)
-                            WaveMark(pal: pal, height: 10) }.frame(width: 24, height: 24)
-                        Text(s.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
-                        Text(s.date).font(.system(size: 11)).foregroundStyle(pal.text3).fixedSize()
-                        Spacer(minLength: 8)
-                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text3)
+            citeHeader("来源 · \(msg.sources.count) 场会议")
+            if expanded {
+                ForEach(msg.sources) { s in
+                    Button { onOpenCite(s.recId, 0) } label: {
+                        HStack(spacing: 9) {
+                            ZStack { RoundedRectangle(cornerRadius: 7, style: .continuous).fill(pal.accentSoft)
+                                WaveMark(pal: pal, height: 10) }.frame(width: 24, height: 24)
+                            Text(s.title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                            Text(s.date).font(.system(size: 11)).foregroundStyle(pal.text3).fixedSize()
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text3)
+                        }
+                        .padding(.horizontal, 11).padding(.vertical, 7)
+                        .card(pal, corner: 9)
                     }
-                    .padding(.horizontal, 11).padding(.vertical, 7)
-                    .card(pal, corner: 9)
+                    .buttonStyle(.plainHit).hoverCursor()
                 }
-                .buttonStyle(.plainHit).hoverCursor()
-            }
             }
         }
         .padding(.top, 12)
     }
+}
 
-    // MARK: 输入
+// MARK: - 输入栏（Equatable 子视图）
+//
+// 文本用本地 @State 承载：键入不再写 ChatVM.@Published（原 $vm.input）→ 不会失效整个消息列表。
+// Equatable 让打字机 ~60fps 的 msgs 更新也不波及输入栏（busy/pal/reset 不变即剪枝）。
+private struct InputBar: View, Equatable {
+    let pal: Palette
+    let busy: Bool
+    let resetToken: UUID?          // 切换/新建对话时变化 → 清空草稿
+    let onSend: (String) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
 
-    private var inputBar: some View {
+    static func == (a: InputBar, b: InputBar) -> Bool {
+        a.pal.isDark == b.pal.isDark && a.busy == b.busy && a.resetToken == b.resetToken
+    }
+
+    private var canSend: Bool { !busy && !text.trimmingCharacters(in: .whitespaces).isEmpty }
+    private func send() { guard canSend else { return }; let q = text; text = ""; onSend(q) }
+
+    var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
-                TextField("在所有会议中提问…", text: $vm.input)
+                TextField("在所有会议中提问…", text: $text)
                     .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(pal.text)
-                    .focused($focused).onSubmit { vm.ask(vm.input) }
+                    .focused($focused).onSubmit(send)
                     .frame(height: 36)
-                Button { vm.ask(vm.input) } label: {
+                Button(action: send) {
                     Image(systemName: "arrow.up").font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(canSend ? .white : pal.text3)
                         .frame(width: 36, height: 36)
@@ -474,17 +535,6 @@ struct ChatView: View {
                 .font(.system(size: 11)).foregroundStyle(pal.text3)
         }
         .padding(.horizontal, 24).padding(.top, 14).padding(.bottom, 20)
-    }
-
-    private var canSend: Bool { !vm.busy && !vm.input.trimmingCharacters(in: .whitespaces).isEmpty }
-
-    /// 对话列表的相对时间：今天 HH:mm / 昨天 / M月d日。
-    private func relTime(_ d: Date) -> String {
-        let cal = Calendar.current
-        if cal.isDateInToday(d) {
-            let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
-        }
-        if cal.isDateInYesterday(d) { return "昨天" }
-        let f = DateFormatter(); f.dateFormat = "M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+        .onChange(of: resetToken) { _, _ in text = "" }
     }
 }

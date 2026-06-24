@@ -4,22 +4,28 @@ import ResoundCore
 struct RootView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var rec: RecordingController
+    @State private var mounted: Set<AppModel.Page> = [.ask]   // 访问过即常驻，切页不销毁
 
     var body: some View {
+        let _ = Perf.body("RootView")
         let pal = app.palette
         ZStack {
             pal.bg.ignoresSafeArea()
-            VStack(spacing: 0) {
-                TopBar()
-                StatusBar()
-                HStack(spacing: 0) {
-                    Sidebar()
-                    Rectangle().fill(pal.border).frame(width: 1)
-                    content
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(pal.bg)
+            if app.showOnboarding {
+                OnboardingView()
+            } else {
+                VStack(spacing: 0) {
+                    TopBar()
+                    StatusBar()
+                    HStack(spacing: 0) {
+                        Sidebar()
+                        Rectangle().fill(pal.border).frame(width: 1)
+                        content
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(pal.bg)
+                    }
+                    .overlay(alignment: .bottomLeading) { sidebarToggle(pal) }
                 }
-                .overlay(alignment: .bottomLeading) { sidebarToggle(pal) }
             }
             OverlayHost()
         }
@@ -28,13 +34,18 @@ struct RootView: View {
         .ignoresSafeArea()
     }
 
-    @ViewBuilder private var content: some View {
-        switch app.page {
-        case .ask: ChatView()
-        case .library: LibraryView()
-        case .templates: TemplatesView()
-        case .settings: SettingsView()
+    // 埋点结论：卡顿主因是 MarkdownUI「构建+布局一篇文档」单次极慢（几百 ms~1s）。用 switch 切页会销毁旧页、
+    // 重建新页 → 切到 Ask 要重建整段对话所有 Markdown = 切换卡的根因。改用「懒挂载 + 常驻」ZStack：
+    // 访问过的页面不销毁，切页只切 opacity（不重建 Markdown）。配合瞬时折叠 + 摘要限宽（内容区变宽 Markdown
+    // 宽度不变 → 不重排），消除之前 keep-alive 在动画折叠下「多页 Markdown 逐帧重排」的副作用。
+    private var content: some View {
+        ZStack {
+            if mounted.contains(.ask) { ChatView().pageVisible(app.page == .ask) }
+            if mounted.contains(.library) { LibraryView().pageVisible(app.page == .library) }
+            if mounted.contains(.templates) { TemplatesView().pageVisible(app.page == .templates) }
+            if mounted.contains(.settings) { SettingsView().pageVisible(app.page == .settings) }
         }
+        .onChange(of: app.page) { _, p in mounted.insert(p) }
     }
 
     /// 折叠按钮：圆形，圆心正好落在侧栏右边框上（跨边框浮动）。
@@ -51,6 +62,13 @@ struct RootView: View {
         .buttonStyle(.plainHit).hoverCursor()
         .help(app.sidebarCollapsed ? "展开侧栏" : "折叠侧栏")
         .offset(x: sidebarWidth - d / 2, y: -88)   // 圆心 x=侧栏右边框；放在边框下方（footer 卡片之上）
+    }
+}
+
+extension View {
+    /// 常驻页面的显隐：隐藏时透明 + 不接收点击/键盘（含快捷键，避免隐藏页抢 ⌘F）+ 压底层。
+    @ViewBuilder func pageVisible(_ visible: Bool) -> some View {
+        self.opacity(visible ? 1 : 0).allowsHitTesting(visible).disabled(!visible).zIndex(visible ? 1 : 0)
     }
 }
 
@@ -214,8 +232,9 @@ struct Sidebar: View {
     @Environment(\.palette) var pal
 
     var body: some View {
+        let _ = Perf.body("Sidebar")
         let collapsed = app.sidebarCollapsed
-        VStack(alignment: collapsed ? .center : .leading, spacing: 0) {
+        return VStack(alignment: collapsed ? .center : .leading, spacing: 0) {
             if collapsed {
                 BrandIcon(pal: pal, size: 30, bordered: true)
                     .frame(maxWidth: .infinity)

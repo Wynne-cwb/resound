@@ -7,14 +7,17 @@ struct SettingsView: View {
     @Environment(\.palette) var pal
 
     var body: some View {
-        ScrollView {
+        let _ = Perf.body("SettingsView")
+        return ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Text("设置").font(.system(size: 22, weight: .bold)).foregroundStyle(pal.text)
                 Text("所有处理都在这台 Mac 上完成。音频和转录文稿都不会离开你的设备。")
                     .font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 4)
                     .padding(.bottom, 4)
 
-                connectionSection
+                ProvidersSection()
+
+                StorageSection()
 
                 sectionHeader("权限").padding(.top, 30)
                 groupCard { ForEach(vm.permRows) { p in
@@ -83,52 +86,9 @@ struct SettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(pal.borderStrong))
                 .padding(.top, 11)
             } else {
-                if vm.vocab.count > 8 {   // 词条多时给个搜索框 + 定高滚动，避免设置页被撑得很长
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text3)
-                        TextField("搜索词条…", text: $vm.vocabFilter)
-                            .textFieldStyle(.plain).font(.system(size: 13)).foregroundStyle(pal.text)
-                        if !vm.vocabFilter.isEmpty {
-                            Button { vm.vocabFilter = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 13)).foregroundStyle(pal.text3) }
-                                .buttonStyle(.plainHit).hoverCursor()
-                        }
-                        Text("\(vm.filteredVocab.count)/\(vm.vocab.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
-                    }
-                    .padding(.horizontal, 12).frame(height: 36)
-                    .background(pal.bg, in: RoundedRectangle(cornerRadius: 9, style: .continuous)).stroke(pal.borderStrong, corner: 9)
-                    .padding(.top, 11)
-                }
-                let items = vm.filteredVocab
-                if items.isEmpty {
-                    Text("没有匹配「\(vm.vocabFilter)」的词条").font(.system(size: 12.5)).foregroundStyle(pal.text3)
-                        .frame(maxWidth: .infinity).padding(.vertical, 20)
-                } else {
-                    ScrollView {
-                        groupCard(topPad: vm.vocab.count > 8 ? 8 : 11) { ForEach(items) { v in
-                            row(last: v.id == items.last?.id) {
-                                VStack(alignment: .leading, spacing: 7) {
-                                    Text(v.canonical).font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(pal.text)
-                                    if v.variants.isEmpty {
-                                        Text("仅预防 · 未设易错变体").font(.system(size: 11.5)).foregroundStyle(pal.text3)
-                                    } else {
-                                        HStack(spacing: 6) {
-                                            Text("易错变体").font(.system(size: 11)).foregroundStyle(pal.text3)
-                                            ForEach(v.variants, id: \.self) { vr in
-                                                Text(vr).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
-                                                    .padding(.horizontal, 9).padding(.vertical, 2)
-                                                    .background(pal.inset, in: RoundedRectangle(cornerRadius: 7)).stroke(pal.border, corner: 7)
-                                            }
-                                        }
-                                    }
-                                }
-                                Spacer()
-                                smallIcon("pencil") { vm.openEditVocab(v.id) }
-                                smallIcon("trash", danger: true) { vm.confirmVocabDeleteId = v.id }
-                            }
-                        } }
-                    }
-                    .frame(maxHeight: vm.vocab.count > 8 ? 360 : .infinity)
-                }
+                VocabBrowser(vocab: vm.vocab,
+                             onEdit: { vm.openEditVocab($0) },
+                             onDelete: { vm.confirmVocabDeleteId = $0 })
             }
         }
     }
@@ -181,83 +141,6 @@ struct SettingsView: View {
         .padding(.top, 13)
     }
 
-    // MARK: 连接与模型（可视化配置 + 导入导出）
-
-    private var connectionSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                sectionHeader("连接与模型")
-                Spacer()
-                Button { vm.importConfig() } label: { miniLabel("square.and.arrow.down", "导入") }.buttonStyle(.plainHit).hoverCursor()
-                Button { vm.exportConfig() } label: { miniLabel("square.and.arrow.up", "导出") }.buttonStyle(.plainHit).hoverCursor()
-            }
-            .padding(.top, 30)
-            Text("直接在这里填 API，无需改代码重新编译；保存后即时生效。导出可备份/迁移（含密钥，勿外发）。")
-                .font(.system(size: 12)).foregroundStyle(pal.text2).lineSpacing(2).padding(.top, 6)
-
-            groupCard {
-                fieldRow("Chat API Key", $vm.editConfig.chatKey, secure: true, last: false)
-                fieldRow("Chat Base URL", $vm.editConfig.chatBaseURL, last: false)
-                fieldRow("Embedding API Key", $vm.editConfig.embeddingKey, secure: true, last: false)
-                fieldRow("Embedding Base URL", $vm.editConfig.embeddingBaseURL, last: false)
-                toggleRow("在线转写", "开 = 远程 Whisper API；关 = 本地 WhisperKit（首次下模型，较慢）。",
-                          $vm.editConfig.transcribeOnline, last: !vm.editConfig.transcribeOnline)
-                if vm.editConfig.transcribeOnline {
-                    fieldRow("转写模型", $vm.editConfig.transcribeModel, last: false)
-                    fieldRow("转写 Base URL", $vm.editConfig.transcribeBaseURL, placeholder: "缺省同 Embedding", last: false)
-                    fieldRow("转写 API Key", $vm.editConfig.transcribeKey, secure: true, placeholder: "缺省同 Embedding", last: true)
-                }
-            }
-
-            groupCard {
-                row(last: false) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("录音库路径").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
-                        Text(vm.editConfig.vaultPath.isEmpty ? "未设置" : vm.editConfig.vaultPath)
-                            .font(.system(size: 12, design: .monospaced)).foregroundStyle(pal.text2)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Button { vm.pickVaultPath() } label: {
-                        Text("选择…").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
-                            .padding(.horizontal, 12).frame(height: 30)
-                            .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).stroke(pal.borderStrong, corner: 8)
-                    }.buttonStyle(.plainHit).hoverCursor()
-                }
-                toggleRow("自动推送到 git", "录音库是 git 仓库时，处理完自动 commit+push（仅文本派生物，音频不进 git）。",
-                          $vm.editConfig.vaultAutoPush, last: true)
-            }
-
-            Button { vm.saveConfig() } label: {
-                Text("保存配置").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 18).frame(height: 34)
-                    .background(pal.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            }.buttonStyle(.plainHit).hoverCursor().padding(.top, 12)
-        }
-    }
-
-    private func miniLabel(_ icon: String, _ text: String) -> some View {
-        HStack(spacing: 5) { Image(systemName: icon).font(.system(size: 11, weight: .semibold)); Text(text).font(.system(size: 12.5, weight: .semibold)) }
-            .foregroundStyle(pal.text).padding(.horizontal, 11).frame(height: 30)
-            .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).stroke(pal.borderStrong, corner: 8)
-    }
-
-    private func fieldRow(_ label: String, _ binding: Binding<String>, secure: Bool = false,
-                          placeholder: String = "", last: Bool) -> some View {
-        row(last: last) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(label).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
-                Group {
-                    if secure { SecureField(placeholder, text: binding) } else { TextField(placeholder, text: binding) }
-                }
-                .textFieldStyle(.plain).font(.system(size: 12.5, design: .monospaced)).foregroundStyle(pal.text)
-                .padding(.horizontal, 10).frame(height: 32)
-                .background(pal.bg, in: RoundedRectangle(cornerRadius: 7, style: .continuous)).stroke(pal.border, corner: 7)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
     // MARK: 复用件
 
     private func sectionHeader(_ t: String) -> some View {
@@ -291,6 +174,159 @@ struct SettingsView: View {
                 .stroke(filled ? .clear : pal.borderStrong, corner: filled ? 9 : 8)
         }
         .buttonStyle(.plainHit).hoverCursor()
+    }
+    private func smallIcon(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: name).font(.system(size: 12.5)).foregroundStyle(pal.text2).frame(width: 28, height: 28) }
+            .buttonStyle(.plainHit).hoverCursor()
+    }
+}
+
+// MARK: - 存储与同步（录音库路径 + 自动推送，独立子视图）
+//
+// AI Provider 已迁到 providers.json（见 ProvidersSection）；这里只剩录音库相关的 .env 项。
+// 本地 @State 草稿；保存时通过 vm.saveConfig 写回（保留其余 .env 键不动）。
+private struct StorageSection: View {
+    @EnvironmentObject var vm: SettingsModel
+    @Environment(\.palette) var pal
+    @State private var cfg = SettingsModel.EditConfig()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionHeader("存储与同步").padding(.top, 30)
+            Text("录音、转录文稿、摘要都存进你指定的录音库目录；可选自动同步到 git。")
+                .font(.system(size: 12)).foregroundStyle(pal.text2).lineSpacing(2).padding(.top, 6)
+
+            groupCard {
+                row(last: false) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("录音库路径").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
+                        Text(cfg.vaultPath.isEmpty ? "未设置" : cfg.vaultPath)
+                            .font(.system(size: 12, design: .monospaced)).foregroundStyle(pal.text2)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Button { vm.pickVaultPath() } label: {
+                        Text("选择…").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
+                            .padding(.horizontal, 12).frame(height: 30)
+                            .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).stroke(pal.borderStrong, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor()
+                }
+                toggleRow("自动推送到 git", "录音库是 git 仓库时，处理完自动 commit+push（仅文本派生物，音频不进 git）。",
+                          $cfg.vaultAutoPush, last: true)
+            }
+
+            Button { vm.saveConfig(cfg) } label: {
+                Text("保存").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 18).frame(height: 34)
+                    .background(pal.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            }.buttonStyle(.plainHit).hoverCursor().padding(.top, 12)
+        }
+        .onAppear { cfg = vm.editConfig }                           // 进入页面以 vm 当前值播种草稿
+        .onChange(of: vm.editConfig) { _, new in cfg = new }        // 选路径等外部变更同步进来
+    }
+
+    // 自带精简 helper（与父视图隔离，互不影响）
+    private func sectionHeader(_ t: String) -> some View {
+        Text(t.uppercased()).font(.system(size: 12, weight: .semibold)).tracking(0.6).foregroundStyle(pal.text3)
+    }
+    private func groupCard<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) { content() }.card(pal).padding(.top, 11)
+    }
+    private func row<C: View>(last: Bool, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) { content() }.padding(.horizontal, 18).padding(.vertical, 14)
+            if !last { Rectangle().fill(pal.border).frame(height: 1) }
+        }
+    }
+    private func toggleRow(_ label: String, _ desc: String, _ binding: Binding<Bool>, last: Bool) -> some View {
+        row(last: last) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                Text(desc).font(.system(size: 12)).foregroundStyle(pal.text2)
+            }
+            Spacer()
+            SwitchToggle(on: binding, pal: pal)
+        }
+    }
+}
+
+// MARK: - 词表浏览（搜索框 + 列表，独立子视图）
+//
+// 性能关键：搜索框原绑定 $vm.vocabFilter（@Published），每敲一字重算整个 SettingsView。
+// 改成本地 @State filter + 本地计算 filtered → 键入只重绘本子视图；vm.vocab 增删时由父传入新值刷新。
+private struct VocabBrowser: View {
+    let vocab: [GlossaryEntry]
+    let onEdit: (String) -> Void
+    let onDelete: (String) -> Void
+    @Environment(\.palette) var pal
+    @State private var filter = ""
+
+    private var items: [GlossaryEntry] {
+        let q = filter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return vocab }
+        return vocab.filter { $0.canonical.lowercased().contains(q) || $0.variants.contains { $0.lowercased().contains(q) } }
+    }
+
+    var body: some View {
+        let many = vocab.count > 8
+        VStack(alignment: .leading, spacing: 0) {
+            if many {   // 词条多时给个搜索框 + 定高滚动，避免设置页被撑得很长
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text3)
+                    TextField("搜索词条…", text: $filter)
+                        .textFieldStyle(.plain).font(.system(size: 13)).foregroundStyle(pal.text)
+                    if !filter.isEmpty {
+                        Button { filter = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 13)).foregroundStyle(pal.text3) }
+                            .buttonStyle(.plainHit).hoverCursor()
+                    }
+                    Text("\(items.count)/\(vocab.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
+                }
+                .padding(.horizontal, 12).frame(height: 36)
+                .background(pal.bg, in: RoundedRectangle(cornerRadius: 9, style: .continuous)).stroke(pal.borderStrong, corner: 9)
+                .padding(.top, 11)
+            }
+            let list = items
+            if list.isEmpty {
+                Text("没有匹配「\(filter)」的词条").font(.system(size: 12.5)).foregroundStyle(pal.text3)
+                    .frame(maxWidth: .infinity).padding(.vertical, 20)
+            } else {
+                ScrollView {
+                    groupCard(topPad: many ? 8 : 11) { ForEach(list) { v in
+                        row(last: v.id == list.last?.id) {
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(v.canonical).font(.system(size: 14, weight: .semibold, design: .monospaced)).foregroundStyle(pal.text)
+                                if v.variants.isEmpty {
+                                    Text("仅预防 · 未设易错变体").font(.system(size: 11.5)).foregroundStyle(pal.text3)
+                                } else {
+                                    HStack(spacing: 6) {
+                                        Text("易错变体").font(.system(size: 11)).foregroundStyle(pal.text3)
+                                        ForEach(v.variants, id: \.self) { vr in
+                                            Text(vr).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                                                .padding(.horizontal, 9).padding(.vertical, 2)
+                                                .background(pal.inset, in: RoundedRectangle(cornerRadius: 7)).stroke(pal.border, corner: 7)
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer()
+                            smallIcon("pencil") { onEdit(v.id) }
+                            smallIcon("trash", danger: true) { onDelete(v.id) }
+                        }
+                    } }
+                }
+                .frame(maxHeight: many ? 360 : .infinity)
+            }
+        }
+    }
+
+    private func groupCard<C: View>(topPad: CGFloat = 11, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) { content() }.card(pal).padding(.top, topPad)
+    }
+    private func row<C: View>(last: Bool, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) { content() }.padding(.horizontal, 18).padding(.vertical, 14)
+            if !last { Rectangle().fill(pal.border).frame(height: 1) }
+        }
     }
     private func smallIcon(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: name).font(.system(size: 12.5)).foregroundStyle(pal.text2).frame(width: 28, height: 28) }

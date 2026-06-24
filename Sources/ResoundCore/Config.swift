@@ -25,6 +25,14 @@ public struct Config {
 
     public static func load() throws -> Config {
         let env = loadDotEnv()
+        // 优先用 GUI 的 providers.json（chat+embedding 配齐时）；否则回退旧 .env（CLI / dev）。
+        if let pc = ProvidersStore.load(), pc.isComplete, let resolved = pc.toConfig(env: env) {
+            return resolved
+        }
+        return try loadFromEnv(env)
+    }
+
+    private static func loadFromEnv(_ env: [String: String]) throws -> Config {
         func v(_ k: String) -> String? {
             if let p = ProcessInfo.processInfo.environment[k], !p.isEmpty { return p }
             return env[k]

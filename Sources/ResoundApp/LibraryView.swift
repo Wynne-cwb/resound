@@ -11,13 +11,14 @@ struct LibraryView: View {
     @State private var hoverFolderId: String?
 
     var body: some View {
-        HStack(spacing: 0) {
+        let _ = Perf.body("LibraryView")
+        return HStack(spacing: 0) {
             listColumn
             Rectangle().fill(pal.border).frame(width: 1)
             detail
         }
         .onAppear { vm.load() }
-        .onChange(of: app.libraryReloadToken) { _, _ in vm.load() }
+        .onChange(of: app.libraryReloadToken) { _, _ in vm.refresh() }
         .background {
             Button("") { vm.openFind() }.keyboardShortcut("f", modifiers: .command).hidden()
         }
@@ -26,7 +27,7 @@ struct LibraryView: View {
     // MARK: 列表
 
     private var listColumn: some View {
-        let secs = vm.sections()   // 一次算好复用，避免 body 内 O(folders×recordings) 过滤跑两遍
+        let secs = Perf.measure("sections") { vm.sections() }   // 一次算好复用，避免 body 内 O(folders×recordings) 过滤跑两遍
         return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
@@ -489,6 +490,7 @@ struct LibraryView: View {
             }
             .padding(.top, 18).zIndex(1)   // 让模板下拉浮在摘要卡之上
             SummaryMarkdown(text: text, pal: pal, highlight: vm.findOpen ? vm.findQuery : "")
+                .equatable()   // 切页/折叠时 LibraryView.body 重跑也不重解析 Markdown
                 .padding(22).frame(maxWidth: .infinity, alignment: .leading).card(pal).padding(.top, 14)
         } else {
             VStack(spacing: 0) {
@@ -868,7 +870,11 @@ struct TitlebarDragArea: NSViewRepresentable {
 
 // MARK: - 摘要 Markdown 渲染（MarkdownUI，GitHub 风：嵌套列表/表格/代码块齐全）
 
-struct SummaryMarkdown: View {
+// Equatable 是性能关键：MarkdownUI 在 body 里解析 cmark。容器（LibraryView / ChatView）因观察 app，
+// 在切页 / 侧栏折叠动画（每帧改 app.sidebarCollapsed）时 body 频繁重跑 → 若不设 Equatable 边界，
+// 这个 Markdown 每次都重新解析整段文稿 → 卡。加 .equatable() 后，文本/主题不变即剪枝、不重解析。
+// 只比 pal.isDark（主题仅随它变）+ text/highlight；text 是同一 String 实例时 == 走 O(1) 缓冲区判等。
+struct SummaryMarkdown: View, Equatable {
     let text: String
     let pal: Palette
     var highlight: String = ""   // 保留签名兼容；行内查找高亮交给转录页，摘要走完整 Markdown
@@ -877,8 +883,13 @@ struct SummaryMarkdown: View {
         self.text = text; self.pal = pal; self.highlight = highlight
     }
 
+    static func == (a: SummaryMarkdown, b: SummaryMarkdown) -> Bool {
+        a.text == b.text && a.highlight == b.highlight && a.pal.isDark == b.pal.isDark
+    }
+
     var body: some View {
-        Markdown(text)
+        let _ = Perf.body("SummaryMarkdown(parse)")   // 每次重算=重新解析 cmark，看折叠/切页时是否被剪枝
+        return Markdown(text)
             .markdownTheme(.resound(pal))
             .textSelection(.enabled)
     }
@@ -945,16 +956,22 @@ func highlightedText(_ s: String, query: String, pal: Palette) -> Text {
 }
 
 // MARK: - 日期格式
+// DateFormatter / ISO8601DateFormatter 创建昂贵（建 ICU/CFLocale）。提为文件级单例复用：
+// 列表行每次 hover/选中/识别状态变更都会重算可见行 body，原来每行现建 3 个 formatter（首屏 3N 个）。
+// 全在主线程渲染调用；全局 let 懒初始化且线程安全。
+private let isoFmt: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f }()
+private let isoFmtFrac: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
+private let shortDateFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy年M月d日"; f.locale = Locale(identifier: "zh_CN"); return f }()
+private let fullDateFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy年M月d日 · HH:mm"; f.locale = Locale(identifier: "zh_CN"); return f }()
 
 private func isoDate(_ iso: String) -> Date? {
-    let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]
-    return f.date(from: iso) ?? { let g = ISO8601DateFormatter(); g.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return g.date(from: iso) }()
+    isoFmt.date(from: iso) ?? isoFmtFrac.date(from: iso)
 }
 func shortDate(_ iso: String) -> String {
     guard let d = isoDate(iso) else { return String(iso.prefix(10)) }
-    let f = DateFormatter(); f.dateFormat = "yyyy年M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+    return shortDateFmt.string(from: d)
 }
 func fullDate(_ iso: String) -> String {
     guard let d = isoDate(iso) else { return String(iso.prefix(10)) }
-    let f = DateFormatter(); f.dateFormat = "yyyy年M月d日 · HH:mm"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+    return fullDateFmt.string(from: d)
 }

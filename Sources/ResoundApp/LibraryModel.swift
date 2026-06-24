@@ -168,7 +168,18 @@ final class LibraryModel: ObservableObject {
 
     // MARK: 加载
 
-    func load() { reload() }
+    private var didInitialLoad = false
+    /// 切页进入 Library 调用。**幂等**：仅首次扫盘，之后什么都不做——
+    /// 拾取新录音靠 `libraryReloadToken` 走 `refresh()`，导入/删除/改名各自走增量或显式 reload。
+    /// 修复：原来每次切到 Library 都 reload→refreshDetail（先把转录/名册塌空再后台重解码 JSON+flatten+roster），
+    /// 即「啥都没改也重算两轮整树失效」，长转录肉眼可感卡顿。
+    func load() {
+        guard !didInitialLoad else { return }
+        didInitialLoad = true
+        reload()
+    }
+    /// libraryReloadToken 变更（录音/导入完成）：强制全量刷新以拾取新录音。
+    func refresh() { reload() }
 
     /// 全量刷新录音库。扫盘 + 解析 manifest + 开 sqlite 读声纹**全部放后台**（原来同步在主线程，
     /// 录音多了点开/切页/导入都卡）。算完回主线程一次性发布。
