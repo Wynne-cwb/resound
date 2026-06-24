@@ -102,6 +102,7 @@ struct TopBar: View {
         .frame(height: 46)
         .padding(.leading, 78)   // 交通灯
         .background(pal.titlebar)
+        .background(TitlebarDragArea())   // 仅此条标题栏可拖窗（内容区已禁用整窗拖动）
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { zoomMainWindow() }   // 双击标题栏撑满/还原
         .overlay(alignment: .bottom) { Rectangle().fill(pal.border).frame(height: 1) }

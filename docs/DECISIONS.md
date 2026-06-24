@@ -5,6 +5,44 @@
 
 ---
 
+## 转写失败兜底：可诊断 + 不丢音频 + 可重试（2026-06-25）
+
+**背景**：用户昨晚一条导入转写失败，无报错、无重试、无法取回音频，重新导入才成功，现已无法复现。来查日志。
+
+**排查结论（重要踩坑）**：**查不到原因**——根因三连：①失败处理是 `catch { setPendingStatus(.failed) }`，**把 error 直接吞了**；②App 全程 `print` 输出，而 `open` 启动的 GUI App 的 stdout **不进系统统一日志、关掉即丢**（`log show --predicate 'process=="Resound"'` 零条），代码里也无 `os_log`/文件日志；③崩溃报告显示昨晚无 crash → 是流程内部抛错被吞。**教训：关键失败必须落盘，否则不可复现 = 抓瞎。**
+
+**决策：全套兜底（用户选）**，覆盖导入与录音两条路径。
+
+**实现**：
+1. **持久化日志** 新增 [AppLog.swift](../Sources/ResoundCore/AppLog.swift)：追加到 App Support `resound.log`，串行队列线程安全，超 1MB 截前半。`AppLog.error(ctx, err)` 带 NSError domain/code。所有 ingest 失败都 `AppLog.error` 落盘。
+2. **导入失败可恢复**：`ImportItem` 加 `error`/`source` 字段；抽出 `ingestOne(_:)` 复用（startImport 批量 + 重试 + 录音兜底都走它）；失败行 UI（[LibraryView.swift](../Sources/ResoundApp/LibraryView.swift) `importingRow`）显示**具体原因**（截断+`.help` tooltip 看全文）+ 三个按钮：**重试**（原地重跑）/ **在 Finder 中显示音频**（`NSWorkspace.activateFileViewerSelecting`）/ 移除。
+3. **录音(Meet)失败不丢音频**（最危险的洞）：[RecordingController.swift](../Sources/ResoundApp/RecordingController.swift) `stopAndIngest` 重构成两段 do/catch——收尾(混音)失败=无音频可救只报错；转写/入库失败则 `library.recordFailedRecording(url:title:error:)` 把抢救出的临时音频**搬到 App Support/Resound/failed-recordings/**（`preserveFailedAudio`，系统不会清）并登记成失败占位，复用导入失败行的重试/Finder UI。未设 VAULT_PATH 也走同路径（不再静默丢录音）。入库成功则清临时混音。
+4. `ingestOne` 对缺 vault 显式置失败带提示（重试无 vault 时也优雅）。
+
+**设计取舍**：录音兜底**复用 `pendingImports` 失败行**而非另造 UI——一套重试/取回交互覆盖两条路径，最省。"下载"在 Mac App 等价于"在 Finder 中显示"（文件就在本地）。
+
+编译+打包+启动通过。**待验收**：制造一次失败（如断网导入）看是否显示原因+能重试+能在 Finder 取回；`resound.log` 是否落下报错。
+
+---
+
+## 5 项 UI/逻辑小优化（2026-06-25）
+
+用户列了 5 个体验问题，一并实现。决定**自己逐个改、不开 subagent/workflow 并行**——4/5 改动集中在 [LibraryModel.swift](../Sources/ResoundApp/LibraryModel.swift) 同一文件，并行 worktree 只会撞合并冲突，串行更干净。
+
+1. **窗口只能从标题栏拖动**。现象：主窗口空白处拖拽会带着整窗跑。根因 `window.isMovableByWindowBackground = true`（[ResoundApp.swift](../Sources/ResoundApp/ResoundApp.swift)）让整个内容背景都可拖窗，之前靠到处贴 `WindowDragBlocker` 打地鼠。**改**：置 `false`（内容区默认不拖窗），自绘顶栏背后加 `TitlebarDragArea`（NSView `mouseDownCanMoveWindow=true`，[LibraryView.swift](../Sources/ResoundApp/LibraryView.swift)）→ 只有这条 46pt 顶栏能拖。系统真标题栏区一直可拖不受影响。残留的 `WindowDragBlocker` 变成无害冗余，留着不动（低风险）。
+
+2. **⌘F 查找替换统一大小写不敏感**。现象：高亮大小写不敏感、替换却敏感，口径不一致。根因 `replacingOccurrences`/`components(separatedBy:)` 默认大小写敏感，而高亮用 `.caseInsensitive`。**改**：新增 `LibraryModel.ciCount`（`.caseInsensitive` 计数），`replaceAll`（转录段+词级、摘要）与 `findMatchCount` 全改 `.caseInsensitive`。`firstMatchLineID` 本就是不敏感。
+
+3. **说话人头像配色稳定 + 按说话占比排序**。现象：同一个人头像底色时而这色时而那色。根因 `speakerColor(index:)` 按**本条录音内首次出现顺序** `index` 取色 → 跨录音/重识别顺序变 → 同一人变色。**改**：`speakerColor(for name:anon:)` 改用名字 **djb2 确定性哈希**取色——同一人无论哪条录音、跨重启都恒定。**关键坑**：不能用 `String.hashValue`，Swift 它每次进程启动带随机种子，会导致每次开 App 都变色。匿名说话人仍统一 `pal.inset` 灰。排序：`makeRoster` 末尾按 `lineCount` 降序（说得多的排前），`index` 字段保留作兼容、已不参与配色。
+
+4. **多录音并发重新生成摘要各自独立状态**。现象：A 正在重生成，切去重生成 B，A 的 loading 状态没了（但后台 A 其实还在跑）。根因 `summarizingId: String?` 单值被 B 覆盖。**改**：`summarizingId: String?` → `summarizingIds: Set<String>`；`runSummary` insert/remove 各自 id（`defer { summarizingIds.remove(rec.id) }`），`summarizing` 计算属性看 `selectedId` 是否在集合内；列表行 `vm.summarizingIds.contains(r.id)`。每条录音独立显示 loading，互不冲掉。
+
+5. **文件夹展开/折叠持久化**。现象：重进 App 折叠状态丢失。**决策**：折叠是**机器本地 UI 偏好、非 vault 事实**，存 `UserDefaults`（key `resound.collapsedFolders`）而非 `library.json`（守数据契约：vault 只放事实）。`toggleCollapse` 即时 `saveCollapsed`，`reload` 的主线程块里 `loadCollapsed` 沿用上次。
+
+验收见 STATE。编译+打包（Resound Dev 稳定签名）+启动通过。
+
+---
+
 ## 转录前 VAD 门控：剪静音/噪声减 whisper 幻觉（2026-06-24）
 
 **背景**：用户复盘录音发现很多段没人说话（背景音/杂音）。whisper 这类模型「必须吐字」，在静音/噪声段上三种典型翻车：①**幻觉**——凭空编训练语料高频套话（「谢谢观看」「字幕由…提供」）；②**重复**——decoder 卡循环刷同句；③**时间戳漂移**——长静音把后续段落 start/end 整体推偏。杂音还会污染说话人识别（噪声窗提出垃圾声纹→幽灵「说话人N」）。

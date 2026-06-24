@@ -96,19 +96,33 @@ final class RecordingController: ObservableObject {
         stopRecTimer()
         phase = .processing
         procStep = 0
+        let title = meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
+            // ① 先把录音收尾（混音落盘）。这一步失败=没有音频可救，只能报错。
+            let url: URL
             do {
-                let url = try await rec.finishCapture { _ in }
+                url = try await rec.finishCapture { _ in }
+            } catch {
+                await MainActor.run {
+                    AppLog.error("录音收尾(混音)失败", error)
+                    self.app?.toast("录音收尾失败：\(error)")
+                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
+                }
+                return
+            }
+            // ② 转写 + 入库。任何一步失败都**不丢音频**：登记成可重试的失败项（录音库顶部），并落盘日志。
+            do {
                 let cfg = try Config.load()
                 guard let vault = cfg.vaultPath, !vault.isEmpty else {
                     await MainActor.run {
-                        self.app?.toast("未设置 VAULT_PATH（在设置里配 vault 路径后才能入库）")
-                        self.phase = .idle; self.recorder = nil
+                        AppLog.log("⚠️ 录音转写中止：未设置 VAULT_PATH（音频已保留待重试）")
+                        self.library?.recordFailedRecording(url: url, title: title,
+                            error: "未设置录音库路径（去 设置 配置 vault 后，可在录音库顶部重试）")
+                        self.app?.toast("未设置录音库路径，录音已保留：配置后可在录音库顶部重试")
+                        self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                     }
                     return
                 }
-                // 转写 + 入库
-                let title = self.meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
                     .ingest(audioPath: url, title: (title?.isEmpty == false) ? title : nil, source: "meeting", tags: [],
                             model: "large-v3", language: "zh", hints: [], push: false)
@@ -119,6 +133,7 @@ final class RecordingController: ObservableObject {
                 if cfg.vaultAutoPush {   // 开了自动推送：把文本派生物同步到 vault 远端（音频已 gitignore）
                     _ = try? Git(repo: URL(fileURLWithPath: vault)).syncTextOnly(message: "rec: 会议录音 \(out.id)")
                 }
+                try? FileManager.default.removeItem(at: url)   // 入库成功，清掉临时混音
                 // 转写+入库完成即收尾；说话人识别(慢)+摘要交后台串行 worker，录音库里该条显示「识别说话人中…」
                 let sum = loadRecordingSummary(dir: out.recordingDir)
                 await MainActor.run {
@@ -129,7 +144,15 @@ final class RecordingController: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    self.app?.toast("处理失败：\(error)"); self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
+                    AppLog.error("录音转写入库失败（音频已保留待重试）", error)
+                    if let lib = self.library {
+                        lib.recordFailedRecording(url: url, title: title, error: String(describing: error))
+                        self.app?.toast("转写失败，录音已保留：可在录音库顶部重试或在 Finder 取回")
+                    } else {
+                        AppLog.log("⚠️ library 未挂载，录音临时文件：\(url.path)")
+                        self.app?.toast("转写失败：\(error)")
+                    }
+                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                 }
             }
         }

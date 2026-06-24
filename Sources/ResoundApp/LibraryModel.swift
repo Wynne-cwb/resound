@@ -62,6 +62,8 @@ final class LibraryModel: ObservableObject {
         let url: URL
         var name: String
         var status: Status
+        var error: String? = nil        // 失败原因（供 UI 显示 + 重试前清空）
+        var source: String = "import"   // "import"（用户文件，原处可重导）/ "meeting"（录音兜底，url 是抢救出的音频）
         enum Status { case queued, transcribing, identifying, done, failed }
     }
 
@@ -106,8 +108,8 @@ final class LibraryModel: ObservableObject {
     @Published var namingInProgress: String?   // 正在保存/注册声纹的说话人标签
     @Published var summaryText: String?
     @Published var summaryTemplateId: String?
-    @Published var summarizingId: String?   // 正在生成摘要的录音 id（仅该条显示 loading）
-    var summarizing: Bool { summarizingId != nil && summarizingId == selectedId }
+    @Published var summarizingIds: Set<String> = []   // 正在生成摘要的录音 id（可并发多条，各自显示 loading）
+    var summarizing: Bool { selectedId.map { summarizingIds.contains($0) } ?? false }
     @Published var chosenTemplateId: String?
     @Published var tplMenuOpen = false
 
@@ -185,6 +187,7 @@ final class LibraryModel: ObservableObject {
             await MainActor.run {
                 self.recordings = recs
                 self.folders = org.folders; self.assign = org.assign
+                self.loadCollapsed()
                 self.knownPeople = known
                 self.loadError = recs.isEmpty ? "vault 里还没有录音" : nil
                 if let reselect { self.selectedId = reselect }
@@ -291,12 +294,17 @@ final class LibraryModel: ObservableObject {
         var order: [String] = []
         var counts: [String: Int] = [:]
         for l in labels { if counts[l] == nil { order.append(l) }; counts[l, default: 0] += 1 }
-        return order.enumerated().map { i, label in
+        let stats = order.map { label -> SpeakerStat in
             let c = counts[label] ?? 0
             let anon = isAnon(label)
             return SpeakerStat(label: label, name: label, isAnon: anon,
                                isKnown: !anon && known.contains(label),
-                               lineCount: c, pct: Int((Double(c) / Double(total) * 100).rounded()), index: i)
+                               lineCount: c, pct: Int((Double(c) / Double(total) * 100).rounded()), index: 0)
+        }
+        // 按说话占比降序（说得多的排前，更符合多人会议的直觉）；配色已改用名字稳定哈希，index 仅留作兼容。
+        return stats.sorted { $0.lineCount > $1.lineCount }.enumerated().map { i, s in
+            SpeakerStat(label: s.label, name: s.name, isAnon: s.isAnon, isKnown: s.isKnown,
+                        lineCount: s.lineCount, pct: s.pct, index: i)
         }
     }
 
@@ -338,6 +346,16 @@ final class LibraryModel: ObservableObject {
         return out
     }
 
+    /// 大小写不敏感地数 needle 在 hay 中的出现次数——与查找高亮、替换口径统一。
+    nonisolated static func ciCount(_ hay: String, _ needle: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var n = 0, lo = hay.startIndex
+        while let r = hay.range(of: needle, options: .caseInsensitive, range: lo..<hay.endIndex) {
+            n += 1; lo = r.upperBound
+        }
+        return n
+    }
+
     nonisolated static func isAnon(_ label: String) -> Bool {
         label == "?" || label.range(of: #"^(说话人|Speaker)\s?\d*$"#, options: .regularExpression) != nil
     }
@@ -348,7 +366,7 @@ final class LibraryModel: ObservableObject {
     var findMatchCount: Int {
         guard !findQuery.isEmpty else { return 0 }
         let hay = tab == .transcript ? lines.map { $0.text }.joined(separator: "\n") : (summaryText ?? "")
-        return hay.components(separatedBy: findQuery).count - 1
+        return Self.ciCount(hay, findQuery)
     }
 
     func openFind() { if selected != nil { findOpen = true } }
@@ -369,14 +387,14 @@ final class LibraryModel: ObservableObject {
             guard let t = loadTranscript(rec.transcriptURL) else { return }
             var n = 0
             let segs = t.segments.map { seg -> Transcript.Segment in
-                n += seg.text.components(separatedBy: q).count - 1
+                n += Self.ciCount(seg.text, q)
                 return Transcript.Segment(id: seg.id, start: seg.start, end: seg.end,
-                    text: seg.text.replacingOccurrences(of: q, with: r),
-                    words: seg.words.map { Transcript.Word(w: $0.w.replacingOccurrences(of: q, with: r), start: $0.start, end: $0.end) })
+                    text: seg.text.replacingOccurrences(of: q, with: r, options: .caseInsensitive),
+                    words: seg.words.map { Transcript.Word(w: $0.w.replacingOccurrences(of: q, with: r, options: .caseInsensitive), start: $0.start, end: $0.end) })
             }
             guard n > 0 else { app?.toast("转录里没有匹配「\(q)」"); return }
             try? Transcript(language: t.language, segments: segs).jsonData().write(to: rec.transcriptURL)
-            lines = lines.map { var l = $0; l.text = l.text.replacingOccurrences(of: q, with: r); return l }
+            lines = lines.map { var l = $0; l.text = l.text.replacingOccurrences(of: q, with: r, options: .caseInsensitive); return l }
             blocks = groupBlocks(lines); flatLines = Self.flatten(blocks)
             app?.toast("已替换 \(n) 处（转录）· 正在同步检索…")
             scheduleReindex(rec)   // 更正后重建该条索引，Ask 才会用到正确文本
@@ -384,9 +402,9 @@ final class LibraryModel: ObservableObject {
             observeCorrection(from: q, to: r, rec: rec)   // 智能词表：跨录音累计同样的更正，够了就建议加入词表
         } else {
             guard var s = summaryText else { return }
-            let n = s.components(separatedBy: q).count - 1
+            let n = Self.ciCount(s, q)
             guard n > 0 else { app?.toast("摘要里没有匹配「\(q)」"); return }
-            s = s.replacingOccurrences(of: q, with: r)
+            s = s.replacingOccurrences(of: q, with: r, options: .caseInsensitive)
             summaryText = s
             try? s.data(using: .utf8)?.write(to: rec.dir.appendingPathComponent("summary.md"))
             try? Index(path: defaultIndexPath(), dim: dim()).setRecordingSummary(id: rec.id, summary: s, template: summaryTemplateId)
@@ -457,7 +475,15 @@ final class LibraryModel: ObservableObject {
         return out
     }
     func isCollapsed(_ key: String) -> Bool { query.isEmpty && collapsed.contains(key) }
-    func toggleCollapse(_ key: String) { if collapsed.contains(key) { collapsed.remove(key) } else { collapsed.insert(key) } }
+    func toggleCollapse(_ key: String) {
+        if collapsed.contains(key) { collapsed.remove(key) } else { collapsed.insert(key) }
+        saveCollapsed()
+    }
+
+    // 折叠状态是机器本地的 UI 偏好（非 vault 事实），存 UserDefaults，下次进来沿用上次的展开/折叠。
+    private static let collapsedKey = "resound.collapsedFolders"
+    private func saveCollapsed() { UserDefaults.standard.set(Array(collapsed), forKey: Self.collapsedKey) }
+    private func loadCollapsed() { collapsed = Set((UserDefaults.standard.array(forKey: Self.collapsedKey) as? [String]) ?? []) }
 
     func openNewFolder(moveRec: String? = nil) { pendingMoveRecId = moveRec; moveMenuFor = nil; folderEditor = FolderEditor(folderId: nil, name: "") }
     func openRenameFolder(_ id: String) { if let f = folders.first(where: { $0.id == id }) { folderEditor = FolderEditor(folderId: id, name: f.name) } }
@@ -692,9 +718,9 @@ final class LibraryModel: ObservableObject {
 
     private func runSummary(_ tplId: String) {
         guard let rec = selected else { return }
-        summarizingId = rec.id; tplMenuOpen = false
+        summarizingIds.insert(rec.id); tplMenuOpen = false
         Task {
-            defer { if summarizingId == rec.id { summarizingId = nil } }
+            defer { summarizingIds.remove(rec.id) }
             do {
                 let cfg = try Config.load()
                 let pipeline = IndexPipeline(config: cfg)
@@ -729,44 +755,102 @@ final class LibraryModel: ObservableObject {
 
     /// 导入：立即入列 + 关闭弹窗，转写/索引/摘要全部放后台异步进行（适合批量迁移，不再卡等）。
     func startImport() {
-        guard !importItems.isEmpty, let vault = vaultURL() else { return }
+        guard !importItems.isEmpty, vaultURL() != nil else { return }
         let queued = importItems.map { ImportItem(url: $0.url, name: $0.name, status: .transcribing) }
         importItems = []; importOpen = false; importing = false
         pendingImports.append(contentsOf: queued)
         app?.toast("已加入 \(queued.count) 个文件，正在后台转写…")
         Task {
-            let cfg = try? Config.load()
-            for p in queued {
-                do {
-                    setPendingStatus(p.id, .transcribing)
-                    let out = try await IngestPipeline(vaultRoot: vault)
-                        .ingest(audioPath: p.url, title: nil, source: "import", tags: [],
-                                model: "large-v3", language: "zh", hints: [], push: false)
-                    if let cfg {
-                        // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
-                        // 这里再标注是纯浪费的整段解码+提声纹。
-                        try await IndexPipeline(config: cfg).indexRecording(
-                            recDir: out.recordingDir, indexPath: defaultIndexPath(), labelSpeakers: false)
-                    }
-                    // 转录+入库完成即露出录音：可读/可搜/可问答。说话人识别(慢，占导入 ~80%)+摘要后台串行补，
-                    // 期间该条显示「识别说话人中…」。摘要放识别之后→摘要自带真名。
-                    autoPushVault("rec: 导入 \(p.name)")
-                    pendingImports.removeAll { $0.id == p.id }   // 真录音已生成，移除占位
-                    // 增量插入这一条（免每个文件都全量扫盘 reload；文件夹/声纹库导入时不变，无需重扫）。
-                    if let sum = loadRecordingSummary(dir: out.recordingDir) {
-                        insertRecording(sum)
-                        enqueueSpeakerID(sum)
-                    }
-                } catch {
-                    setPendingStatus(p.id, .failed)
-                }
-            }
+            for p in queued { await ingestOne(p) }
             let failed = pendingImports.filter { $0.status == .failed }.count
-            app?.toast(failed == 0 ? "导入转写完成" : "导入完成，\(failed) 个失败")
+            app?.toast(failed == 0 ? "导入转写完成" : "导入完成，\(failed) 个失败（点失败项可重试）")
         }
     }
+
+    /// 单个文件的转写→入库→后台识别。失败：把原因写进该项（UI 显示/重试用）+ 落盘日志，**不丢占位**。
+    /// 既给 `startImport` 批量调用，也给 `retryImport`、录音兜底（`recordFailedRecording`）复用。
+    private func ingestOne(_ p: ImportItem) async {
+        guard let vault = vaultURL() else {
+            setPendingStatus(p.id, .failed)
+            setPendingError(p.id, "未设置录音库路径（去 设置 配置 vault 后重试）")
+            return
+        }
+        let cfg = try? Config.load()
+        setPendingStatus(p.id, .transcribing); setPendingError(p.id, nil)
+        do {
+            let out = try await IngestPipeline(vaultRoot: vault)
+                .ingest(audioPath: p.url, title: nil, source: p.source, tags: [],
+                        model: "large-v3", language: "zh", hints: [], push: false)
+            if let cfg {
+                // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
+                // 这里再标注是纯浪费的整段解码+提声纹。
+                try await IndexPipeline(config: cfg).indexRecording(
+                    recDir: out.recordingDir, indexPath: defaultIndexPath(), labelSpeakers: false)
+            }
+            // 转录+入库完成即露出录音：可读/可搜/可问答。说话人识别(慢，占导入 ~80%)+摘要后台串行补，
+            // 期间该条显示「识别说话人中…」。摘要放识别之后→摘要自带真名。
+            autoPushVault("rec: 导入 \(p.name)")
+            // 录音兜底（meeting）抢救出的临时音频，成功入库后清掉，避免 App Support 堆垃圾。
+            if p.source == "meeting" { try? FileManager.default.removeItem(at: p.url) }
+            pendingImports.removeAll { $0.id == p.id }   // 真录音已生成，移除占位
+            // 增量插入这一条（免每个文件都全量扫盘 reload；文件夹/声纹库导入时不变，无需重扫）。
+            if let sum = loadRecordingSummary(dir: out.recordingDir) {
+                insertRecording(sum)
+                enqueueSpeakerID(sum)
+            }
+        } catch {
+            AppLog.error("导入转写失败「\(p.name)」(\(p.url.path))", error)
+            setPendingStatus(p.id, .failed)
+            setPendingError(p.id, String(describing: error))
+        }
+    }
+
+    /// 重试一个失败项（原地重跑同一文件）。
+    func retryImport(_ id: UUID) {
+        guard let p = pendingImports.first(where: { $0.id == id }), p.status == .failed else { return }
+        guard FileManager.default.fileExists(atPath: p.url.path) else {
+            app?.toast("源音频已不在原位置，无法重试：\(p.url.lastPathComponent)"); return
+        }
+        app?.toast("重新转写「\(p.name)」…")
+        Task { await ingestOne(p) }
+    }
+
+    /// 在 Finder 中显示该项音频（失败时取回/另存原始录音）。
+    func revealImport(_ id: UUID) {
+        guard let p = pendingImports.first(where: { $0.id == id }) else { return }
+        guard FileManager.default.fileExists(atPath: p.url.path) else {
+            app?.toast("音频文件已不在：\(p.url.path)"); return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([p.url])
+    }
+
+    /// 录音（Meet）转写失败兜底：把抢救出的音频登记成一个失败占位，复用导入失败行的「重试 / 在 Finder 中显示」。
+    /// 这样录好的会议即使转写翻车也**不会丢音频**，且能一键重试或取回。
+    func recordFailedRecording(url: URL, title: String?, error: String) {
+        let safe = Self.preserveFailedAudio(url)   // 临时混音 → App Support，免被系统清掉
+        let name = (title?.isEmpty == false ? title! : safe.deletingPathExtension().lastPathComponent)
+        var item = ImportItem(url: safe, name: name, status: .failed)
+        item.error = error; item.source = "meeting"
+        pendingImports.append(item)
+        AppLog.log("⚠️ 录音转写失败，音频已抢救到：\(safe.path)")
+    }
+
+    /// 把临时目录里的录音搬到 App Support/Resound/failed-recordings/（系统不会清），返回新位置。
+    /// 搬动失败则退回原 url（至少暂时还在临时目录）。
+    private nonisolated static func preserveFailedAudio(_ src: URL) -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Resound/failed-recordings", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let dest = base.appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(src.lastPathComponent)")
+        do { try FileManager.default.moveItem(at: src, to: dest); return dest }
+        catch { return src }
+    }
+
     private func setPendingStatus(_ id: UUID, _ s: ImportItem.Status) {
         if let i = pendingImports.firstIndex(where: { $0.id == id }) { pendingImports[i].status = s }
+    }
+    private func setPendingError(_ id: UUID, _ msg: String?) {
+        if let i = pendingImports.firstIndex(where: { $0.id == id }) { pendingImports[i].error = msg }
     }
     func dismissPending(_ id: UUID) { pendingImports.removeAll { $0.id == id } }
 

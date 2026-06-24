@@ -143,7 +143,8 @@ struct WindowConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
+        // 只让自绘标题栏(TitlebarDragArea)能拖窗——内容区不再跟着整窗跑。
+        window.isMovableByWindowBackground = false
         window.backgroundColor = NSColor(Palette.make(dark: isDark).bg)
         if NSApp.activationPolicy() != .regular { NSApp.setActivationPolicy(.regular) }
         centerTrafficLights(window)

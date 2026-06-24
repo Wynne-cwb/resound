@@ -164,17 +164,23 @@ struct LibraryView: View {
     /// 后台导入中的占位行（转写/识别中显示 spinner；失败可关掉）。
     private func importingRow(_ p: LibraryModel.ImportItem) -> some View {
         let failed = p.status == .failed
+        // 失败副标题：有具体原因就显示（截断成一行，完整文案进 tooltip），否则只说「转写失败」。
+        let subtitle = failed ? (p.error.map { "转写失败：\($0)" } ?? "转写失败")
+                              : (p.status == .identifying ? "识别说话人…" : "转写中…")
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(p.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
-                Text(failed ? "转写失败" : (p.status == .identifying ? "识别说话人…" : "转写中…"))
-                    .font(.system(size: 11.5)).foregroundStyle(failed ? pal.rec : pal.text2)
+                Text(subtitle)
+                    .font(.system(size: 11.5)).foregroundStyle(failed ? pal.rec : pal.text2).lineLimit(1)
+                    .help(p.error ?? "")   // 悬停看完整报错
             }
             Spacer()
             if failed {
-                Button { vm.dismissPending(p.id) } label: {
-                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(pal.text3).frame(width: 24, height: 24)
-                }.buttonStyle(.plainHit).hoverCursor()
+                HStack(spacing: 2) {
+                    importAction("arrow.clockwise", "重试转写", color: pal.accent) { vm.retryImport(p.id) }
+                    importAction("folder", "在 Finder 中显示音频") { vm.revealImport(p.id) }
+                    importAction("xmark", "移除") { vm.dismissPending(p.id) }
+                }
             } else {
                 Spinner(size: 13, color: pal.accent)
             }
@@ -185,10 +191,17 @@ struct LibraryView: View {
         .padding(.top, 4)
     }
 
+    private func importAction(_ icon: String, _ help: String, color: Color? = nil, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11, weight: .bold))
+                .foregroundStyle(color ?? pal.text3).frame(width: 24, height: 24)
+        }.buttonStyle(.plainHit).hoverCursor().help(help)
+    }
+
     private func recordingRow(_ r: RecordingSummary) -> some View {
         let on = vm.selectedId == r.id
         let identifying = vm.identifyingIds.contains(r.id)
-        let summarizing = vm.summarizingId == r.id
+        let summarizing = vm.summarizingIds.contains(r.id)
         let identified = r.identified   // 扫描时算好的内存标志，免每行每次重绘做 fileExists 系统调用
         return VStack(alignment: .leading, spacing: 6) {
                 Text(r.title).font(.system(size: 12.5, weight: .regular)).foregroundStyle(pal.text).lineLimit(1)
@@ -432,7 +445,7 @@ struct LibraryView: View {
     private func summarySpeakerChip(_ sp: LibraryModel.SpeakerStat) -> some View {
         HStack(spacing: 7) {
             ZStack {
-                Circle().fill(speakerColor(index: sp.index, anon: sp.isAnon))
+                Circle().fill(speakerColor(for: sp.name, anon: sp.isAnon))
                 Text(sp.isAnon ? "?" : String(sp.name.prefix(1)))
                     .font(.system(size: 10, weight: .bold)).foregroundStyle(sp.isAnon ? pal.text3 : .white)
             }
@@ -652,7 +665,7 @@ struct LibraryView: View {
 
     private func rosterAvatar(_ sp: LibraryModel.SpeakerStat) -> some View {
         ZStack {
-            Circle().fill(speakerColor(index: sp.index, anon: sp.isAnon))
+            Circle().fill(speakerColor(for: sp.name, anon: sp.isAnon))
             Text(sp.isAnon ? "?" : String(sp.name.prefix(2)))
                 .font(.system(size: 13, weight: .bold)).foregroundStyle(sp.isAnon ? pal.text3 : .white)
         }
@@ -677,17 +690,21 @@ struct LibraryView: View {
     }
 
     /// 说话人配色（与名册头像一致，按 index 取色；匿名用灰底）。
-    private func speakerColor(index: Int, anon: Bool) -> Color {
+    /// 说话人头像底色：按**名字**的稳定哈希取色——同一个人无论在哪条录音、跨 App 重启都恒定同色。
+    /// 不能用 `String.hashValue`：它每次进程启动都带随机种子，会让同一人每次开 App 变色。
+    private func speakerColor(for name: String, anon: Bool) -> Color {
         if anon { return pal.inset }
         let hues: [Color] = [pal.accent, Color(hex: 0x9b6dc9), Color(hex: 0x3f9d7a), Color(hex: 0xd98a3d), Color(hex: 0xc75d8a)]
-        return hues[index % hues.count]
+        var h: UInt64 = 5381                                   // djb2，确定性哈希
+        for b in name.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return hues[Int(h % UInt64(hues.count))]
     }
 
     /// 逐句转录每段开头的说话人胶囊：头像 + 名字 + 改名笔，描边成明确可点的按钮（点开命名/改名）。
     private func transcriptSpeakerChip(_ label: String) -> some View {
         let stat = vm.speakers.first { $0.label == label }
         let anon = stat?.isAnon ?? LibraryModel.isAnon(label)
-        let color = speakerColor(index: stat?.index ?? 0, anon: anon)
+        let color = speakerColor(for: stat?.name ?? label, anon: anon)
         return Button { vm.openRenameSpeaker(label) } label: {
             HStack(spacing: 7) {
                 ZStack {
@@ -836,6 +853,16 @@ struct WindowDragBlocker: NSViewRepresentable {
                 options: [.activeInActiveApp, .inVisibleRect, .cursorUpdate], owner: self))
         }
         override func cursorUpdate(with event: NSEvent) { if clickable { NSCursor.pointingHand.set() } }
+    }
+}
+
+/// 放在自绘标题栏背后：让这块区域能拖动窗口。配合 `window.isMovableByWindowBackground = false`，
+/// 实现「只有标题栏能拖窗、其余内容区不动窗」。
+struct TitlebarDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    private final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
     }
 }
 
