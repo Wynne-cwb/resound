@@ -29,20 +29,27 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
     public var embedding: ModelRef?
     public var embeddingDim: Int?            // 验证 embedding 时自动探测，建索引用
     public var transcribe: ModelRef?         // nil = 本地 WhisperKit
+    // 转录后 AI 校对：是否开（nil=默认开）、用哪个模型（nil=跟随 chat.model）。校对跑在 chat 服务商上。
+    public var transcribeCorrect: Bool?
+    public var correctModel: String?
+    /// 各能力「已验证」指纹（capability rawValue → baseURL|apiKey|model 的指纹）。
+    /// 指纹与当前配置一致即视为已验证（持久化，重启不丢）；改了任一相关项指纹不匹配 → 自动失效。
+    public var verified: [String: String]?
     // 高级（可选）：成本敏感的辅助角色可单独指模型，缺省全部回退到 chat.model
     public var rerankModel: String?
     public var contextModel: String?
     public var summaryModel: String?
-    public var correctModel: String?
 
     public init(providers: [AIProvider] = [], chat: ModelRef? = nil, embedding: ModelRef? = nil,
                 embeddingDim: Int? = nil, transcribe: ModelRef? = nil,
+                transcribeCorrect: Bool? = nil, correctModel: String? = nil,
                 rerankModel: String? = nil, contextModel: String? = nil,
-                summaryModel: String? = nil, correctModel: String? = nil) {
+                summaryModel: String? = nil) {
         self.providers = providers; self.chat = chat; self.embedding = embedding
         self.embeddingDim = embeddingDim; self.transcribe = transcribe
+        self.transcribeCorrect = transcribeCorrect; self.correctModel = correctModel
         self.rerankModel = rerankModel; self.contextModel = contextModel
-        self.summaryModel = summaryModel; self.correctModel = correctModel
+        self.summaryModel = summaryModel
     }
 
     public func provider(_ id: String) -> AIProvider? { providers.first { $0.id == id } }
@@ -77,7 +84,7 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
             transcribeBaseURL: tp?.baseURL ?? ep.baseURL,
             transcribeKey: tp?.apiKey ?? ep.apiKey,
             correctModel: correctModel ?? chatModel,
-            transcribeCorrect: (envv("TRANSCRIBE_CORRECT") ?? "true").lowercased() != "false",
+            transcribeCorrect: transcribeCorrect ?? ((envv("TRANSCRIBE_CORRECT") ?? "true").lowercased() != "false"),
             speakerModel: envv("SPEAKER_MODEL"),
             vaultPath: envv("VAULT_PATH"),
             vaultAutoPush: (envv("VAULT_AUTOPUSH") ?? "false").lowercased() == "true"
@@ -141,10 +148,11 @@ public enum ProvidersStore {
             embeddingDim: Int(g("EMBEDDING_DIM") ?? ""),
             transcribe: transcribe,
             // 精确保留旧 loadFromEnv 的默认（rerank/context/correct 缺省都是 flash），零行为变更
+            transcribeCorrect: (g("TRANSCRIBE_CORRECT") ?? "true").lowercased() != "false",
+            correctModel: g("CORRECT_MODEL") ?? "deepseek-v4-flash",
             rerankModel: g("RERANK_MODEL") ?? "deepseek-v4-flash",
             contextModel: g("CONTEXT_MODEL") ?? "deepseek-v4-flash",
-            summaryModel: g("SUMMARY_MODEL"),   // nil → toConfig 回退 chat.model（旧默认即 ANSWER_MODEL=pro）
-            correctModel: g("CORRECT_MODEL") ?? "deepseek-v4-flash")
+            summaryModel: g("SUMMARY_MODEL"))   // nil → toConfig 回退 chat.model（旧默认即 ANSWER_MODEL=pro）
         do { try save(cfg); return true } catch { return false }
     }
 

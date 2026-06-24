@@ -250,28 +250,12 @@ struct Sidebar: View {
 
             VStack(spacing: collapsed ? 6 : 2) {
                 navRow(.ask, "Ask Resound", "bubble.left")
-                navRow(.library, "Library", "waveform", trailingCount: library.recordings.count)
+                navRow(.library, "Library", "waveform", trailingCount: library.recordingCount)
                 navRow(.templates, "Templates", "square.grid.2x2", trailingCount: settings.templates.count)
                 navRow(.settings, "Settings", "slider.horizontal.3", attn: settings.needsAttention)
             }
 
             Spacer(minLength: 0)
-
-            if collapsed {
-                Circle().fill(pal.ok).frame(width: 8, height: 8).help("运行中 · 全程本地").padding(.bottom, 4)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 7) {
-                        Circle().fill(pal.ok).frame(width: 7, height: 7)
-                        Text("运行中 · 全程本地").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text2)
-                    }
-                    Text(library.footerText).font(.system(size: 11)).foregroundStyle(pal.text3)
-                }
-                .padding(11)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(pal.inset, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .stroke(pal.border, corner: 9)
-            }
         }
         .padding(.horizontal, collapsed ? 10 : 12).padding(.vertical, 14)
         .frame(width: collapsed ? 64 : 218)

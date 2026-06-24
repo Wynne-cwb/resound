@@ -36,7 +36,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 - **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；**Templates 页**可增删改模板、AI 协助生成 / 润色提示词、设默认。
 - **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**；支持「上周四的一对一聊了啥」这类时间感知查询。
 - **录音库** — 搜索、文件夹分组、⌘F 查找替换（修转录错字）、逐句点跳播放、说话人试听；反复改同一个错词会**自动建议加入词表**，一键确认。
-- **可视化设置** — API / 模型 / 在线转录开关 / 录音库路径 / git 自动推送都能在应用内配置，支持导入导出，改完即时生效、无需重编。
+- **自带 Provider 配置** — 接入任意 OpenAI 兼容服务（OpenAI / Claude / DeepSeek / Groq / AIHUBMIX / 本地 Ollama / 自定义）：对话、向量、转写三种能力分别配置，一键「测试连接」实时验证（验证状态持久化，改 Key/模型自动失效）；首次启动有引导，转写不配则自动兜底本地 Whisper。录音库路径 / git 自动推送也在应用内配，改完即时生效、无需重编。
 - **菜单栏驻留** — 关掉主窗口不退出，常驻菜单栏随时开录；浅 / 深双主题。
 
 ## 架构边界
@@ -92,8 +92,9 @@ open build/Resound.app
 
 ## 配置
 
-密钥与可调参数放仓库根目录 `.env`（已 gitignore，**绝不提交**）。接口均为 OpenAI 兼容。
-也可在应用内 **设置 › 连接与模型** 可视化填写并导入导出，运行时即时生效。
+**普通用户（应用内）**：首次启动按引导，在 **设置 › AI 服务** 里选服务商预设（或自定义）、填 Base URL / API Key / 模型，「测试连接」通过即用。至少需一个**对话模型** + 一个**向量模型**（可来自不同服务商）；转写可留空走本地 Whisper。配置存本机 `~/Library/Application Support/Resound/providers.json`，密钥不出本机，可导入导出，改完即时生效。
+
+**CLI / 进阶**：也可用仓库根目录 `.env`（已 gitignore，**绝不提交**），接口均为 OpenAI 兼容。App 优先读 `providers.json`、缺失时回退 `.env`（已有 `.env` 的老用户首启会自动迁移）。下表为 `.env` 变量：
 
 | 变量 | 用途 |
 |---|---|
@@ -145,7 +146,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 
 - **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
 - **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
-- **API**：Embedding（向量）· rerank · DeepSeek（contextual 增强 / 元数据抽取 / 综合）
+- **API**：任意 OpenAI 兼容服务——对话 / 向量 / 转写三种能力可分别指派给不同服务商
 
 ## 项目结构
 

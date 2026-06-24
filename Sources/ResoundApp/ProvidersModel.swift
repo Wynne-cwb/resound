@@ -36,6 +36,40 @@ final class ProvidersModel: ObservableObject {
     func load() {
         ProvidersStore.migrateFromEnvIfNeeded()
         config = ProvidersStore.load() ?? ProvidersConfig()
+        restoreProbes()
+    }
+
+    // MARK: 验证状态持久化（指纹 = baseURL|apiKey|model；一致即视为已验证）
+
+    private func fp(_ base: String, _ key: String, _ model: String) -> String {
+        "\(base.trimmingCharacters(in: .whitespaces))|\(key.trimmingCharacters(in: .whitespaces))|\(model.trimmingCharacters(in: .whitespaces))"
+    }
+    private func fingerprint(_ cap: Capability) -> String? {
+        guard let p = provider(cap) else { return nil }
+        return fp(p.baseURL, p.apiKey, model(cap))
+    }
+    private func restoredDetail(_ cap: Capability) -> String {
+        switch cap {
+        case .chat: return "Chat 可用 · \(model(cap))"
+        case .embedding: return config.embeddingDim.map { "Embedding 可用 · 维度 \($0)" } ?? "Embedding 可用"
+        case .transcribe: return "转写可用 · \(model(cap))"
+        }
+    }
+    /// 启动/导入后：指纹与持久化的 verified 一致的能力，恢复成「已验证」。
+    private func restoreProbes() {
+        for cap in Capability.allCases {
+            if let saved = config.verified?[cap.rawValue], let now = fingerprint(cap), saved == now {
+                probe[cap] = .ok(restoredDetail(cap))
+            }
+        }
+    }
+    private func markVerified(_ cap: Capability, _ fingerprint: String, dim: Int? = nil) {
+        var c = config
+        if let dim { c.embeddingDim = dim }
+        var v = c.verified ?? [:]
+        v[cap.rawValue] = fingerprint
+        c.verified = v
+        commit(c)
     }
 
     // MARK: 读取某能力当前配置
@@ -59,6 +93,23 @@ final class ProvidersModel: ObservableObject {
         c.providers.append(p)
         let r = ModelRef(providerId: cap.providerId, model: model.trimmingCharacters(in: .whitespaces))
         switch cap { case .chat: c.chat = r; case .embedding: c.embedding = r; case .transcribe: c.transcribe = r }
+        // 改了 Provider/BaseURL/Key/模型 → 指纹变化 → 验证失效
+        let newFp = fp(baseURL, apiKey, model)
+        if c.verified?[cap.rawValue] != newFp { c.verified?[cap.rawValue] = nil }
+        commit(c)
+        if config.verified?[cap.rawValue] != newFp { probe[cap] = .idle }
+    }
+
+    // MARK: 转录后 AI 校对（跑在 chat 服务商上）
+
+    var correctionEnabled: Bool { config.transcribeCorrect ?? true }
+    var correctionModel: String { config.correctModel ?? "" }   // 空 = 跟随 chat.model
+
+    func setCorrection(enabled: Bool, model: String) {
+        var c = config
+        c.transcribeCorrect = enabled
+        let m = model.trimmingCharacters(in: .whitespaces)
+        c.correctModel = m.isEmpty ? nil : m
         commit(c)
     }
 
@@ -67,6 +118,7 @@ final class ProvidersModel: ObservableObject {
         var c = config
         c.transcribe = nil
         c.providers.removeAll { $0.id == Capability.transcribe.providerId }
+        c.verified?[Capability.transcribe.rawValue] = nil
         commit(c)
         probe[.transcribe] = .idle
     }
@@ -87,20 +139,21 @@ final class ProvidersModel: ObservableObject {
         let key = apiKey.trimmingCharacters(in: .whitespaces)
         let m = model.trimmingCharacters(in: .whitespaces)
         guard !base.isEmpty, !m.isEmpty else { probe[cap] = .fail("Base URL 和模型名都要填"); return }
+        let testedFp = fp(base, key, m)
         probe[cap] = .running
         Task {
             switch cap {
             case .chat:
                 let r = await ProviderProbe.chat(baseURL: base, key: key, model: m)
+                if r.isOK { markVerified(cap, testedFp) }
                 probe[cap] = r.isOK ? .ok(r.detail) : .fail(r.detail)
             case .embedding:
                 let (r, dim) = await ProviderProbe.embedding(baseURL: base, key: key, model: m)
-                if r.isOK, let dim {
-                    var c = config; c.embeddingDim = dim; commit(c)   // 维度落盘，否则 Config.load 回退 4096
-                }
+                if r.isOK { markVerified(cap, testedFp, dim: dim) }   // 维度也落盘，否则 Config.load 回退 4096
                 probe[cap] = r.isOK ? .ok(r.detail) : .fail(r.detail)
             case .transcribe:
                 let r = await ProviderProbe.transcribe(baseURL: base, key: key, model: m)
+                if r.isOK { markVerified(cap, testedFp) }
                 probe[cap] = r.isOK ? .ok(r.detail) : .fail(r.detail)
             }
         }
@@ -130,6 +183,7 @@ final class ProvidersModel: ObservableObject {
                 let imported = try JSONDecoder().decode(ProvidersConfig.self, from: data)
                 commit(imported)
                 probe.removeAll()
+                restoreProbes()
                 importToken &+= 1
                 app?.toast("已导入 AI 配置")
             } catch { app?.toast("导入失败：\(error.localizedDescription)") }

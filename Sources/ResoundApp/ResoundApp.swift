@@ -26,6 +26,7 @@ struct ResoundApp: App {
                     recorder.app = app
                     recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
                     library.app = app
+                    library.prefetchCount()      // 侧栏 Library 角标即时正确，不等进 Library 全量加载
                     settings.app = app
                     providers.app = app
                     providers.load()             // 迁移旧 .env → providers.json；决定是否首启引导

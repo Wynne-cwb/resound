@@ -5,6 +5,21 @@
 
 ---
 
+## Settings 重设计（Claude Design handoff 还原）（2026-06-25）
+
+**触发**：Settings 功能越堆越多、一条长滚动太挤。用户在 Claude Design 重做了设计稿（handoff zip：`Resound.dc.html`），让我还原。
+
+**设计要点（照还原）**：
+- 整页 = 固定 **header**（标题「设置」+ 本地处理副标题）+ 下方 **左侧子导航栏(206px) + 右侧单区内容**。子导航五项：AI 服务 / 存储与同步 / 权限 / 通用 / 专有词表；选中态 = accentSoft 底 + accent 字；AI 项/权限项带 warn 圆点（providers.needsOnboarding / vm.needsAttention）；栏底「全程本地 · 即时生效」小卡。右侧内容 maxWidth 680 居中、每次只显示选中区。
+- **AI 服务区 = 三张手风琴卡**（最大改动）：收起只显示 图标 + 标题 + 必填/可选标 + 「服务商 · 模型」摘要 + 验证状态药丁（未验证/测试中/已验证/验证失败）+ 旋转 chevron；展开露出表单。**服务商、模型预设由原横向芯片改成下拉菜单**（SwiftUI `Menu`），API Key 加显示/隐藏眼睛，转写区「在线服务 / 本地 Whisper」分段切换（本地显示 whisper-large-v3 内置卡）。设置页单卡展开（手风琴，点另一张收起当前），首启引导里 `collapsible:false` 常驻展开——同一个 `CapabilityCard` 复用。
+- 存储区：录音库目录卡（文件夹图标 + 路径/未设置 warn + 选择目录）+ 版本同步卡（git 开关）+ 保存。权限/通用：单卡分隔行。词表：标题+新增、智能建议收件箱（accentSoft 头）、>8 条出搜索、列表卡、空态。
+
+**补漏（用户发现）**：旧 UI 一直没暴露**转录后 AI 校对**（`transcribeCorrect` 默认开 + `correctModel`，跑在 chat 服务商上、迁移默认 flash 省成本）。按用户选择放进**对话模型卡**底部：开关 + 校对模型框（默认跟随对话模型，可填更便宜的）。`transcribeCorrect` 提升进 `ProvidersConfig`（原只在 .env），`toConfig` 优先用它否则回退 .env/true。另：用户发现对话模型被手滑改成了 flash（非 bug，.env 原值 pro），UI 改回即可。
+
+**后续打磨（同日）**：①「预设/服务商」下拉原用原生 `Menu`，与设计稿不一致 → 改成**自定义下拉**（字段正下方整宽面板、等宽模型名、选中打勾，inline 展开不浮层，靠单一 `openMenu` 状态切换）。②删掉 Settings 左导航底部 + 主侧栏底部两张「全程本地」凑数卡片。③**验证状态持久化**：原 `probe` 仅内存，重启变「未验证」。改为把验证指纹（`baseURL|apiKey|model`）按能力存进 `providers.json` 的 `verified`，启动/导入时指纹一致即恢复「已验证」；`set()` 一旦改了 Provider/BaseURL/Key/模型指纹不匹配即失效。④**侧栏 Library 角标启动即正确**：性能优化后 Library 懒加载，没进过就显示 0；新增 `prefetchCount()` 启动时后台只数 `listRecordings().count`（不加载详情/声纹/sqlite），`recordingCount` 由 `recordings.didSet` 同步为权威值。
+
+**实现**：纯重皮 + 重排，ProvidersModel/SettingsModel 逻辑零改（仅新增 setCorrection / 验证指纹持久化 / prefetchCount）。[SettingsView.swift](../Sources/ResoundApp/SettingsView.swift) 重写为 header+rail+content（Tab 枚举 + 本地 @State），StorageContent/VocabContent 各自本地 @State（沿用性能约定不每键失效整页）；[ProvidersView.swift](../Sources/ResoundApp/ProvidersView.swift) 的 CapabilityCard 重写成手风琴 + 下拉。主题 token 与现有 Palette 一一对应，无需新增颜色。编译+打包+启动通过，待实机验收。
+
 ## 开源化第一步：AI Provider 配置 + 验证 + 首启引导（2026-06-25）
 
 **触发**：要把 Resound 做成开源可下载软件。原配置为个人写死（chat=DeepSeek、embedding=AIHUBMIX），无 provider 概念、不能验证、新用户无从下手。

@@ -17,9 +17,9 @@ struct OnboardingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    CapabilityCard(cap: .chat, inOnboarding: true).padding(.top, 16)
-                    CapabilityCard(cap: .embedding, inOnboarding: true).padding(.top, 12)
-                    CapabilityCard(cap: .transcribe, inOnboarding: true).padding(.top, 12)
+                    CapabilityCard(cap: .chat, collapsible: false).padding(.top, 16)
+                    CapabilityCard(cap: .embedding, collapsible: false).padding(.top, 12)
+                    CapabilityCard(cap: .transcribe, collapsible: false).padding(.top, 12)
                     Color.clear.frame(height: 24)
                 }
                 .frame(maxWidth: 600, alignment: .leading)

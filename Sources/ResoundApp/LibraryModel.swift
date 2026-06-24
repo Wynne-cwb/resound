@@ -68,7 +68,10 @@ final class LibraryModel: ObservableObject {
     }
 
     // data
-    @Published var recordings: [RecordingSummary] = []
+    @Published var recordings: [RecordingSummary] = [] { didSet { recordingCount = recordings.count } }
+    /// 侧栏角标用的录音数。启动时由 `prefetchCount()` 轻量后台统计先填上（不等进 Library 全量加载）；
+    /// 全量加载/增删后由 recordings.didSet 同步为权威值。
+    @Published private(set) var recordingCount = 0
     @Published var selectedId: String?
     @Published var lines: [Line] = []
     @Published var blocks: [Block] = []        // lines 按连续同人合并后的段落块（中间结构）
@@ -177,6 +180,16 @@ final class LibraryModel: ObservableObject {
         guard !didInitialLoad else { return }
         didInitialLoad = true
         reload()
+    }
+
+    /// 启动时轻量统计录音数（只扫盘数 manifest，不加载详情/声纹/sqlite），让侧栏角标即时正确——
+    /// 不必等用户进 Library 触发全量加载。全量加载会接管为权威值。
+    func prefetchCount() {
+        guard !didInitialLoad, let vault = vaultURL() else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            let n = listRecordings(vaultRoot: vault).count
+            await MainActor.run { guard let self, !self.didInitialLoad else { return }; self.recordingCount = n }
+        }
     }
     /// libraryReloadToken 变更（录音/导入完成）：强制全量刷新以拾取新录音。
     func refresh() { reload() }
