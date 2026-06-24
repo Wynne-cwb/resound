@@ -71,6 +71,11 @@ fi
 # 用它签 → Designated Requirement 稳定 → 屏幕录制授权一次后所有重新打包都长期有效。
 # 未设/签名失败则回退 ad-hoc（功能正常，只是每次重打需重授屏幕录制）。资源 bundle 纯数据，无需 --deep。
 SIGN_OK=0
+# RESOUND_SIGN_ID 未显式设置时，自动探测本机现成的自签名证书「Resound Dev」并用它——
+# 这样无需每次 export 或改 shell profile，重打包就长期保持同一签名身份、TCC 授权不掉。
+if [ -z "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev/null | grep -qF "Resound Dev"; then
+    RESOUND_SIGN_ID="Resound Dev"
+fi
 # 注意：用 `find-identity -p`（不带 -v）——自签名证书未受信会被 -v 过滤掉，但本地签名/ TCC 用途不需要受信。
 if [ -n "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev/null | grep -qF "$RESOUND_SIGN_ID"; then
     echo "▶︎ 稳定身份签名：$RESOUND_SIGN_ID"
