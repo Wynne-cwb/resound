@@ -111,6 +111,25 @@ extension ButtonStyle where Self == PlainHitButtonStyle {
     static var plainHit: PlainHitButtonStyle { PlainHitButtonStyle() }
 }
 
+/// 列表行内的操作图标按钮（改名/删除等）。全 App 统一风格：26×26 描边方块，删除态用警示色。
+/// 录音列表、文件夹头、对话历史共用，避免各处大小/描边不一致。
+struct RowIconButton: View {
+    var pal: Palette
+    var icon: String
+    var danger: Bool = false
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 12, weight: .medium))
+                .foregroundStyle(danger ? pal.rec : pal.text2)
+                .frame(width: 26, height: 26)
+                .background(pal.elev, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(pal.border, lineWidth: 1))
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+    }
+}
+
 /// App 品牌图标（侧栏标识 / 提问页 hero）。优先用打包进 bundle 的真实图标，
 /// 取不到（如 swift run 未打包）回退到合成波形标。
 struct BrandIcon: View {

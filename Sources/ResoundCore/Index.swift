@@ -239,6 +239,21 @@ public final class Index {
         guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
     }
 
+    /// 修正某录音的日期（redate 用）：录音行的 recorded_at（ISO8601）+ 该录音全部 chunk 的 recording_date（yyyy-MM-dd）
+    /// 一起更新，保证排序、digest（按 recorded_at）、qa 时间过滤（按 chunk recording_date）口径一致；不重嵌入。
+    public func setRecordingDate(id: String, recordedAt: String, day: String) throws {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "update recordings set recorded_at=? where id=?", -1, &st, nil)
+        if let st { bindText(st, 1, recordedAt); bindText(st, 2, id)
+            guard sqlite3_step(st) == SQLITE_DONE else { sqlite3_finalize(st); throw IndexError.sql(lastErr()) } }
+        sqlite3_finalize(st)
+        var st2: OpaquePointer?
+        sqlite3_prepare_v2(db, "update chunks set recording_date=? where recording_id=?", -1, &st2, nil)
+        defer { sqlite3_finalize(st2) }
+        if let st2 { bindText(st2, 1, day); bindText(st2, 2, id)
+            guard sqlite3_step(st2) == SQLITE_DONE else { throw IndexError.sql(lastErr()) } }
+    }
+
     /// 某录音的 chunk 时间段 + 说话人（供录音库按段显示 👤；person 可能 nil）。
     public func chunkPersons(recordingId: String) -> [(start: Double, end: Double, person: String?)] {
         var st: OpaquePointer?

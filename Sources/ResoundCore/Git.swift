@@ -34,4 +34,39 @@ public struct Git {
         try run(["commit", "-m", message])
         try run(["push"])
     }
+
+    /// 是否是 git 工作区。
+    public var isRepo: Bool {
+        ((try? run(["rev-parse", "--is-inside-work-tree"]))?.contains("true")) ?? false
+    }
+
+    /// 确保 .gitignore 忽略音频（大文件不入 git；用户只想同步文本派生物）。
+    public func ensureAudioIgnored() throws {
+        let gi = repo.appendingPathComponent(".gitignore")
+        var lines = (try? String(contentsOf: gi, encoding: .utf8))?
+            .split(separator: "\n", omittingEmptySubsequences: false).map(String.init) ?? []
+        let needed = ["*.m4a", "*.wav", "*.mp3", "*.aiff", "*.caf"]
+        let missing = needed.filter { n in !lines.contains(n) }
+        guard !missing.isEmpty else { return }
+        if !lines.contains("# Resound: 音频不入 git（大文件）") {
+            if !lines.isEmpty && lines.last != "" { lines.append("") }
+            lines.append("# Resound: 音频不入 git（大文件）")
+        }
+        lines.append(contentsOf: missing)
+        try (lines.joined(separator: "\n") + "\n").data(using: .utf8)!.write(to: gi)
+    }
+
+    /// 文本派生物自动同步：忽略音频 → add -A → 有改动则 commit → push。
+    /// 非 git 区 / 无改动 安静返回 false（不抛错搅扰主流程）。
+    @discardableResult
+    public func syncTextOnly(message: String) throws -> Bool {
+        guard isRepo else { return false }
+        try ensureAudioIgnored()
+        try run(["add", "-A"])
+        let status = (try? run(["status", "--porcelain"]))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !status.isEmpty else { return false }
+        try run(["commit", "-m", message])
+        try run(["push"])
+        return true
+    }
 }

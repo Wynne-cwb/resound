@@ -16,10 +16,10 @@ public struct Synthesizer {
         let system = """
         你根据检索到的会议/笔记片段回答用户问题。规则：
         - 只用片段中的信息，不要臆造；信息不足就直说"片段中没有足够信息"。
-        - 片段标注了日期，回答涉及时间时按日期组织。
+        - 片段标注了日期，回答涉及时间时按日期组织。\(todayAnchor())
         - 在引用处用 [编号] 标注来源。
         - 如有对话历史，用它理解指代（他/这个/那件事）并接着上文说，但答案内容只基于片段。
-        - 用中文，简洁、条理清楚。
+        - 用中文，简洁、条理清楚。\(zhWritingStyle)
         """
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n"

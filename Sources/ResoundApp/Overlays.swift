@@ -63,9 +63,14 @@ struct OverlayHost: View {
         if let st = library.renameSpeaker {
             ModalScrim(pal: pal, onClose: { library.renameSpeaker = nil }) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("认领并命名说话人").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
-                    (Text("当前标签 ").foregroundStyle(pal.text2) + Text(st.label).foregroundStyle(pal.text).fontWeight(.semibold) + Text(" —— 命名后，整篇转录里 TA 的所有句子会立即换成真名。").foregroundStyle(pal.text2))
-                        .font(.system(size: 12.5)).lineSpacing(2).padding(.top, 6)
+                    Text(st.isAnon ? "认领并命名说话人" : "重新分配说话人").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
+                    if st.isAnon {
+                        (Text("当前标签 ").foregroundStyle(pal.text2) + Text(st.label).foregroundStyle(pal.text).fontWeight(.semibold) + Text(" —— 命名后，整篇转录里 TA 的所有句子会立即换成真名。").foregroundStyle(pal.text2))
+                            .font(.system(size: 12.5)).lineSpacing(2).padding(.top, 6)
+                    } else {
+                        (Text("当前识别为 ").foregroundStyle(pal.text2) + Text(st.label).foregroundStyle(pal.text).fontWeight(.semibold) + Text(" 。如果认错了，输入正确的人名重新分配 —— 这只改这条录音的标注，").foregroundStyle(pal.text2) + Text("不会改动「\(st.label)」已记住的声音。").foregroundStyle(pal.text).fontWeight(.semibold))
+                            .font(.system(size: 12.5)).lineSpacing(2).padding(.top, 6)
+                    }
                     TextField("输入真实人名，例如 张三", text: Binding(get: { library.renameSpeaker?.value ?? "" }, set: { library.renameSpeaker?.value = $0 }))
                         .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(pal.text)
                         .padding(.horizontal, 13).frame(height: 40).background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.borderStrong, corner: 10)
@@ -73,13 +78,15 @@ struct OverlayHost: View {
                     peoplePicker(current: st.value)
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "person.crop.circle").font(.system(size: 16)).foregroundStyle(pal.accent)
-                        (Text("这不只是改这一条录音。Resound 会记住 TA 的声音特征，").foregroundStyle(pal.text) + Text("以后的新录音里再出现同一个人，会被自动认出并标上真名。").foregroundStyle(pal.text).fontWeight(.semibold))
+                        (st.isAnon
+                            ? (Text("这不只是改这一条录音。Resound 会记住 TA 的声音特征，").foregroundStyle(pal.text) + Text("以后的新录音里再出现同一个人，会被自动认出并标上真名。").foregroundStyle(pal.text).fontWeight(.semibold))
+                            : (Text("把 TA 登记为一个**新的**说话人并记住声音，").foregroundStyle(pal.text) + Text("以后自动认出 —— 原来那个人的声纹完全不受影响。").foregroundStyle(pal.text).fontWeight(.semibold)))
                             .font(.system(size: 12)).lineSpacing(2)
                     }
                     .padding(.horizontal, 13).padding(.vertical, 11).background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).padding(.top, 13)
                     HStack(spacing: 9) {
                         CheckBox(on: Binding(get: { library.renameSpeaker?.remember ?? false }, set: { library.renameSpeaker?.remember = $0 }), pal: pal)
-                        Text("记住这个声音，在以后的录音中自动识别").font(.system(size: 12.5)).foregroundStyle(pal.text2)
+                        Text(st.isAnon ? "记住这个声音，在以后的录音中自动识别" : "记住正确的人的声音，以后自动认出").font(.system(size: 12.5)).foregroundStyle(pal.text2)
                     }.padding(.top, 13)
                     HStack(spacing: 9) {
                         if !st.isAnon {
@@ -148,11 +155,53 @@ struct OverlayHost: View {
                             }.buttonStyle(.plainHit).hoverCursor()
                         }
                     }.padding(.top, 11)
+                    aiAssistBox.padding(.top, 16)
                     HStack(spacing: 9) { Spacer(); secondaryBtn("取消") { settings.editTpl = nil }; primaryBtn("保存模板") { settings.saveTemplate() } }.padding(.top, 22)
                 }
                 .frame(width: 520)
             }
         }
+    }
+
+    /// 模板编辑器里的「AI 协助」区：描述用途 → 生成 / 润色提示词（结果自带内置占位符）。
+    @ViewBuilder private var aiAssistBox: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.accent)
+                Text("AI 协助").font(.system(size: 12.5, weight: .bold)).foregroundStyle(pal.text)
+                Text("描述用途即可生成，或一键润色当前提示词").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+            }
+            TextEditor(text: Binding(get: { settings.editTpl?.aiIntent ?? "" }, set: { settings.editTpl?.aiIntent = $0 }))
+                .font(.system(size: 13)).foregroundStyle(pal.text).scrollContentBackground(.hidden)
+                .frame(height: 58).padding(8)
+                .background(pal.bg, in: RoundedRectangle(cornerRadius: 9, style: .continuous)).stroke(pal.borderStrong, corner: 9)
+                .padding(.top, 11)
+                .overlay(alignment: .topLeading) {
+                    if (settings.editTpl?.aiIntent ?? "").isEmpty {
+                        Text("这个模板用于什么会议？例如：客户访谈，重点提炼需求与异议，并整理出明确的跟进项")
+                            .font(.system(size: 13)).foregroundStyle(pal.text3).padding(.horizontal, 13).padding(.top, 19).allowsHitTesting(false)
+                    }
+                }
+            if settings.aiBusy {
+                HStack(spacing: 9) { Spinner(size: 14, color: pal.accent); Text("AI 正在撰写提示词…").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.accent) }
+                    .frame(height: 36).padding(.top, 11)
+            } else {
+                HStack(spacing: 8) {
+                    Button { settings.aiAssist(.generate) } label: {
+                        HStack(spacing: 6) { Image(systemName: "sparkles").font(.system(size: 12, weight: .semibold)); Text("生成提示词").font(.system(size: 12.5, weight: .semibold)) }
+                            .foregroundStyle(.white).padding(.horizontal, 14).frame(height: 36)
+                            .background(pal.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    }.buttonStyle(.plainHit).hoverCursor()
+                    Button { settings.aiAssist(.polish) } label: {
+                        HStack(spacing: 6) { Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 12, weight: .semibold)); Text("润色当前").font(.system(size: 12.5, weight: .semibold)) }
+                            .foregroundStyle(pal.text).padding(.horizontal, 14).frame(height: 36)
+                            .background(pal.bg, in: RoundedRectangle(cornerRadius: 9, style: .continuous)).stroke(pal.borderStrong, corner: 9)
+                    }.buttonStyle(.plainHit).hoverCursor()
+                }.padding(.top, 11)
+            }
+        }
+        .padding(13)
+        .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder private var templateDeleteModal: some View {
@@ -226,9 +275,22 @@ struct OverlayHost: View {
                         .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [5])).foregroundStyle(pal.borderStrong))
                     }.buttonStyle(.plainHit).hoverCursor().padding(.top, 16)
                     if !library.importItems.isEmpty {
-                        VStack(spacing: 7) {
-                            ForEach(library.importItems) { f in importRow(f) }
+                        HStack {
+                            Text("已选 \(library.importItems.count) 个文件").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text2)
+                            Spacer()
+                            if !library.importing {
+                                Button { library.importItems = [] } label: {
+                                    Text("清空").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text3)
+                                }.buttonStyle(.plainHit).hoverCursor()
+                            }
                         }.padding(.top, 16)
+                        // 少文件直接铺行、卡片贴合内容（避免被贪婪 ScrollView 撑满整屏）；多文件才套定高滚动。
+                        let rows = VStack(spacing: 7) { ForEach(library.importItems) { f in importRow(f) } }
+                        if library.importItems.count > 5 {
+                            ScrollView { rows }.frame(height: 300).padding(.top, 8)
+                        } else {
+                            rows.padding(.top, 8)
+                        }
                     }
                     HStack(spacing: 9) {
                         Spacer()

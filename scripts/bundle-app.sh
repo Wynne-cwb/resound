@@ -65,8 +65,26 @@ else
     echo "  ⚠️ 无 assets/AppIcon.png，跳过图标"
 fi
 
-# ad-hoc 签名(本地自用足够；TCC 按 bundle id 记权限)。资源 bundle 是纯数据，无需 --deep
-codesign --force --sign - "$APP"
+# 签名。关键：屏幕录制权限(TCC)对 **ad-hoc** 应用是按 cdhash(可执行哈希)记的，每次重新打包
+# cdhash 都变 → 之前授的「屏幕录制」失效、录在线会议报「用户拒绝 TCC」。
+# 解法：设环境变量 RESOUND_SIGN_ID 为一个**稳定的代码签名证书**(自签名即可，见 README/DECISIONS)，
+# 用它签 → Designated Requirement 稳定 → 屏幕录制授权一次后所有重新打包都长期有效。
+# 未设/签名失败则回退 ad-hoc（功能正常，只是每次重打需重授屏幕录制）。资源 bundle 纯数据，无需 --deep。
+SIGN_OK=0
+# 注意：用 `find-identity -p`（不带 -v）——自签名证书未受信会被 -v 过滤掉，但本地签名/ TCC 用途不需要受信。
+if [ -n "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev/null | grep -qF "$RESOUND_SIGN_ID"; then
+    echo "▶︎ 稳定身份签名：$RESOUND_SIGN_ID"
+    if codesign --force --identifier com.wynne.resound --sign "$RESOUND_SIGN_ID" "$APP"; then
+        SIGN_OK=1
+    else
+        echo "  ⚠️ 稳定身份签名失败，回退 ad-hoc"
+    fi
+fi
+if [ "$SIGN_OK" != 1 ]; then
+    codesign --force --sign - "$APP"
+    echo "  ℹ️ ad-hoc 签名：重新打包后需在「系统设置 › 隐私与安全性 › 屏幕录制」重新勾选 Resound。"
+    echo "     想一劳永逸：创建一个自签名「代码签名」证书后 export RESOUND_SIGN_ID=\"证书名\" 再打包。"
+fi
 
 echo "✅ 打包完成：$APP"
 echo "   运行：open \"$APP\"   （首次会请求麦克风/屏幕录制/自动化权限）"

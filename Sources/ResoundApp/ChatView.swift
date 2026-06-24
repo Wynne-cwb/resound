@@ -291,11 +291,10 @@ struct ChatView: View {
             .stroke(on ? pal.accent : .clear, corner: 9)
             .overlay(alignment: .topTrailing) {
                 if hoverConvId == c.id {
-                    HStack(spacing: 1) {
+                    HStack(spacing: 2) {
                         convAction("pencil") { vm.openRenameSession(c.id) }
                         convAction("trash", danger: true) { vm.confirmDeleteSessionId = c.id }
                     }
-                    .background(pal.sidebar, in: RoundedRectangle(cornerRadius: 7))
                     .padding(6)
                 }
             }
@@ -306,11 +305,7 @@ struct ChatView: View {
     }
 
     private func convAction(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name).font(.system(size: 11, weight: .medium)).foregroundStyle(danger ? pal.rec : pal.text2)
-                .frame(width: 24, height: 24)
-        }
-        .buttonStyle(.plainHit).hoverCursor()
+        RowIconButton(pal: pal, icon: name, danger: danger, action: action)
     }
 
     // MARK: 空状态

@@ -10,8 +10,8 @@ public struct OnlineTranscriber {
     let prompt: String?
 
     public init(config: Config, language: String? = nil, prompt: String? = nil) {
-        self.baseURL = config.embeddingBaseURL   // aihubmix，与 embedding 同域同 key
-        self.apiKey = config.embeddingKey
+        self.baseURL = config.transcribeBaseURL   // 缺省同 embedding；可在设置里单独配远程转写端点
+        self.apiKey = config.transcribeKey
         self.model = config.transcribeModel
         self.language = language
         self.prompt = prompt

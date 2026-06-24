@@ -15,13 +15,15 @@ final class RecordingController: ObservableObject {
     @Published var phase: Phase = .idle
     @Published var watching = false
     @Published var recSeconds = 0
-    @Published var procStep = 0          // 0 转写 · 1 识别说话人 · 2 建立索引
+    @Published var procStep = 0          // 0 转写 · 1 建立索引（说话人识别录完后由 Library 后台 worker 补）
     @Published var meetingTitle: String? // 检测到的会议名（取自 Chrome 标签标题），用作录音标题
 
     /// toast 走 AppModel（全局），录音引擎只负责发消息。
     weak var app: AppModel?
+    /// 录完后把"说话人识别+摘要"交给 Library 的后台串行 worker（与导入同一路径），不阻塞收尾。
+    weak var library: LibraryModel?
 
-    static let procLabels = ["正在转写音频…", "正在识别说话人…", "正在加入录音库…"]
+    static let procLabels = ["正在转写音频…", "正在加入录音库…"]
 
     private var watchTask: Task<Void, Never>?
     private var recorder: MeetingRecorder?
@@ -110,14 +112,19 @@ final class RecordingController: ObservableObject {
                 let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
                     .ingest(audioPath: url, title: (title?.isEmpty == false) ? title : nil, source: "meeting", tags: [],
                             model: "large-v3", language: "zh", hints: [], push: false)
-                await MainActor.run { self.procStep = 1 }
                 let pipeline = IndexPipeline(config: cfg)
-                await MainActor.run { self.procStep = 2 }
-                try await pipeline.indexRecording(recDir: out.recordingDir, indexPath: defaultIndexPath())
-                _ = try? await pipeline.summarizeRecording(recDir: out.recordingDir, indexPath: defaultIndexPath())
+                await MainActor.run { self.procStep = 1 }
+                // labelSpeakers:false——说话人交给后台 worker 的 diarization（会覆盖 chunk 说话人），此处不重复标注
+                try await pipeline.indexRecording(recDir: out.recordingDir, indexPath: defaultIndexPath(), labelSpeakers: false)
+                if cfg.vaultAutoPush {   // 开了自动推送：把文本派生物同步到 vault 远端（音频已 gitignore）
+                    _ = try? Git(repo: URL(fileURLWithPath: vault)).syncTextOnly(message: "rec: 会议录音 \(out.id)")
+                }
+                // 转写+入库完成即收尾；说话人识别(慢)+摘要交后台串行 worker，录音库里该条显示「识别说话人中…」
+                let sum = loadRecordingSummary(dir: out.recordingDir)
                 await MainActor.run {
                     self.app?.toast("录音已转写并加入录音库")
                     self.app?.reloadLibrary()
+                    if let sum { self.library?.enqueueSpeakerID(sum) }
                     self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                 }
             } catch {

@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, Normalize.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
     )
 }
 
@@ -216,6 +216,115 @@ struct SpeakerLabel: AsyncParsableCommand {
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         try await IndexPipeline(config: cfg).labelExisting(
             vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL)
+    }
+}
+
+/// resound speaker-identify —— 用已注册声纹逐窗识别说话人并写 diarization.json（产品同款，可批量修复旧录音）
+struct SpeakerIdentify: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "speaker-identify",
+        abstract: "用已注册声纹逐窗识别说话人，写 diarization.json + 同步 index 真名（注册新人后批量修复旧录音）")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "只处理这一条录音 id（缺省=全部）")
+    var id: String?
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        guard let model = cfg.speakerModel else { throw ConfigError.missing("SPEAKER_MODEL") }
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let recs = listRecordings(vaultRoot: URL(fileURLWithPath: vault)).filter { id == nil || $0.id == id }
+        guard !recs.isEmpty else { print("没有匹配的录音"); return }
+        for rec in recs {
+            print("▶︎ \(rec.id)")
+            _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+        }
+        print("✅ 完成 \(recs.count) 条")
+    }
+}
+
+/// resound diarize-compare —— 离线对比「旧逐窗法」vs「新 diar 优先法(+VAD)」的说话人分布（不落盘）
+struct DiarizeCompare: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "diarize-compare",
+        abstract: "在已入库录音上对比旧逐窗识别 vs 新真-diarization 优先识别(+silero VAD)，打印说话人分布（不写盘）")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "只处理这一条录音 id（缺省=全部）")
+    var id: String?
+
+    @Option(name: .long, help: "diar 后端：offline(任意人数,默认) / sortformer(≤4) / manager")
+    var backend: String = "offline"
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        guard let model = cfg.speakerModel else { throw ConfigError.missing("SPEAKER_MODEL") }
+        let be = DiarBackend(rawValue: backend) ?? .offline
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let recs = listRecordings(vaultRoot: URL(fileURLWithPath: vault)).filter { id == nil || $0.id == id }
+        guard !recs.isEmpty else { print("没有匹配的录音"); return }
+        for rec in recs {
+            let report = try await diarIdCompare(rec, model: model, indexPath: indexURL,
+                                                 embeddingDim: cfg.embeddingDim, backend: be)
+            print(report); print("")
+        }
+    }
+}
+
+/// resound transcribe-correct —— 对已有 transcript.json 跑一轮 AI 校对（保持原意纠错别字/术语）
+struct CorrectTranscript: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "transcribe-correct",
+        abstract: "对已有转录跑一轮 AI 校对（DeepSeek，保持原意纠错别字/分词/术语）；改完记得 resound index 重建检索")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "只处理这一条录音 id（缺省=全部）")
+    var id: String?
+
+    func run() async throws {
+        let (recs, segs) = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault)).correctExisting(id: id)
+        print("✅ 校对完成：\(recs) 条录音，改动 \(segs) 段（记得 resound index 重建检索）")
+    }
+}
+
+/// resound redate —— 从标题解析真实会议日期，修正已有录音的 recorded_at（排序/详情/Ask 口径）。默认 dry-run。
+struct Redate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "redate",
+        abstract: "从标题里的日期修正已有录音的会议日期（recording.yaml + 索引，不重嵌入）。默认只预览，--apply 才落盘")
+
+    @Option(name: .long, help: "vault 根目录（缺省取 .env 的 VAULT_PATH）")
+    var vault: String?
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Flag(name: .long, help: "真正写入（缺省只预览将改动的录音）")
+    var apply = false
+
+    func run() async throws {
+        let cfg = try? Config.load()
+        guard let vaultPath = vault ?? cfg?.vaultPath, !vaultPath.isEmpty else {
+            throw ConfigError.missing("vault 路径（--vault 或 .env 的 VAULT_PATH）")
+        }
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let dim = cfg?.embeddingDim ?? 4096
+        let changes = redateFromTitles(vaultRoot: URL(fileURLWithPath: vaultPath),
+                                       indexPath: indexURL, embeddingDim: dim, dryRun: !apply)
+        if changes.isEmpty { print("没有需要修正的录音（标题无日期或日期已一致）"); return }
+        print(apply ? "✏️ 已修正 \(changes.count) 条：" : "🔍 预览（\(changes.count) 条将修正，加 --apply 落盘）：")
+        for c in changes {
+            print("  \(String(c.old.prefix(10))) → \(String(c.new.prefix(10)))   \(c.title)")
+        }
+        if !apply { print("\n确认无误后重跑：resound redate --apply") }
     }
 }
 

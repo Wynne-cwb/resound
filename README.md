@@ -31,11 +31,12 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 ## 功能特性
 
 - **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路混音）；检测到 Meet 自动弹屏级提示。
-- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；繁→简归一 + 词表纠错。
-- **说话人识别** — 弃盲聚类，走「ASR 边界合并 → CAM++ 声纹 → 注册匹配」。命名一次即记住声纹，跨录音自动认人，标得越多越准。
-- **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引。
+- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前做人声响度归一，转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
+- **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。
+- **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；**Templates 页**可增删改模板、AI 协助生成 / 润色提示词、设默认。
 - **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**；支持「上周四的一对一聊了啥」这类时间感知查询。
-- **录音库** — 搜索、文件夹分组、⌘F 查找替换（修转录错字）、逐句点跳播放、说话人试听。
+- **录音库** — 搜索、文件夹分组、⌘F 查找替换（修转录错字）、逐句点跳播放、说话人试听；反复改同一个错词会**自动建议加入词表**，一键确认。
+- **可视化设置** — API / 模型 / 在线转录开关 / 录音库路径 / git 自动推送都能在应用内配置，支持导入导出，改完即时生效、无需重编。
 - **菜单栏驻留** — 关掉主窗口不退出，常驻菜单栏随时开录；浅 / 深双主题。
 
 ## 架构边界
@@ -91,16 +92,20 @@ open build/Resound.app
 
 ## 配置
 
-密钥与可调参数放仓库根目录 `.env`（已 gitignore，**绝不提交**）。接口均为 OpenAI 兼容：
+密钥与可调参数放仓库根目录 `.env`（已 gitignore，**绝不提交**）。接口均为 OpenAI 兼容。
+也可在应用内 **设置 › 连接与模型** 可视化填写并导入导出，运行时即时生效。
 
 | 变量 | 用途 |
 |---|---|
-| `AIHUBMIX_API_KEY` / `AIHUBMIX_BASE_URL` | Embedding（向量）+ 在线转录 |
+| `AIHUBMIX_API_KEY` / `AIHUBMIX_BASE_URL` | Embedding（向量），缺省也用于在线转录 |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 向量模型与维度 |
 | `CHAT_API_KEY` / `CHAT_BASE_URL` | LLM（DeepSeek 官方，OpenAI 兼容） |
+| `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | 在线转录开关与模型（关则走本地 WhisperKit） |
+| `TRANSCRIBE_API_KEY` / `TRANSCRIBE_BASE_URL` | 转录端点，缺省同 Embedding |
 | `CONTEXT_MODEL` | 逐 chunk contextual 增强（高频，默认 flash） |
+| `CORRECT_MODEL` | 转录 AI 校对（默认 flash） |
 | `RERANK_MODEL` | 召回重排 |
-| `ANSWER_MODEL` | 最终综合（每次提问一调，默认 pro） |
+| `ANSWER_MODEL` / `SUMMARY_MODEL` | 最终综合 / 摘要（默认 pro） |
 
 App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Resound/.env`，并补 `VAULT_PATH`、`SPEAKER_MODEL`。
 
@@ -110,10 +115,14 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 |---|---|
 | `record` / `record-meeting` | 麦克风录音 / 会议双路录音 → 转录 → 写入 vault |
 | `transcribe` | 把已有音频转录并写入 vault |
+| `transcribe-correct` | 对已有转录补做 AI 校对（修同音错字 / 术语） |
 | `watch-meet` | 监听 Chrome 是否在开 Google Meet |
 | `diarize` / `speaker-recognize` | 说话人分割 / 用声纹库识别说话人 |
+| `speaker-identify` | 用注册声纹识别并写回（注册新人后批量修旧录音） |
 | `speaker-enroll` / `speaker-label` | 注册声纹 / 给已有索引就地打标签 |
+| `diarize-eval` / `diarize-compare` | 用 ground-truth 评测 / 对比说话人识别方案 |
 | `normalize` | 对已有转录重做繁→简归一 + 别名纠正 |
+| `redate` | 按标题里的日期修正录音的会议日期 |
 | `index` | 从 vault 重建检索索引（切块 → embedding → SQLite/FTS5/vec） |
 | `search` | hybrid 检索（FTS5 + 向量 + RRF） |
 | `summarize` | 为录音生成 AI 摘要（写 summary.md + 入索引） |
@@ -123,8 +132,8 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 ## 工作原理
 
 ```
-录音 ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错
-   └─► 说话人识别(ASR 段合并 → CAM++ 声纹 → 注册匹配)
+录音 ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
+   └─► 说话人识别(Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
                           │
 切块 ─► contextual 增强 ─► embedding ─► SQLite(FTS5 + sqlite-vec)
                                               │
@@ -134,7 +143,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 
 ## 技术栈
 
-- **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · sherpa-onnx（声纹）· SQLite（FTS5 + sqlite-vec）
+- **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
 - **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
 - **API**：Embedding（向量）· rerank · DeepSeek（contextual 增强 / 元数据抽取 / 综合）
 

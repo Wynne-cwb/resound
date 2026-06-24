@@ -26,7 +26,8 @@ struct LibraryView: View {
     // MARK: 列表
 
     private var listColumn: some View {
-        VStack(spacing: 0) {
+        let secs = vm.sections()   // 一次算好复用，避免 body 内 O(folders×recordings) 过滤跑两遍
+        return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Text("录音库").font(.system(size: 17, weight: .bold)).foregroundStyle(pal.text)
@@ -56,7 +57,7 @@ struct LibraryView: View {
                 LazyVStack(spacing: 2, pinnedViews: []) {
                     if rec.isProcessing { processingRow }
                     ForEach(vm.pendingImports) { p in importingRow(p) }
-                    ForEach(vm.sections()) { sec in
+                    ForEach(secs) { sec in
                         VStack(spacing: 2) {
                             folderHeader(sec)
                             if !vm.isCollapsed(sec.id) {
@@ -78,7 +79,7 @@ struct LibraryView: View {
                         }
                         .zIndex(vm.moveMenuFor != nil && sec.recordings.contains { $0.id == vm.moveMenuFor } ? 10 : 0)
                     }
-                    if vm.sections().allSatisfy({ $0.recordings.isEmpty }) && !vm.query.isEmpty {
+                    if secs.allSatisfy({ $0.recordings.isEmpty }) && !vm.query.isEmpty {
                         Text("没有匹配「\(vm.query)」的录音").font(.system(size: 12)).foregroundStyle(pal.text3).padding(.top, 20)
                     }
                 }
@@ -102,7 +103,7 @@ struct LibraryView: View {
                 Text(sec.name).font(.system(size: 12.5, weight: .bold)).foregroundStyle(pal.text).lineLimit(1)
                 Spacer(minLength: 4)
                 if canManage && hovering {
-                    HStack(spacing: 1) {
+                    HStack(spacing: 2) {
                         folderAction("pencil") { vm.openRenameFolder(sec.folderId!) }
                         folderAction("trash", danger: true) { vm.confirmDeleteFolderId = sec.folderId! }
                     }
@@ -110,7 +111,7 @@ struct LibraryView: View {
                     Text("\(sec.recordings.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(pal.text3)
                 }
             }
-            .frame(height: 20)   // 固定行高：hover 出按钮时不撑高，避免列表抖动
+            .frame(height: 26)   // 固定行高（容纳 26px 操作按钮）：hover 出按钮时不撑高，避免列表抖动
             .padding(.horizontal, 9).padding(.vertical, 6)
             .background(dragOver ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay { if dragOver { RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.accent) } }
@@ -128,11 +129,7 @@ struct LibraryView: View {
     }
 
     private func folderAction(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name).font(.system(size: 11, weight: .medium)).foregroundStyle(danger ? pal.rec : pal.text3)
-                .frame(width: 20, height: 20)
-        }
-        .buttonStyle(.plainHit).hoverCursor()
+        RowIconButton(pal: pal, icon: name, danger: danger, action: action)
     }
 
     @ViewBuilder private func moveMenu(_ r: RecordingSummary) -> some View {
@@ -153,7 +150,7 @@ struct LibraryView: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("正在处理新录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
-                Text(RecordingController.procLabels[min(rec.procStep, 2)]).font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                Text(RecordingController.procLabels[min(rec.procStep, RecordingController.procLabels.count - 1)]).font(.system(size: 11.5)).foregroundStyle(pal.text2)
             }
             Spacer()
             Spinner(size: 13, color: pal.accent)
@@ -190,19 +187,33 @@ struct LibraryView: View {
 
     private func recordingRow(_ r: RecordingSummary) -> some View {
         let on = vm.selectedId == r.id
-        let identified = FileManager.default.fileExists(atPath: r.dir.appendingPathComponent("diarization.json").path)
+        let identifying = vm.identifyingIds.contains(r.id)
+        let summarizing = vm.summarizingId == r.id
+        let identified = r.identified   // 扫描时算好的内存标志，免每行每次重绘做 fileExists 系统调用
         return VStack(alignment: .leading, spacing: 6) {
-                Text(r.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                Text(r.title).font(.system(size: 12.5, weight: .regular)).foregroundStyle(pal.text).lineLimit(1)
                 HStack(spacing: 8) {
                     Text(shortDate(r.recordedAt)).font(.system(size: 11.5)).foregroundStyle(pal.text2)
                     Text("·").font(.system(size: 11)).foregroundStyle(pal.text3)
                     Text(mmss(Double(r.durationSec))).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
-                    if !identified {
-                        Spacer(minLength: 4)
-                        Text("待识别").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.warn)
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(pal.warnSoft, in: Capsule())
+                }
+                // 状态徽标独占一行：日期加了年份后侧栏一行塞不下，徽标会被挤换行 → 下移避免挤压。
+                if identifying {
+                    HStack(spacing: 4) {
+                        Spinner(size: 9, color: pal.accent)
+                        Text("识别说话人中…").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.accent).lineLimit(1)
                     }
+                    .fixedSize().padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule())
+                } else if summarizing {
+                    HStack(spacing: 4) {
+                        Spinner(size: 9, color: pal.accent)
+                        Text("生成摘要中…").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.accent).lineLimit(1)
+                    }
+                    .fixedSize().padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule())
+                } else if !identified {
+                    Text("待识别").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.warn).lineLimit(1)
+                        .fixedSize().padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(pal.warnSoft, in: Capsule())
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -224,7 +235,7 @@ struct LibraryView: View {
                 if vm.moveMenuFor == r.id { movePopover(r) }
             }
             .contentShape(Rectangle())
-            .background(WindowDragBlocker())   // 否则拖行会被当成「拖窗口」(isMovableByWindowBackground)
+            .background(WindowDragBlocker(clickable: true))   // 阻止「拖窗口」+ 整行小手指针（可点击）
             .onTapGesture { vm.select(r.id) }
             .hoverCursor()
             .onHover { hoverId = $0 ? r.id : (hoverId == r.id ? nil : hoverId) }
@@ -279,13 +290,7 @@ struct LibraryView: View {
     }
 
     private func iconBtn(_ name: String, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name).font(.system(size: 12, weight: .medium)).foregroundStyle(pal.text2)
-                .frame(width: 26, height: 26)
-                .background(pal.elev, in: RoundedRectangle(cornerRadius: 6))
-                .stroke(pal.border, corner: 6)
-        }
-        .buttonStyle(.plainHit).hoverCursor()
+        RowIconButton(pal: pal, icon: name, danger: danger, action: action)
     }
 
     // MARK: 详情
@@ -350,9 +355,10 @@ struct LibraryView: View {
                     Text("\(fullDate(sel.recordedAt)) · \(mmss(Double(sel.durationSec)))")
                         .font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 5)
                         .textSelection(.enabled)
-                    playerBar(sel).padding(.top, 22)
+                    PlayerBar(vm: vm, playhead: vm.playhead, sel: sel, pal: pal).padding(.top, 22)
                     tabBar.padding(.top, 24)
-                    if vm.tab == .summary { summaryTab } else { transcriptTab }
+                    if vm.loadingDetail { detailLoadingCard }
+                    else if vm.tab == .summary { summaryTab } else { transcriptTab }
                 }
                 .frame(maxWidth: 780, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -361,30 +367,30 @@ struct LibraryView: View {
             .onChange(of: vm.findQuery) { _, _ in
                 if let id = vm.firstMatchLineID() { withAnimation { proxy.scrollTo(id, anchor: .center) } }
             }
+            // 引用跳转：scrollToLine 常在本视图挂载**之前**就被后台 refreshDetail 设好（点引用时还在 Ask 页），
+            // 单靠 onChange 会错过那次变更 → 永不滚动。故三处都触发待定滚动：挂载时、转录载入后、scrollToLine 变更时。
+            .onChange(of: vm.scrollToLine) { _, _ in scrollToCitation(proxy) }
+            .onChange(of: vm.flatLines.count) { _, _ in scrollToCitation(proxy) }
+            .onAppear { scrollToCitation(proxy) }
         }
     }
 
-    private func playerBar(_ sel: RecordingSummary) -> some View {
-        HStack(spacing: 15) {
-            Button { vm.togglePlay() } label: {
-                Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                    .frame(width: 46, height: 46).background(pal.accent, in: Circle())
-            }
-            .buttonStyle(.plainHit).hoverCursor()
-            VStack(spacing: 7) {
-                Scrubber(value: vm.currentTime, total: max(vm.duration, 0.1), pal: pal,
-                         onBegin: { vm.scrubBegan() }, onChange: { vm.scrub(to: $0) }, onEnd: { vm.scrubEnded(to: $0) })
-                    .frame(height: 18)
-                HStack {
-                    Text(mmss(vm.currentTime)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
-                    Spacer()
-                    Text(mmss(max(vm.duration, Double(sel.durationSec)))).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
-                }
-            }
+    /// 把待定的引用跳转目标滚到中间（转录已载入才滚；滚完清空，避免后续 blocks 变更重复触发）。
+    private func scrollToCitation(_ proxy: ScrollViewProxy) {
+        guard let id = vm.scrollToLine, !vm.flatLines.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard vm.scrollToLine == id else { return }   // 期间被新跳转替换则放弃
+            withAnimation { proxy.scrollTo(id, anchor: .center) }
+            vm.scrollToLine = nil
         }
-        .padding(.horizontal, 18).padding(.vertical, 16)
-        .card(pal)
+    }
+
+    private var detailLoadingCard: some View {
+        VStack(spacing: 0) {
+            Spinner(size: 28, color: pal.border)
+            Text("正在载入…").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.text2).padding(.top, 14)
+        }
+        .frame(maxWidth: .infinity).padding(40).card(pal).padding(.top, 24)
     }
 
     private var tabBar: some View {
@@ -407,7 +413,49 @@ struct LibraryView: View {
     // MARK: 摘要 Tab
 
     @ViewBuilder private var summaryTab: some View {
-        if vm.summarizing {
+        if vm.hasSpeakers { summarySpeakers }   // 已识别说话人 → 摘要页顶部简单展示一排说话人徽标
+        summaryBody
+    }
+
+    /// 摘要页顶部的说话人徽标（纯展示：头像 + 名字 + 占比，会自动换行；不可点击/不做修改）。
+    private var summarySpeakers: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("说话人 · \(vm.speakers.count) 位").font(.system(size: 12, weight: .bold)).foregroundStyle(pal.text2)
+            FlowLayout(spacing: 8) {
+                ForEach(vm.speakers) { sp in summarySpeakerChip(sp) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 18)
+    }
+
+    private func summarySpeakerChip(_ sp: LibraryModel.SpeakerStat) -> some View {
+        HStack(spacing: 7) {
+            ZStack {
+                Circle().fill(speakerColor(index: sp.index, anon: sp.isAnon))
+                Text(sp.isAnon ? "?" : String(sp.name.prefix(1)))
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(sp.isAnon ? pal.text3 : .white)
+            }
+            .frame(width: 22, height: 22)
+            .overlay { if sp.isAnon { Circle().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3])).foregroundStyle(pal.borderStrong) } }
+            Text(sp.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
+            Text("\(sp.pct)%").font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3)
+        }
+        .padding(.leading, 4).padding(.trailing, 11).frame(height: 30)
+        .background(pal.elev, in: Capsule())
+        .overlay(Capsule().strokeBorder(pal.border, lineWidth: 1))
+    }
+
+    @ViewBuilder private var summaryBody: some View {
+        if vm.identifyingSelected && vm.summaryText == nil {
+            VStack(spacing: 0) {
+                Spinner(size: 30, color: pal.accent)
+                Text("正在识别说话人…").font(.system(size: 15, weight: .semibold)).foregroundStyle(pal.text).padding(.top, 16)
+                Text("识别完成后会自动生成带说话人姓名的会议摘要。转录文稿已经可以查看、检索、问答。")
+                    .font(.system(size: 13)).foregroundStyle(pal.text2).multilineTextAlignment(.center).frame(maxWidth: 380).padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity).padding(36).card(pal).padding(.top, 18)
+        } else if vm.summarizing {
             VStack(spacing: 0) {
                 Spinner(size: 30, color: pal.border)
                 Text("正在生成会议摘要…").font(.system(size: 15, weight: .semibold)).foregroundStyle(pal.text).padding(.top, 16)
@@ -426,7 +474,7 @@ struct LibraryView: View {
                 }
                 .buttonStyle(.plainHit).hoverCursor()
             }
-            .padding(.top, 18)
+            .padding(.top, 18).zIndex(1)   // 让模板下拉浮在摘要卡之上
             SummaryMarkdown(text: text, pal: pal, highlight: vm.findOpen ? vm.findQuery : "")
                 .padding(22).frame(maxWidth: .infinity, alignment: .leading).card(pal).padding(.top, 14)
         } else {
@@ -457,29 +505,52 @@ struct LibraryView: View {
         SummaryTemplateStore.load().first { $0.id == vm.currentTemplateId() }?.name ?? "默认"
     }
 
+    // 自绘下拉（不用原生 Menu，保证胶囊外观与设计稿一致）：模板：name ⌄
     private var templateMenu: some View {
-        Menu {
-            ForEach(SummaryTemplateStore.load()) { t in
-                Button { vm.chooseTemplate(t.id) } label: {
-                    if t.id == vm.currentTemplateId() { Label(t.name, systemImage: "checkmark") } else { Text(t.name) }
-                }
-            }
-        } label: {
+        Button { vm.tplMenuOpen.toggle() } label: {
             HStack(spacing: 6) {
-                Image(systemName: "doc.text").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text2)
-                Text("模板 · ").font(.system(size: 12)).foregroundStyle(pal.text2)
+                Text("模板：").font(.system(size: 12)).foregroundStyle(pal.text2)
                 + Text(curTplName).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text)
                 Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.text2)
+                    .rotationEffect(.degrees(vm.tplMenuOpen ? 180 : 0))
             }
-            .padding(.horizontal, 11).frame(height: 30).card(pal, corner: 8)
+            .padding(.horizontal, 11).frame(height: 30)
+            .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).stroke(pal.borderStrong, corner: 8)
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().hoverCursor()
+        .buttonStyle(.plainHit).hoverCursor()
+        .overlay(alignment: .topLeading) {
+            if vm.tplMenuOpen {
+                VStack(spacing: 1) {
+                    ForEach(SummaryTemplateStore.load()) { t in
+                        TplOptionRow(name: t.name, active: t.id == vm.currentTemplateId(), pal: pal) { vm.chooseTemplate(t.id) }
+                    }
+                }
+                .padding(6).frame(width: 210)
+                .background(pal.elev, in: RoundedRectangle(cornerRadius: 11, style: .continuous)).stroke(pal.borderStrong, corner: 11)
+                .shadow(color: .black.opacity(0.20), radius: 18, x: 0, y: 8)
+                .offset(y: 38).zIndex(60)
+            }
+        }
     }
 
     // MARK: 转录 Tab
 
     @ViewBuilder private var transcriptTab: some View {
-        if !vm.hasSpeakers {
+        if vm.identifyingSelected && !vm.hasSpeakers {
+            HStack(spacing: 14) {
+                Spinner(size: 18, color: pal.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("正在识别说话人…").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                    Text("后台正在区分谁说了什么（这一步较慢）。完成后逐句会自动标上姓名。").font(.system(size: 12.5)).foregroundStyle(pal.text2)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.top, 18)
+            transcriptLines.padding(.top, 22)
+        } else if !vm.hasSpeakers {
             HStack(spacing: 14) {
                 Image(systemName: "person.crop.circle").font(.system(size: 20)).foregroundStyle(pal.warn)
                 VStack(alignment: .leading, spacing: 2) {
@@ -560,13 +631,16 @@ struct LibraryView: View {
                         }
                         .buttonStyle(.plainHit).hoverCursor().help("试听 TA 的一段发言")
                         Button { vm.openRenameSpeaker(sp.label) } label: {
-                            HStack(spacing: 6) { Image(systemName: "pencil").font(.system(size: 11, weight: .semibold)); Text(sp.isAnon ? "命名" : "改名").font(.system(size: 12.5, weight: .semibold)) }
+                            HStack(spacing: 6) {
+                                Image(systemName: sp.isAnon ? "pencil" : "person.fill.questionmark").font(.system(size: 11, weight: .semibold))
+                                Text(sp.isAnon ? "命名" : "重分配").font(.system(size: 12.5, weight: .semibold))
+                            }
                                 .foregroundStyle(sp.isAnon ? .white : pal.text)
                                 .padding(.horizontal, 13).frame(height: 30)
                                 .background(sp.isAnon ? pal.accent : pal.bg, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .stroke(sp.isAnon ? .clear : pal.borderStrong, corner: 8)
                         }
-                        .buttonStyle(.plainHit).hoverCursor()
+                        .buttonStyle(.plainHit).hoverCursor().help(sp.isAnon ? "" : "如果这个人认错了，重新分配给正确的人（不影响已记住的声音）")
                     }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
@@ -577,9 +651,8 @@ struct LibraryView: View {
     }
 
     private func rosterAvatar(_ sp: LibraryModel.SpeakerStat) -> some View {
-        let hues: [Color] = [pal.accent, Color(hex: 0x9b6dc9), Color(hex: 0x3f9d7a), Color(hex: 0xd98a3d), Color(hex: 0xc75d8a)]
-        return ZStack {
-            Circle().fill(sp.isAnon ? pal.inset : hues[sp.index % hues.count])
+        ZStack {
+            Circle().fill(speakerColor(index: sp.index, anon: sp.isAnon))
             Text(sp.isAnon ? "?" : String(sp.name.prefix(2)))
                 .font(.system(size: 13, weight: .bold)).foregroundStyle(sp.isAnon ? pal.text3 : .white)
         }
@@ -587,36 +660,68 @@ struct LibraryView: View {
         .overlay { if sp.isAnon { Circle().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3])).foregroundStyle(pal.borderStrong) } }
     }
 
+    // 单层 LazyVStack：每行独立懒加载、scrollTo(line.id) 必可寻址（引用跳转可靠）。
+    // 说话人 chip 在段首（item.chip 非 nil）随行内联渲染。
     private var transcriptLines: some View {
-        LazyVStack(spacing: 1) {
-            ForEach(vm.lines) { ln in
-                let active = vm.currentTime >= ln.start && vm.currentTime < ln.end
-                Button { vm.seek(to: ln.start) } label: {
-                    HStack(alignment: .top, spacing: 14) {
-                        Text(mmss(ln.start)).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 46, alignment: .leading).padding(.top, 3)
-                        VStack(alignment: .leading, spacing: 3) {
-                            if vm.hasSpeakers, let spk = ln.speaker {
-                                Button { vm.openRenameSpeaker(spk) } label: {
-                                    HStack(spacing: 5) {
-                                        Text(spk).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.accent)
-                                        Image(systemName: "pencil").font(.system(size: 9)).foregroundStyle(pal.accent.opacity(0.45))
-                                    }
-                                }
-                                .buttonStyle(.plainHit).hoverCursor()
-                            }
-                            lineText(ln.text).font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+        LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(vm.flatLines) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    if vm.hasSpeakers, let spk = item.chip {
+                        transcriptSpeakerChip(spk).padding(.leading, 16).padding(.top, 14).padding(.bottom, 4)
                     }
-                    .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 9)
-                    .background(active ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .overlay(alignment: .leading) { if active { RoundedRectangle(cornerRadius: 3).fill(pal.accent).frame(width: 3).padding(.vertical, 6) } }
-                    .contentShape(Rectangle())
+                    transcriptRow(item.line)
                 }
-                .buttonStyle(.plainHit).hoverCursor()
-                .id(ln.id)
+                .id(item.line.id)
             }
         }
+    }
+
+    /// 说话人配色（与名册头像一致，按 index 取色；匿名用灰底）。
+    private func speakerColor(index: Int, anon: Bool) -> Color {
+        if anon { return pal.inset }
+        let hues: [Color] = [pal.accent, Color(hex: 0x9b6dc9), Color(hex: 0x3f9d7a), Color(hex: 0xd98a3d), Color(hex: 0xc75d8a)]
+        return hues[index % hues.count]
+    }
+
+    /// 逐句转录每段开头的说话人胶囊：头像 + 名字 + 改名笔，描边成明确可点的按钮（点开命名/改名）。
+    private func transcriptSpeakerChip(_ label: String) -> some View {
+        let stat = vm.speakers.first { $0.label == label }
+        let anon = stat?.isAnon ?? LibraryModel.isAnon(label)
+        let color = speakerColor(index: stat?.index ?? 0, anon: anon)
+        return Button { vm.openRenameSpeaker(label) } label: {
+            HStack(spacing: 7) {
+                ZStack {
+                    Circle().fill(color)
+                    Text(anon ? "?" : String(label.prefix(1)))
+                        .font(.system(size: 10, weight: .bold)).foregroundStyle(anon ? pal.text3 : .white)
+                }
+                .frame(width: 22, height: 22)
+                .overlay { if anon { Circle().strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3])).foregroundStyle(pal.borderStrong) } }
+                Text(label).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text)
+                Image(systemName: "pencil").font(.system(size: 9, weight: .semibold)).foregroundStyle(pal.text3)
+            }
+            .padding(.leading, 4).padding(.trailing, 10).frame(height: 30)
+            .background(pal.elev, in: Capsule())
+            .overlay(Capsule().strokeBorder(pal.border, lineWidth: 1))
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+    }
+
+    /// 单行：时间戳 + 文本，可点击跳转、随播放高亮。说话人名由所属 block 统一只贴一次。
+    @ViewBuilder private func transcriptRow(_ ln: LibraryModel.Line) -> some View {
+        let active = vm.activeLineID == ln.id   // 由 activeLineID 驱动（仅跨行时变），不再读每秒跳动的 currentTime
+        Button { vm.seek(to: ln.start) } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Text(mmss(ln.start)).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 46, alignment: .leading).padding(.top, 2)
+                lineText(ln.text).font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 5)
+            .background(active ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(alignment: .leading) { if active { RoundedRectangle(cornerRadius: 3).fill(pal.accent).frame(width: 3).padding(.vertical, 4) } }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
     }
 
     /// 转录行文本：查找时高亮命中片段。
@@ -655,12 +760,82 @@ struct Scrubber: View {
     }
 }
 
+/// 播放器条：独立子视图，观察 `Playhead`（高频 currentTime）。这样 0.25s 的播放头跳动只重绘这一条，
+/// 不会波及详情页/长转录列表（父视图只观察 LibraryModel，不读 playhead.time）。
+private struct PlayerBar: View {
+    @ObservedObject var vm: LibraryModel
+    @ObservedObject var playhead: LibraryModel.Playhead
+    let sel: RecordingSummary
+    let pal: Palette
+    var body: some View {
+        HStack(spacing: 15) {
+            Button { vm.togglePlay() } label: {
+                Group {
+                    if vm.decodingAudio { Spinner(size: 16, color: .white) }
+                    else { Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white) }
+                }
+                .frame(width: 46, height: 46).background(pal.accent, in: Circle())
+            }
+            .buttonStyle(.plainHit).hoverCursor().disabled(vm.decodingAudio)
+            VStack(spacing: 7) {
+                Scrubber(value: playhead.time, total: max(vm.duration, 0.1), pal: pal,
+                         onBegin: { vm.scrubBegan() }, onChange: { vm.scrub(to: $0) }, onEnd: { vm.scrubEnded(to: $0) })
+                    .frame(height: 18)
+                HStack {
+                    Text(mmss(playhead.time)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                    Spacer()
+                    Text(mmss(max(vm.duration, Double(sel.durationSec)))).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                }
+            }
+        }
+        .padding(.horizontal, 18).padding(.vertical, 16)
+        .card(pal)
+    }
+}
+
+/// 模板下拉的一行（带 hover 高亮 + 选中勾）。
+private struct TplOptionRow: View {
+    let name: String
+    let active: Bool
+    let pal: Palette
+    let onPick: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: onPick) {
+            HStack(spacing: 8) {
+                Text(name).font(.system(size: 12.5, weight: active ? .semibold : .regular)).foregroundStyle(pal.text).lineLimit(1)
+                Spacer(minLength: 6)
+                if active { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(pal.accent) }
+            }
+            .padding(.horizontal, 10).frame(height: 32)
+            .background(hover ? pal.hover : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+        .onHover { hover = $0 }
+    }
+}
+
 /// 放在交互控件背后：让 AppKit 不把这里的 mouseDown 当成「拖动窗口」(window.isMovableByWindowBackground)。
+/// `clickable` 时整块区域用 AppKit 原生 cursorUpdate 强制小手指针（比 SwiftUI onHover 更稳，
+/// 行是可拖拽的纯视图、SwiftUI hover 易被拖拽手势打断）。
 struct WindowDragBlocker: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { BlockerView() }
+    var clickable: Bool = false
+    func makeNSView(context: Context) -> NSView { BlockerView(clickable: clickable) }
     func updateNSView(_ nsView: NSView, context: Context) {}
     private final class BlockerView: NSView {
+        let clickable: Bool
+        init(clickable: Bool) { self.clickable = clickable; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError() }
         override var mouseDownCanMoveWindow: Bool { false }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            guard clickable else { return }
+            addTrackingArea(NSTrackingArea(rect: bounds,
+                options: [.activeInActiveApp, .inVisibleRect, .cursorUpdate], owner: self))
+        }
+        override func cursorUpdate(with event: NSEvent) { if clickable { NSCursor.pointingHand.set() } }
     }
 }
 
@@ -750,7 +925,7 @@ private func isoDate(_ iso: String) -> Date? {
 }
 func shortDate(_ iso: String) -> String {
     guard let d = isoDate(iso) else { return String(iso.prefix(10)) }
-    let f = DateFormatter(); f.dateFormat = "M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
+    let f = DateFormatter(); f.dateFormat = "yyyy年M月d日"; f.locale = Locale(identifier: "zh_CN"); return f.string(from: d)
 }
 func fullDate(_ iso: String) -> String {
     guard let d = isoDate(iso) else { return String(iso.prefix(10)) }

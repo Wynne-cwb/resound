@@ -22,8 +22,10 @@ struct ResoundApp: App {
                 .preferredColorScheme(app.isDark ? .dark : .light)
                 .onAppear {
                     recorder.app = app
+                    recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
                     library.app = app
                     settings.app = app
+                    settings.load()          // 预载模板等，侧栏 Templates 计数即时正确
                     chat.app = app
                     chat.loadHistory()
                     MeetingPanelController.shared.configure(recorder: recorder, app: app)
@@ -62,7 +64,6 @@ struct MenuBarContent: View {
         .disabled(rec.isProcessing)
 
         Button("打开 Resound 窗口") { activate() }
-        Button("模拟检测到会议") { activate(); rec.simulateMeeting() }
 
         Divider()
 

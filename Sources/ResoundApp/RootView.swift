@@ -32,6 +32,7 @@ struct RootView: View {
         switch app.page {
         case .ask: ChatView()
         case .library: LibraryView()
+        case .templates: TemplatesView()
         case .settings: SettingsView()
         }
     }
@@ -61,7 +62,10 @@ struct TopBar: View {
     @Environment(\.palette) var pal
 
     private var title: String {
-        switch app.page { case .ask: return "提问 Resound"; case .library: return "录音库"; case .settings: return "设置" }
+        switch app.page {
+        case .ask: return "Ask Resound"; case .library: return "Library"
+        case .templates: return "Templates"; case .settings: return "Settings"
+        }
     }
 
     var body: some View {
@@ -227,6 +231,7 @@ struct Sidebar: View {
             VStack(spacing: collapsed ? 6 : 2) {
                 navRow(.ask, "Ask Resound", "bubble.left")
                 navRow(.library, "Library", "waveform", trailingCount: library.recordings.count)
+                navRow(.templates, "Templates", "square.grid.2x2", trailingCount: settings.templates.count)
                 navRow(.settings, "Settings", "slider.horizontal.3", attn: settings.needsAttention)
             }
 

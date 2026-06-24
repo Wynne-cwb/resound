@@ -41,8 +41,11 @@ public struct IndexPipeline {
     }
 
     /// 只索引单条录音（录完即用：chunk → 说话人标注 → 上下文 → embed → 入库）。幂等。
+    /// `labelSpeakers=false`：跳过逐段声纹标注（导入路径用——随后的 diarization 会重算并覆盖 chunk 说话人，
+    /// 此处标注是纯浪费的整段解码+提声纹）。
     public func indexRecording(recDir: URL, indexPath: URL,
                                enrichContext: Bool = true, contextModel: String? = nil,
+                               labelSpeakers: Bool = true,
                                log: (String) -> Void = { print($0) }) async throws {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         try index.setMeta("embedding_model", config.embeddingModel)
@@ -50,13 +53,15 @@ public struct IndexPipeline {
         try index.setMeta("distance", "cosine")
         let n = try await indexOneRecording(
             recDir: recDir, index: index, embedder: EmbeddingClient(config: config),
-            chunker: Chunker(), enrichContext: enrichContext, contextModel: contextModel, log: log)
+            chunker: Chunker(), enrichContext: enrichContext, contextModel: contextModel,
+            labelSpeakers: labelSpeakers, log: log)
         log("✅ 已索引：\(recDir.lastPathComponent)（\(n) chunks）")
     }
 
     /// 单条录音的索引逻辑（build 与 indexRecording 共用）。返回 chunk 数。
     private func indexOneRecording(recDir: URL, index: Index, embedder: EmbeddingClient,
                                    chunker: Chunker, enrichContext: Bool, contextModel: String?,
+                                   labelSpeakers: Bool = true,
                                    log: (String) -> Void) async throws -> Int {
         let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
         let tURL = recDir.appendingPathComponent("transcript.json")
@@ -73,7 +78,7 @@ public struct IndexPipeline {
 
         // 说话人标注：配置了声纹模型 + index 已有注册声纹时，逐段识别填 person_id（缺一则跳过，不影响检索）
         var personSpans: [(start: Double, end: Double, name: String)] = []
-        if let spkModel = config.speakerModel {
+        if labelSpeakers, let spkModel = config.speakerModel {
             let refs = index.loadSpeakerRefs()
             let audioURL = recDir.appendingPathComponent(manifest.audioFile)
             if !refs.isEmpty, FileManager.default.fileExists(atPath: audioURL.path) {
@@ -245,9 +250,10 @@ public struct IndexPipeline {
         }
         let system = """
         你基于若干场会议的摘要回答用户的汇总类问题。规则：
-        - 按时间/会议组织，简洁清楚，用中文。
+        - 按时间/会议组织，简洁清楚，用中文。\(todayAnchor())
         - 只用提供的摘要内容，不要臆造；某条没有摘要就注明"该条暂无摘要"。
         - 如有对话历史，用它理解指代并接着上文说。
+        \(zhWritingStyle)
         """
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
