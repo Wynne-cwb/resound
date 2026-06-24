@@ -31,7 +31,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 ## 功能特性
 
 - **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路混音）；检测到 Meet 自动弹屏级提示。
-- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前做人声响度归一，转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
+- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做人声响度归一，转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
 - **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。
 - **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；**Templates 页**可增删改模板、AI 协助生成 / 润色提示词、设默认。
 - **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**；支持「上周四的一对一聊了啥」这类时间感知查询。
@@ -132,7 +132,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 ## 工作原理
 
 ```
-录音 ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
+录音 ─► VAD 门控(剪静音/噪声) ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
    └─► 说话人识别(Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
                           │
 切块 ─► contextual 增强 ─► embedding ─► SQLite(FTS5 + sqlite-vec)
