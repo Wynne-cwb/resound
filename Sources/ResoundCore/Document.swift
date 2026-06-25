@@ -83,6 +83,36 @@ public func documentContent(_ dir: URL) -> String? {
     try? String(contentsOf: dir.appendingPathComponent("content.md"), encoding: .utf8)
 }
 
+/// 文档列表项（轻量，扫盘构建；仿 RecordingSummary）。
+public struct DocumentSummary: Identifiable, Hashable {
+    public let id: String
+    public let title: String
+    public let sourceFormat: String
+    public let importedAt: String        // ISO8601
+    public let tags: [String]
+    public let dir: URL
+    public let linkedRecordingIds: [String]
+
+    public init(id: String, title: String, sourceFormat: String, importedAt: String,
+                tags: [String], dir: URL, linkedRecordingIds: [String]) {
+        self.id = id; self.title = title; self.sourceFormat = sourceFormat
+        self.importedAt = importedAt; self.tags = tags; self.dir = dir
+        self.linkedRecordingIds = linkedRecordingIds
+    }
+}
+
+public func loadDocumentSummary(dir: URL) -> DocumentSummary? {
+    guard let m = parseDocumentManifest(dir) else { return nil }
+    return DocumentSummary(id: m.id, title: m.title, sourceFormat: m.sourceFormat,
+                           importedAt: m.importedAt, tags: m.tags, dir: dir,
+                           linkedRecordingIds: m.linkedRecordingIds)
+}
+
+public func listDocuments(vaultRoot: URL) -> [DocumentSummary] {
+    findDocuments(vaultRoot).compactMap { loadDocumentSummary(dir: $0) }
+        .sorted { $0.importedAt < $1.importedAt }
+}
+
 /// 递归找 documents/ 下所有含 document.yaml 的目录。
 public func findDocuments(_ vaultRoot: URL) -> [URL] {
     let root = vaultRoot.appendingPathComponent("documents")
@@ -142,6 +172,23 @@ public struct DocumentStore {
     /// 删除整篇文档目录。
     public func deleteDocument(id: String, date: Date) throws {
         try? FileManager.default.removeItem(at: documentDir(id: id, date: date))
+    }
+
+    /// 就地重写某目录的 document.yaml（编辑标题/标签/关联用）。保留 id/source_format/imported_at。
+    /// 返回新的 manifest（nil = 该目录不是合法文档）。
+    @discardableResult
+    public func updateManifest(dir: URL, title: String? = nil, tags: [String]? = nil,
+                               links: [String]? = nil) throws -> DocumentManifest? {
+        guard let old = parseDocumentManifest(dir) else { return nil }
+        let m = DocumentManifest(
+            id: old.id,
+            title: title ?? old.title,
+            sourceFormat: old.sourceFormat,
+            importedAt: old.importedAt,
+            tags: tags ?? old.tags,
+            links: links ?? old.links)
+        try m.yaml().data(using: .utf8)?.write(to: dir.appendingPathComponent("document.yaml"))
+        return m
     }
 
     // 生成稳定 id：yyyy-MM-dd-<slug>，目录冲突则追加 -2/-3…

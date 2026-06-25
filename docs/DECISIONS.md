@@ -9,6 +9,15 @@
 
 **做了**：把 `Wynne-cwb/resound` 设为公开前的安全体检 + 收尾。结论：代码与全部 git 历史**无任何 key/token 泄露**，`.env`/`*.sqlite`/`vaults/` 从未进过 git。处理项：①`experiments/diar-py/*.py` 写死的 `/Users/wb.chen/...` 绝对路径 → `os.path.dirname(__file__)`（不再泄露用户名）；②README 拆**英文为主双语**（[README.md](../README.md) + [README.zh-CN.md](../README.zh-CN.md)），顶部互切；③`.gitignore` 补 `__pycache__/`。**坑/取舍**：提交者邮箱（QQ）在全 commit 上，公开即永久——用户判断可接受，**不改写历史**（改写会变所有 SHA、收益低）。私有 vault repo `wayne-resound` 含个人数据，**不应在公开文档当模板**：删掉 README 的模板 TIP，改成「从零建自己 Vault」可复制脚手架；data-contract/DECISIONS/CLAUDE 里的具体引用泛化为 `<你>/my-resound-vault`（名字仍残留在旧 commit 历史里，但私有 repo 名≠访问权，无实际风险）。
 
+## 文档模块 P1 视图模型落地（M2，App 编译通过）（2026-06-25）
+
+**做了什么（Wave 2，无 UI 依赖，为 M3 接线准备）**：
+- Core 补 [Document.swift](../Sources/ResoundCore/Document.swift)：`DocumentSummary`(Identifiable/Hashable) + `listDocuments`/`loadDocumentSummary` + `DocumentStore.updateManifest`（就地重写 document.yaml 改标题/标签/关联，保留 id/format/importedAt）。
+- App 新增 [DocAskStore.swift](../Sources/ResoundApp/DocAskStore.swift)：doc-chats.json 按 docId 分桶（镜像 RecAskStore；文档 cite 只有 snippet，无说话人/时间）。
+- App 新增 [DocumentsModel.swift](../Sources/ResoundApp/DocumentsModel.swift)（@MainActor ObservableObject，镜像 LibraryModel）：列表/搜索、导入（文件 NSOpenPanel + 粘贴文本，异步 importDocument+indexDocument，进度 DocImportItem）、编辑元数据、删除、**关联录音双向**（改关联只重写 yaml + `Index.setDocLinks` 镜像，不重 embedding）、**向本文档提问**（answerInDocument + 打字机 reveal + 按 docId 持久化）。
+
+**取舍**：①改关联不重新 embedding——关联是元数据，重写 document.yaml + 更新 doc_links 镜像即可，省去整篇重嵌入。②DocumentsModel 与 LibraryModel 各自持有私有 cfg()/vaultURL()/dim()（轻量重复，避免耦合，与现有风格一致）。③M2 视图模型暂为「未接 UI 的就绪件」，待 M3 拿设计稿后绑定 + 注入 app 环境 + 加主导航入口。
+
 ## 文档模块 P1 后端落地（M1，CLI 验证通过）（2026-06-25）
 
 **做了什么（Wave 1 后端，UI 无关）**，按 [plans/2026-06-25-documents-p1-plan.md](superpowers/plans/2026-06-25-documents-p1-plan.md)：
