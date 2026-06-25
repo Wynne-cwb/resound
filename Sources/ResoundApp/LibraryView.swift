@@ -372,7 +372,9 @@ struct LibraryView: View {
                     PlayerBar(vm: vm, playhead: vm.playhead, sel: sel, pal: pal).padding(.top, 22)
                     tabBar.padding(.top, 24)
                     if vm.loadingDetail { detailLoadingCard }
-                    else if vm.tab == .summary { summaryTab } else { transcriptTab }
+                    else if vm.tab == .summary { summaryTab }
+                    else if vm.tab == .transcript { transcriptTab }
+                    else { recAskTab(sel) }
                 }
                 .frame(maxWidth: 780, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -386,6 +388,9 @@ struct LibraryView: View {
             .onChange(of: vm.scrollToLine) { _, _ in scrollToCitation(proxy) }
             .onChange(of: vm.flatLines.count) { _, _ in scrollToCitation(proxy) }
             .onAppear { scrollToCitation(proxy) }
+            // 本场提问：新消息进来 / 回答结束时滚到底部，让回答可见
+            .onChange(of: vm.recMsgs.count) { _, _ in if vm.tab == .ask { withAnimation { proxy.scrollTo("recAskBottom", anchor: .bottom) } } }
+            .onChange(of: vm.recAskBusy) { _, b in if !b && vm.tab == .ask { withAnimation { proxy.scrollTo("recAskBottom", anchor: .bottom) } } }
         }
     }
 
@@ -409,7 +414,7 @@ struct LibraryView: View {
 
     private var tabBar: some View {
         HStack(spacing: 4) {
-            tab("会议摘要", .summary); tab("逐句转录", .transcript)
+            tab("会议摘要", .summary); tab("逐句转录", .transcript); tab("向本场提问", .ask)
         }
         .padding(3)
         .background(pal.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -746,6 +751,179 @@ struct LibraryView: View {
     /// 转录行文本：查找时高亮命中片段。
     private func lineText(_ s: String) -> Text {
         (vm.findOpen && !vm.findQuery.isEmpty) ? highlightedText(s, query: vm.findQuery, pal: pal) : Text(s)
+    }
+
+    // MARK: 向本场提问 Tab
+
+    @ViewBuilder private func recAskTab(_ sel: RecordingSummary) -> some View {
+        let msgs = vm.recMsgs
+        VStack(alignment: .leading, spacing: 0) {
+            if !msgs.isEmpty {
+                HStack {
+                    Spacer()
+                    Button { vm.clearRecChat() } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.counterclockwise").font(.system(size: 11, weight: .semibold))
+                            Text("重置对话").font(.system(size: 11.5))
+                        }
+                        .foregroundStyle(pal.text3).padding(.horizontal, 9).frame(height: 26)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plainHit).hoverCursor().help("清空本场对话")
+                }
+                .padding(.top, 4)
+
+                VStack(alignment: .leading, spacing: 22) {
+                    ForEach(Array(msgs.enumerated()), id: \.element.id) { i, m in
+                        recMsgView(m, prev: i > 0 ? msgs[i - 1] : nil, isFirst: i == 0)
+                    }
+                }
+                .padding(.top, 14)
+            }
+
+            RecAskInputBar(pal: pal, busy: vm.recAskBusy, resetToken: sel.id) { vm.askRecording($0) }
+                .padding(.top, msgs.isEmpty ? 4 : 20)
+            Text("仅检索本场会议 · 本地模型生成，请核对引用。")
+                .font(.system(size: 11)).foregroundStyle(pal.text3)
+                .frame(maxWidth: .infinity, alignment: .center).padding(.top, 8)
+                .id("recAskBottom")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 18)
+    }
+
+    /// 本场对话单条消息（含会话时间分隔）。
+    @ViewBuilder private func recMsgView(_ m: LibraryModel.RecAskMsg, prev: LibraryModel.RecAskMsg?, isFirst: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let label = recDivider(m, prev: prev, isFirst: isFirst) {
+                HStack(spacing: 12) {
+                    Rectangle().fill(pal.border).frame(height: 1)
+                    Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text3).fixedSize()
+                    Rectangle().fill(pal.border).frame(height: 1)
+                }
+            }
+            if m.isUser {
+                HStack { Spacer(minLength: 50)
+                    Text(m.full).font(.system(size: 13.5)).foregroundStyle(.white).lineSpacing(2)
+                        .padding(.vertical, 10).padding(.horizontal, 14)
+                        .background(pal.accent, in: UnevenRoundedRectangle(topLeadingRadius: 14, bottomLeadingRadius: 14, bottomTrailingRadius: 4, topTrailingRadius: 14, style: .continuous))
+                        .frame(maxWidth: 460, alignment: .trailing)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 11) {
+                    ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.accentSoft)
+                        WaveMark(pal: pal, height: 10) }.frame(width: 26, height: 26)
+                    VStack(alignment: .leading, spacing: 0) { recAssistantBody(m) }
+                    Spacer(minLength: 30)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func recAssistantBody(_ m: LibraryModel.RecAskMsg) -> some View {
+        switch m.phase {
+        case .searching, .thinking:
+            HStack(spacing: 9) { Spinner(size: 14, color: pal.text2)
+                Text(m.phase == .searching ? "正在检索这场会议…" : "正在阅读相关片段…")
+                    .font(.system(size: 13)).foregroundStyle(pal.text2) }.frame(height: 22)
+        case .empty:
+            Text("这场会议的转录里没有直接相关的内容。换个更具体的说法，或切到「逐句转录」自己翻一翻。")
+                .font(.system(size: 13)).foregroundStyle(pal.text2).lineSpacing(3)
+                .padding(.horizontal, 14).padding(.vertical, 12)
+                .background(pal.inset, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.borderStrong))
+        case .answering:
+            Text(String(m.full.prefix(m.revealed)) + "▍")
+                .font(.system(size: 13.5)).foregroundStyle(pal.text).lineSpacing(4).textSelection(.enabled)
+        case .done:
+            SummaryMarkdown(text: m.full, pal: pal)
+            if !m.cites.isEmpty { recCitesView(m) }
+        }
+    }
+
+    private func recCitesView(_ m: LibraryModel.RecAskMsg) -> some View {
+        let open = vm.recCiteOpen.contains(m.id)
+        return VStack(alignment: .leading, spacing: 6) {
+            Button { withAnimation(.easeOut(duration: 0.14)) { vm.toggleRecCite(m.id) } } label: {
+                HStack(spacing: 5) {
+                    Text("本场引用 · \(m.cites.count)").font(.system(size: 10.5, weight: .semibold)).tracking(0.6).foregroundStyle(pal.text3)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(pal.text3).rotationEffect(.degrees(open ? 0 : -90))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plainHit).hoverCursor()
+            if open {
+                ForEach(m.cites) { c in
+                    Button { vm.openRecCite(time: c.time) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 7) {
+                                Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
+                                Spacer(minLength: 8)
+                                Text(mmss(c.time)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(pal.inset, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            }
+                            Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(3)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .card(pal, corner: 10)
+                    }
+                    .buttonStyle(.plainHit).hoverCursor()
+                }
+            }
+        }
+        .padding(.top, 13)
+    }
+
+    /// 会话分隔标签：首条显示时间；与上一条间隔 >20 分钟显示「继续对话 · 时间」。
+    private func recDivider(_ m: LibraryModel.RecAskMsg, prev: LibraryModel.RecAskMsg?, isFirst: Bool) -> String? {
+        guard m.isUser else { return nil }   // 只在每轮的用户提问前出现
+        if isFirst { return recMsgTime(m.ts) }
+        if let p = prev, m.ts.timeIntervalSince(p.ts) > 20 * 60 { return "继续对话 · \(recMsgTime(m.ts))" }
+        return nil
+    }
+    private func recMsgTime(_ d: Date) -> String {
+        let cal = Calendar.current
+        let f = DateFormatter(); f.locale = Locale(identifier: "zh_CN")
+        if cal.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+        if cal.isDateInYesterday(d) { f.dateFormat = "HH:mm"; return "昨天 \(f.string(from: d))" }
+        f.dateFormat = "M月d日 HH:mm"; return f.string(from: d)
+    }
+}
+
+// MARK: - 本场提问输入栏（本地 @State：键入不写 LibraryModel.@Published，不波及详情/转录）
+
+private struct RecAskInputBar: View {
+    let pal: Palette
+    let busy: Bool
+    let resetToken: String        // 切录音时变化 → 清空草稿
+    let onSend: (String) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    private var canSend: Bool { !busy && !text.trimmingCharacters(in: .whitespaces).isEmpty }
+    private func send() { guard canSend else { return }; let q = text; text = ""; onSend(q) }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            TextField("就这场会议提问…", text: $text)
+                .textFieldStyle(.plain).font(.system(size: 13.5)).foregroundStyle(pal.text)
+                .focused($focused).onSubmit(send).frame(height: 34)
+            Button(action: send) {
+                Image(systemName: "arrow.up").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(canSend ? .white : pal.text3)
+                    .frame(width: 34, height: 34)
+                    .background(canSend ? pal.accent : pal.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plainHit).hoverCursor().disabled(!canSend)
+        }
+        .padding(.leading, 15).padding(.trailing, 6).padding(.vertical, 6)
+        .background(pal.elev, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .stroke(pal.borderStrong, corner: 13)
+        .onChange(of: resetToken) { _, _ in text = "" }
     }
 }
 

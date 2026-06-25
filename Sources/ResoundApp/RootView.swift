@@ -45,6 +45,10 @@ struct RootView: View {
             if mounted.contains(.templates) { TemplatesView().pageVisible(app.page == .templates) }
             if mounted.contains(.settings) { SettingsView().pageVisible(app.page == .settings) }
         }
+        // 当前页必须挂载。关键：关主窗口→菜单栏重开会**重建 RootView**，`mounted` @State 复位成 [.ask]，
+        // 但 app.page(App 级 @StateObject 不重建)可能仍是 .library——此时 page 没「变化」故 onChange 不触发，
+        // 若不在 onAppear 补挂载，当前页就不渲染→内容区全白。
+        .onAppear { mounted.insert(app.page) }
         .onChange(of: app.page) { _, p in mounted.insert(p) }
     }
 

@@ -101,18 +101,27 @@ public final class MeetWatcher: @unchecked Sendable {
 
     /// 持续轮询，进入/离开会议时回调。requireMic=true 时需"会议室 URL + 麦克风占用"才算在通话。
     /// 一直跑到 Task 被取消。
-    public func watch(intervalSec: Double = 4, requireMic: Bool = true,
+    /// - endConfirmations: 连续多少次「非会议」才判定为结束（防抖）。Chrome 标签轮询偶发读不到 /
+    ///   麦克风瞬时释放会误判结束——自动停录依赖 `.ended`，误触发会把录音中途掐掉，故需连续确认。
+    public func watch(intervalSec: Double = 4, requireMic: Bool = true, endConfirmations: Int = 1,
                       onEvent: @escaping (Event) -> Void) async {
         var inMeeting = false
+        var inactiveStreak = 0
         while !Task.isCancelled {
             let meeting = chromeMeeting()
             let active = (meeting != nil) && (!requireMic || micInUse())
-            if active, !inMeeting {
-                inMeeting = true
-                onEvent(.started(url: meeting!.url, title: meeting!.title, micActive: micInUse()))
-            } else if !active, inMeeting {
-                inMeeting = false
-                onEvent(.ended)
+            if active {
+                inactiveStreak = 0
+                if !inMeeting {
+                    inMeeting = true
+                    onEvent(.started(url: meeting!.url, title: meeting!.title, micActive: micInUse()))
+                }
+            } else if inMeeting {
+                inactiveStreak += 1
+                if inactiveStreak >= max(1, endConfirmations) {
+                    inMeeting = false; inactiveStreak = 0
+                    onEvent(.ended)
+                }
             }
             try? await Task.sleep(nanoseconds: UInt64(intervalSec * 1_000_000_000))
         }

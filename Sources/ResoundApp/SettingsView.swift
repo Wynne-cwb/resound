@@ -143,8 +143,9 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 toggleRow("开机自启", "自动启动 Resound 并保持监听。", $vm.launchAtLogin, last: false)
                 toggleRow("常驻菜单栏", "始终可从 macOS 菜单栏访问。", $vm.menuBarResident, last: false)
-                toggleRow("自动检测会议", "会议开始时主动提示录音。", $vm.autoDetect, last: false)
-                toggleRow("显示录音提醒", "弹出检测提示，而不是静默录音。", $vm.showReminder, last: true)
+                toggleRow("自动检测会议", "检测到 Google Meet 会议时提示录音；关闭后不再检测。", $vm.autoDetect, last: false)
+                toggleRow("自动开始录音", "检测到会议直接开始录音，无需确认；关则弹窗询问。", $vm.autoStartRec, last: false)
+                toggleRow("自动停止录音", "会议结束直接停止并转写；关则弹「停止录音？」一键确认。", $vm.autoStopRec, last: true)
             }
             .background(pal.elev, in: RoundedRectangle(cornerRadius: 13, style: .continuous)).stroke(pal.border, corner: 13)
             .padding(.top, 18)

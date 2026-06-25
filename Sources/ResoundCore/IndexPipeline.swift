@@ -166,11 +166,12 @@ public struct IndexPipeline {
     public func search(query: String, indexPath: URL, topK: Int = 5, pool: Int = 40,
                        rerank: Bool = false, rerankModel: String? = nil,
                        rerankCandidates: Int = 15,
-                       dateRange: Index.DateRange? = nil) async throws -> [SearchHit] {
+                       dateRange: Index.DateRange? = nil,
+                       recordingId: String? = nil) async throws -> [SearchHit] {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         let qvec = try await EmbeddingClient(config: config).embedQuery(query)
-        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange)
-        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange)
+        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange, recordingId: recordingId)
+        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange, recordingId: recordingId)
         let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
         guard rerank else { return Array(fused.prefix(topK)) }
 
@@ -239,6 +240,18 @@ public struct IndexPipeline {
                                     rerank: true, dateRange: plan.dateRange)
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return AnswerResult(text: text, plan: plan, hits: hits, digestRecordings: [])
+    }
+
+    /// 「向本场提问」：检索严格限定在单条录音内 + 综合带引用。
+    /// 不走 QueryPlanner（单录音无需时间范围/digest 判定），直接 hybrid+rerank 后交 Synthesizer。
+    public func answerInRecording(question: String, recordingId: String, indexPath: URL,
+                                  topK: Int = 6, answerModel: String? = nil,
+                                  history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let hits = try await search(query: question, indexPath: indexPath, topK: topK,
+                                    rerank: true, recordingId: recordingId)
+        let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
+        return (text, hits)
     }
 
     private func digestAnswer(question: String, recs: [Index.RecordingRow], chat: ChatClient,

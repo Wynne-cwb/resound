@@ -1,7 +1,8 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
-> 最近更新：2026-06-25（开源化 Provider 配置一轮收尾：Settings 重设计 + 自定义下拉 + 转录校对设置 + **验证状态持久化(指纹)** + 侧栏 Library 启动计数 + README 更新；已 commit 待 push）
+> 最近更新：2026-06-25（会议自动起止录音：通用区加「自动开始/自动停止录音」对称双开关 + 起止一键弹窗 + 接线原 autodetect + watcher 防抖；另：「向本场提问」第三 Tab；修两个 keep-alive bug。均已编译打包启动，**未 commit**。详见 DECISIONS 同日各条）
+> 上一轮：开源化 Provider 配置收尾（Settings 重设计 + 自定义下拉 + 转录校对设置 + 验证状态持久化(指纹) + 侧栏 Library 启动计数 + README）——已 push
 
 ## 一句话现状
 

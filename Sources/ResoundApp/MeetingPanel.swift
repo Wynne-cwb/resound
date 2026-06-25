@@ -8,6 +8,8 @@ import Combine
 final class MeetingPanelController {
     static let shared = MeetingPanelController()
 
+    private enum Mode { case start, stop }
+    private var mode: Mode = .start
     private var panel: NSPanel?
     private var recorder: RecordingController?
     private var app: AppModel?
@@ -20,17 +22,24 @@ final class MeetingPanelController {
         configured = true
         self.recorder = recorder
         self.app = app
-        recorder.$phase
-            .receive(on: RunLoop.main)
-            .sink { [weak self] phase in
-                if case .meetingDetected = phase { self?.show() } else { self?.hide() }
-            }
-            .store(in: &cancellables)
+        // 开始弹窗(meetingDetected) 与 停止弹窗(promptStop) 共用此浮窗 → 两个状态都触发 refresh。
+        recorder.$phase.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refresh() }.store(in: &cancellables)
+        recorder.$promptStop.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refresh() }.store(in: &cancellables)
         // 主题切换时若正显示则重建样式
         app.$isDark
             .dropFirst()
             .sink { [weak self] _ in if self?.panel?.isVisible == true { self?.rebuildContent() } }
             .store(in: &cancellables)
+    }
+
+    /// 按当前录音状态决定显示「开始」/「停止」卡片或隐藏。
+    private func refresh() {
+        guard let recorder else { return }
+        if case .meetingDetected = recorder.phase { mode = .start; show() }
+        else if recorder.promptStop { mode = .stop; show() }
+        else { hide() }
     }
 
     private func show() {
@@ -60,11 +69,22 @@ final class MeetingPanelController {
 
     private func rebuildContent() {
         guard let panel, let recorder, let app else { return }
+        let title = recorder.meetingTitle?.trimmingCharacters(in: .whitespaces)
+        let isStop = (mode == .stop)
         let card = MeetingPopupCard(
             pal: .make(dark: app.isDark),
-            subtitle: recorder.meetingTitle ?? "现在开始录音吗？",
-            onStart: { [weak recorder] in recorder?.startRecording() },
-            onDismiss: { [weak recorder] in recorder?.ignorePrompt() })
+            headline: isStop ? "会议已结束" : "会议已开始",
+            subtitle: isStop ? "停止录音并转写吗？"
+                             : (title?.isEmpty == false ? title! : "现在开始录音吗？"),
+            primaryTitle: isStop ? "停止录音" : "开始录音",
+            secondaryTitle: isStop ? "继续录音" : "取消",
+            isStop: isStop,
+            onPrimary: { [weak recorder] in
+                isStop ? recorder?.confirmStopFromPrompt() : recorder?.startRecording(fromMeeting: true)
+            },
+            onSecondary: { [weak recorder] in
+                isStop ? recorder?.dismissStopPrompt() : recorder?.ignorePrompt()
+            })
             .fixedSize()
             .padding(.init(top: 14, leading: 14, bottom: 14, trailing: 14))   // 扁平无阴影,仅留屏幕边距
         let host = NSHostingView(rootView: card)
@@ -83,34 +103,41 @@ final class MeetingPanelController {
     }
 }
 
-/// 弹窗卡片（屏幕级浮窗与窗口内复用同一外观）。
+/// 弹窗卡片（屏幕级浮窗与窗口内复用同一外观）。开始/停止两态共用：
+/// 停止态主按钮用「录音红」以示区别，图标改为停止圆点。
 struct MeetingPopupCard: View {
     let pal: Palette
+    var headline: String = "会议已开始"
     var subtitle: String = "现在开始录音吗？"
-    let onStart: () -> Void
-    let onDismiss: () -> Void
+    var primaryTitle: String = "开始录音"
+    var secondaryTitle: String = "取消"
+    var isStop: Bool = false
+    let onPrimary: () -> Void
+    let onSecondary: () -> Void
+
+    private var primaryColor: Color { isStop ? pal.rec : pal.accent }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 13) {
                 SidebarLogo(pal: pal, size: 40)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("会议已开始").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
+                    Text(headline).font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
                     Text(subtitle).font(.system(size: 13)).foregroundStyle(pal.text2).lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: "bell").font(.system(size: 15, weight: .regular)).foregroundStyle(pal.text3)
+                Image(systemName: isStop ? "stop.circle" : "bell").font(.system(size: 15, weight: .regular)).foregroundStyle(pal.text3)
             }
             HStack(spacing: 10) {
-                Button(action: onDismiss) {
-                    Text("取消").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                Button(action: onSecondary) {
+                    Text(secondaryTitle).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
                         .frame(width: 100, height: 40)
                         .background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.borderStrong, corner: 10)
                 }.buttonStyle(.plainHit).hoverCursor()
-                Button(action: onStart) {
-                    Text("开始录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.white)
+                Button(action: onPrimary) {
+                    Text(primaryTitle).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.white)
                         .frame(maxWidth: .infinity).frame(height: 40)
-                        .background(pal.accent, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(primaryColor, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }.buttonStyle(.plainHit).hoverCursor()
             }
         }

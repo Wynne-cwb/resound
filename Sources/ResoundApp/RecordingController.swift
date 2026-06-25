@@ -17,6 +17,7 @@ final class RecordingController: ObservableObject {
     @Published var recSeconds = 0
     @Published var procStep = 0          // 0 转写 · 1 建立索引（说话人识别录完后由 Library 后台 worker 补）
     @Published var meetingTitle: String? // 检测到的会议名（取自 Chrome 标签标题），用作录音标题
+    @Published var promptStop = false     // 会议结束、未开自动停录时：弹「停止录音？」一键弹窗（录音仍在继续）
 
     /// toast 走 AppModel（全局），录音引擎只负责发消息。
     weak var app: AppModel?
@@ -27,6 +28,7 @@ final class RecordingController: ObservableObject {
 
     private var watchTask: Task<Void, Never>?
     private var recorder: MeetingRecorder?
+    private var recordingFromMeeting = false   // 当前录音是否由会议触发（决定会议结束时是否自动停）
     private var recTimer: Timer?
     private var recStart = Date()
 
@@ -41,21 +43,49 @@ final class RecordingController: ObservableObject {
         watching = true
         let watcher = MeetWatcher()
         watchTask = Task {
-            await watcher.watch(intervalSec: 5, requireMic: true) { [weak self] event in
+            // endConfirmations:2 → 连续两轮(~10s)都检测不到会议才判定结束，避免标签轮询/麦克风瞬时抖动误停录音。
+            await watcher.watch(intervalSec: 5, requireMic: true, endConfirmations: 2) { [weak self] event in
                 Task { @MainActor in
                     guard let self else { return }
                     switch event {
                     case .started(let url, let title, _):
                         if self.phase == .recording || self.phase == .processing { return }
+                        let d = UserDefaults.standard
+                        // 关了「自动检测会议」→ 既不提示也不录。
+                        guard d.object(forKey: Self.autoDetectKey) as? Bool ?? true else { return }
                         self.meetingTitle = title
-                        self.phase = .meetingDetected(url: url)
+                        // 开了「自动开始录音」→ 直接开录(无需确认)；否则弹检测提示由用户决定。
+                        if d.bool(forKey: Self.autoStartKey) {
+                            self.startRecording(fromMeeting: true)
+                        } else {
+                            self.phase = .meetingDetected(url: url)
+                        }
                     case .ended:
-                        if case .meetingDetected = self.phase { self.phase = .idle; self.meetingTitle = nil }
+                        if case .meetingDetected = self.phase {
+                            self.phase = .idle; self.meetingTitle = nil
+                        } else if self.phase == .recording, self.recordingFromMeeting {
+                            // 仅对「会议触发的录音」处理结束（手动录音不受影响）。
+                            if UserDefaults.standard.bool(forKey: Self.autoStopKey) {
+                                self.app?.toast("会议已结束，正在停止录音…")
+                                self.stopAndIngest()   // 自动停录 + 转写入库
+                            } else {
+                                self.promptStop = true   // 弹「停止录音？」一键弹窗，由用户决定
+                            }
+                        }
                     }
                 }
             }
         }
     }
+
+    /// 会议检测相关开关键（SettingsModel 写、这里读，始终取最新值）。
+    static let autoStartKey = "resound.toggle.autostart"
+    static let autoDetectKey = "resound.toggle.autodetect"
+    static let autoStopKey = "resound.toggle.autostop"
+
+    /// 停止录音弹窗：确认停止（停录+转写）/ 继续录音（关掉弹窗，录音继续）。
+    func confirmStopFromPrompt() { promptStop = false; stopAndIngest() }
+    func dismissStopPrompt() { promptStop = false }
 
     func stopWatching() { watchTask?.cancel(); watchTask = nil; watching = false }
 
@@ -70,9 +100,14 @@ final class RecordingController: ObservableObject {
 
     // MARK: 录音
 
-    func startRecording() {
+    /// 工具栏「录音」按钮：手动录音（与会议无关，会议结束不会自动停）。
+    func startRecording() { startRecording(fromMeeting: false) }
+
+    /// fromMeeting=true：由会议触发（弹窗确认或自动开始）→ 会议结束时自动停录。
+    func startRecording(fromMeeting: Bool) {
         let rec = MeetingRecorder()
         recorder = rec
+        recordingFromMeeting = fromMeeting
         phase = .recording
         recSeconds = 0
         recStart = Date()
@@ -92,6 +127,7 @@ final class RecordingController: ObservableObject {
     }
 
     func stopAndIngest() {
+        promptStop = false   // 停止弹窗若在显示则收起
         guard let rec = recorder else { phase = .idle; return }
         stopRecTimer()
         phase = .processing
@@ -138,8 +174,9 @@ final class RecordingController: ObservableObject {
                 let sum = loadRecordingSummary(dir: out.recordingDir)
                 await MainActor.run {
                     self.app?.toast("录音已转写并加入录音库")
-                    self.app?.reloadLibrary()
-                    if let sum { self.library?.enqueueSpeakerID(sum) }
+                    // 直接插入列表(内含 enqueueSpeakerID)，不只靠 reloadLibrary 的 token——见 LibraryModel.addRecorded。
+                    if let sum { self.library?.addRecorded(sum) }
+                    self.app?.reloadLibrary()   // 仍 bump：已挂载的 LibraryView 顺带全量刷新；幂等。
                     self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                 }
             } catch {

@@ -5,6 +5,54 @@
 
 ---
 
+## 会议自动开始/停止录音（对称双开关 + 起止弹窗）（2026-06-25）
+
+**需求**：①会议结束自动停录；②设置里加「会议开始自动开录」开关。追加：自动停录也做成开关，且**会议结束时弹「停止录音？」一键弹窗**（关掉自动停时）。
+
+**最终模型（对称）**——通用区两个新开关，行为左右对称：
+- **自动开始录音**（`resound.toggle.autostart`，默认关）：检测到会议→ON 直接开录 / OFF 弹「会议已开始」卡片由用户确认。
+- **自动停止录音**（`resound.toggle.autostop`，默认关）：会议结束→ON 直接停录+转写 / OFF 弹「会议已结束 · 停止录音？」一键卡片（录音继续，用户点「停止录音」才停）。
+- 顺手把原本**未接线**的「自动检测会议」(`autodetect`) 真正接上：`.started` 时若它为 false 则既不提示也不录。删掉原同样未接线、且与「自动开始」语义矛盾的「显示录音提醒」开关。
+
+**实现要点**：
+- `MeetWatcher.watch` 加 `endConfirmations`（连续 N 轮检测不到才判 `.ended`，默认 1；RecordingController 传 2≈10s）——Chrome 标签轮询/麦克风占用会瞬时抖动，自动停录依赖 `.ended`，误触发会把录音中途掐掉，故防抖。
+- `RecordingController`：`startRecording(fromMeeting:)` 标记录音是否会议触发（手动工具栏录音 `fromMeeting=false`，**会议结束不影响手动录音**）；保留零参 `startRecording()` 给工具栏按钮（避免方法引用 + 默认参数歧义）。新增 `@Published promptStop`（结束待确认）+ `confirmStopFromPrompt`/`dismissStopPrompt`。开关值用 `UserDefaults` 直接读（SettingsModel 写、Controller 读，始终最新，免耦合）。
+- `MeetingPanel`：浮窗改为同时订阅 `$phase` 与 `$promptStop`→`refresh()` 决定显示开始卡/停止卡/隐藏；`MeetingPopupCard` 泛化成 headline/subtitle/primary/secondary + `isStop`（停止态主按钮用录音红 `pal.rec` + stop 图标）。
+- **仅会议触发的录音**才会自动停/弹停止窗；停止弹窗出现时录音仍继续，点「继续录音」只关弹窗。
+
+**待验收**：①设置通用区出现「自动开始/自动停止录音」两开关；②开自动开始→进 Meet 自动开录；③开自动停止→离会自动停+转写；④关自动停止→离会弹「停止录音？」，点停止即停、点继续录音继续；⑤手动工具栏录音不被会议结束影响；⑥短暂网络/标签抖动不会误停（10s 防抖）。
+
+---
+
+## 「向本场提问」：录音详情新增第三 Tab，检索限定单条录音（2026-06-25）
+
+**需求**：用户想针对**某一条录音**做 Ask（不是全库）。Claude Design 出了设计稿（handoff `Resound-handoff (1).zip` → `Resound.dc.html`）。录音详情区从两个 Tab（会议摘要 / 逐句转录）增加第三个 **向本场提问**。
+
+**设计要点（照还原）**：空态只一个输入框「就这场会议提问…」+ 脚注「仅检索本场会议 · 本地模型生成，请核对引用。」；有对话时右上「重置对话」+ 消息流（用户右气泡、助手左带波形头像）+ loading 文案「正在检索这场会议… / 正在阅读相关片段…」+ 打字机光标 + 可折叠「本场引用 · N」（每条引用=说话人+时间+斜体原文，点击跳到逐句转录对应时间）；每轮用户提问前有时间分隔（首条显示时间、间隔>20min 显「继续对话 · 时间」）。
+
+**实现**：
+- **检索限定单录音**：`Index.vectorSearch/ftsSearch` 加 `recordingId: String?` 过滤（`and c.recording_id = ?`；vec 的 KNN 不支持前置过滤→限定时把候选放大到 4000 再过滤，同 dateRange 的处理）。`IndexPipeline.search` 透传 `recordingId`；新增 `answerInRecording(question:recordingId:…)`——**不走 QueryPlanner**（单录音无需时间范围/digest 判定），直接 hybrid+rerank→Synthesizer。
+- **持久化**：新增 [RecAskStore](../Sources/ResoundApp/RecAskStore.swift) 落盘 `~/Library/Application Support/Resound/rec-chats.json`，按 `recId` 分桶（切录音/重启各自保留，不进 vault）。与全局 Ask 的 `conversations.json` 分开。
+- **Model**：`LibraryModel` 加 `DetailTab.ask` + `RecAskMsg`/`RecCite` + `recChats[recId]`/`recAskBusy`/`recCiteOpen`；`askRecording`/`clearRecChat`/`toggleRecCite`/`openRecCite(time:)`（切到逐句转录+定位+跳播）；打字机 `recReveal` 计时器（同 ChatVM 节奏）；引用说话人用 `hit.personId ?? speakerAt(start)`（从已载入 lines 映射）；删录音连带删本场对话。
+- **View**：`recAskTab` + `recMsgView`/`recAssistantBody`/`recCitesView` + 文件作用域 `RecAskInputBar`（本地 @State，键入不写 LibraryModel.@Published、不波及详情）；detailScroll 在 `recMsgs.count` 变 / `recAskBusy` 转 false 时滚到底部锚点 `recAskBottom`。
+- 复用既有 `SummaryMarkdown`（done 富文本）、`WaveMark`/`Spinner`/`mmss`/`card`/`stroke` 等。
+
+**待验收**：①详情区出现第三 Tab，空态/有对话态视觉对；②就某条录音提问能返回**只基于该录音**的答案 + 本场引用，点引用跳到逐句转录对应时间；③切到别的录音是各自独立的对话、重启后仍在；④「重置对话」清空。
+
+---
+
+## 踩坑：录音后在 Library「找不到」——keep-alive 下 reloadLibrary token 丢失（2026-06-25）
+
+**现象**：用户录了一场会议、转录也成功，但 Library 里找不到。排查：磁盘 38 条录音、App 只显示 37，缺的正是最新这条（`2026-06-25-1002-os-migration-regroup...`，audio/transcript/diarization/summary/git 提交**全在**，`recording.yaml` 干净可解析、`listRecordings` 重扫必返回它）。即数据没丢，是**内存列表漏掉了**。
+
+**根因**：录音落库后 `RecordingController` 只 `app.reloadLibrary()` bump `libraryReloadToken`，靠 `LibraryView.onChange(of: token){ vm.refresh() }` 去重扫。但性能优化那轮把页面改成**懒挂载 + keep-alive**（[RootView](../Sources/ResoundApp/RootView.swift) 的 `mounted` 集合 + `pageVisible`）：录音时若用户还没进过 Library 页，LibraryView 没挂载 → `.onChange` 不存在 → token bump 直接丢；而 `.onAppear{ vm.load() }` 又幂等（`didInitialLoad` 只跑一次），切页回来也不再扫盘。于是这条永远进不了 `recordings`。**对比**：导入流程（`LibraryModel.ingestOne`）一直是直接 `insertRecording(sum)` 塞进数组、不依赖 token，故从不丢——录音流程没对齐这套，就是 bug。
+
+**修复**：新增 `LibraryModel.addRecorded(sum)`（= `insertRecording` + `enqueueSpeakerID`），`RecordingController` 成功分支改为直接 `library?.addRecorded(sum)`（仍保留 `reloadLibrary()` bump 给已挂载的 LibraryView 顺带全量刷新，幂等）。和导入同样稳，与 LibraryView 是否挂载无关。**老的那条**靠重启冷启动全量扫盘即恢复（已重启验证）。**教训**：keep-alive 懒挂载后，任何「靠某页 `.onChange`/`.onAppear` 才生效」的副作用都可能在该页未挂载时丢失——跨页状态更新应直接打到 model，别绕 view 的生命周期。
+
+**同源 bug（同日，紧接着发现）**：进 Library → 关主窗口 → 菜单栏重开 → 内容区**全白**。根因同样是 keep-alive 的 `mounted` @State：关窗再开会**重建 RootView**，`mounted` 复位成 `[.ask]`，但 `app.page`（App 级 @StateObject 不重建）仍是 `.library` → `mounted.contains(.library)` 为 false 故不渲染，而 `.ask` 又被 `pageVisible` 隐藏 → 啥都不显示。`.onChange(of: app.page)` 只在 page **变化**时插入，重开时 page 没变所以补不上。修复：`content` 加 `.onAppear { mounted.insert(app.page) }`，RootView 一出现就确保当前页在挂载集合里。**教训补充**：用 @State 缓存「挂载过哪些页」时要记住它会随 view 重建丢失，凡当前必须可见的状态都要在 onAppear 兜底重建。
+
+---
+
 ## Settings 重设计（Claude Design handoff 还原）（2026-06-25）
 
 **触发**：Settings 功能越堆越多、一条长滚动太挤。用户在 Claude Design 重做了设计稿（handoff zip：`Resound.dc.html`），让我还原。

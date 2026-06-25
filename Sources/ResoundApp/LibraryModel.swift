@@ -8,7 +8,25 @@ import ResoundCore
 final class LibraryModel: ObservableObject {
     weak var app: AppModel?
 
-    enum DetailTab { case summary, transcript }
+    enum DetailTab { case summary, transcript, ask }
+
+    /// 「向本场提问」的一条消息（绑定当前录音；持久化见 [RecAskStore]）。
+    struct RecAskMsg: Identifiable, Equatable {
+        enum Phase: Equatable { case searching, thinking, answering, done, empty }
+        let id: UUID
+        let isUser: Bool
+        var full: String
+        var revealed: Int
+        var phase: Phase
+        var cites: [RecCite]
+        let ts: Date
+    }
+    struct RecCite: Identifiable, Equatable {
+        let id = UUID()
+        let speaker: String
+        let time: Double        // 片段起点秒
+        let snippet: String
+    }
 
     /// id 用转录段自身的稳定 id（transcript.json 的 segment id），不再每次载入用新 UUID——
     /// 否则重载/识别完成后所有行身份全变 → SwiftUI 全量重建、丢滚动位置。Equatable 让 SwiftUI 能跳过未变的行。
@@ -100,6 +118,15 @@ final class LibraryModel: ObservableObject {
 
     // detail
     @Published var tab: DetailTab = .summary
+
+    // 「向本场提问」：按 recId 分桶的对话（切录音/重启都各自保留）
+    @Published var recChats: [String: [RecAskMsg]] = [:]
+    @Published var recAskBusy = false
+    @Published var recCiteOpen: Set<UUID> = []
+    private let recStore = RecAskStore()
+    private var recReveal: Timer?
+    /// 当前选中录音的本场对话。
+    var recMsgs: [RecAskMsg] { selectedId.flatMap { recChats[$0] } ?? [] }
     @Published var scrollToLine: Int?       // 引用跳转：详情载入后要滚动定位到的转录行（段 id）
     private var pendingCiteTime: Double?     // 引用带的时间点，等详情后台载入完再定位
     @Published var analyzingId: String?     // 正在识别说话人的录音 id（仅该条显示 loading，不影响其他）
@@ -179,6 +206,7 @@ final class LibraryModel: ObservableObject {
     func load() {
         guard !didInitialLoad else { return }
         didInitialLoad = true
+        loadRecChats()
         reload()
     }
 
@@ -234,6 +262,15 @@ final class LibraryModel: ObservableObject {
         arr.append(r)
         arr.sort { $0.recordedAt < $1.recordedAt }   // 升序：最新在末（列表最下）
         recordings = arr
+    }
+
+    /// 录音(会议)落库后登记进列表 + 排进说话人识别队列。**直接插入**而非靠 `app.reloadLibrary()` 的 token——
+    /// LibraryView 是懒挂载+keep-alive，录音时若没进过 Library 页则 `.onChange(libraryReloadToken)` 不存在、
+    /// token 会丢，且 `.onAppear{load()}` 幂等不会再扫盘 → 刚录的那条永远进不了列表（导入流程一直走 insertRecording
+    /// 故从不丢，录音流程之前却只 bump token，这就是「录完在 Library 找不到」的根因）。和导入对齐即稳。
+    func addRecorded(_ sum: RecordingSummary) {
+        insertRecording(sum)
+        enqueueSpeakerID(sum)
     }
 
     /// 后台识别说话人完成后，把该条的 identified 标志置真（列表「待识别」徽标即时消失，免重扫）。
@@ -644,6 +681,7 @@ final class LibraryModel: ObservableObject {
         try? deleteRecording(r)
         try? Index(path: defaultIndexPath(), dim: dim()).deleteRecording(id: id)
         deleteRecId = nil
+        if recChats[id] != nil { recChats[id] = nil; saveRecChats() }   // 连带删本场对话
         if selectedId == id { selectedId = nil }
         reload()
         app?.toast("录音已删除")
@@ -758,6 +796,119 @@ final class LibraryModel: ObservableObject {
                 autoPushVault("summary: \(rec.title)")
             } catch { app?.toast("生成摘要失败：\(error)") }
         }
+    }
+
+    // MARK: 向本场提问（检索限定单条录音）
+
+    func loadRecChats() {
+        recChats = recStore.load().mapValues { stored in
+            stored.map { s in
+                RecAskMsg(id: s.id, isUser: s.isUser, full: s.text, revealed: s.text.count,
+                          phase: .done, cites: s.cites.map { RecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet) },
+                          ts: s.ts)
+            }
+        }
+    }
+    private func saveRecChats() {
+        let map = recChats.mapValues { msgs in
+            msgs.filter { $0.isUser || $0.phase == .done }   // 进行中的不落盘
+                .map { StoredRecMsg(id: $0.id, isUser: $0.isUser, text: $0.full,
+                                    cites: $0.cites.map { StoredRecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet) }, ts: $0.ts) }
+        }
+        recStore.save(map)
+    }
+
+    func toggleRecCite(_ id: UUID) {
+        if recCiteOpen.contains(id) { recCiteOpen.remove(id) } else { recCiteOpen.insert(id) }
+    }
+
+    func clearRecChat() {
+        guard let rid = selectedId else { return }
+        recReveal?.invalidate()
+        recChats[rid] = []
+        recAskBusy = false
+        saveRecChats()
+    }
+
+    /// 当前录音的本场对话历史（喂 LLM 理解多轮指代；取最近 8 条已完成消息）。
+    private func recHistory(_ rid: String) -> [ChatTurn] {
+        (recChats[rid] ?? []).suffix(8).compactMap { m in
+            switch m.phase {
+            case .searching, .thinking: return nil
+            case .empty: return m.isUser ? ChatTurn(isUser: true, text: m.full) : ChatTurn(isUser: false, text: "（无相关内容）")
+            default: return m.full.isEmpty ? nil : ChatTurn(isUser: m.isUser, text: m.full)
+            }
+        }
+    }
+
+    /// 把片段起点秒映射成说话人名（用当前已载入的逐行 + diar 平滑结果）。
+    private func speakerAt(_ t: Double) -> String {
+        let hit = lines.first(where: { $0.start <= t && t < $0.end })
+            ?? lines.min(by: { abs(($0.start + $0.end)/2 - t) < abs(($1.start + $1.end)/2 - t) })
+        return hit?.speaker ?? "未知"
+    }
+
+    func askRecording(_ question: String) {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty, !recAskBusy, let rid = selectedId else { return }
+        let now = Date()
+        recAskBusy = true
+        var arr = recChats[rid] ?? []
+        arr.append(RecAskMsg(id: UUID(), isUser: true, full: q, revealed: q.count, phase: .done, cites: [], ts: now))
+        let aid = UUID()
+        arr.append(RecAskMsg(id: aid, isUser: false, full: "", revealed: 0, phase: .searching, cites: [], ts: now))
+        recChats[rid] = arr
+        let history = recHistory(rid)   // 含刚加的用户问题之前的上下文（已完成消息）
+        saveRecChats()
+
+        Task {
+            defer { recAskBusy = false; saveRecChats() }
+            do {
+                let cfg = try Config.load()
+                patchRec(rid, aid) { $0.phase = .thinking }
+                let r = try await IndexPipeline(config: cfg).answerInRecording(
+                    question: q, recordingId: rid, indexPath: defaultIndexPath(), history: history)
+                if r.hits.isEmpty {
+                    patchRec(rid, aid) { $0.phase = .empty; $0.revealed = 0 }
+                    return
+                }
+                let cites = r.hits.prefix(4).map { h in
+                    RecCite(speaker: h.personId ?? speakerAt(h.start), time: h.start, snippet: h.text)
+                }
+                patchRec(rid, aid) { $0.full = r.text; $0.cites = Array(cites) }
+                startRecReveal(rid, aid)
+            } catch {
+                patchRec(rid, aid) { $0.full = "出错：\(error.localizedDescription)"; $0.phase = .done; $0.revealed = 9999 }
+            }
+        }
+    }
+
+    private func startRecReveal(_ rid: String, _ aid: UUID) {
+        patchRec(rid, aid) { $0.phase = .answering }
+        recReveal?.invalidate()
+        recReveal = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] t in
+            Task { @MainActor in
+                guard let self, let arr = self.recChats[rid], let i = arr.firstIndex(where: { $0.id == aid }) else { t.invalidate(); return }
+                if self.recChats[rid]![i].revealed >= self.recChats[rid]![i].full.count {
+                    t.invalidate(); self.recChats[rid]![i].phase = .done; self.saveRecChats(); return
+                }
+                self.recChats[rid]![i].revealed = min(self.recChats[rid]![i].full.count, self.recChats[rid]![i].revealed + 3)
+            }
+        }
+    }
+
+    private func patchRec(_ rid: String, _ id: UUID, _ f: (inout RecAskMsg) -> Void) {
+        guard var arr = recChats[rid], let i = arr.firstIndex(where: { $0.id == id }) else { return }
+        f(&arr[i]); recChats[rid] = arr
+    }
+
+    /// 点本场引用：切到逐句转录、定位到该时间点并跳播。
+    func openRecCite(time: Double) {
+        tab = .transcript
+        let hit = lines.first(where: { $0.start <= time && time < $0.end })
+            ?? lines.min(by: { abs(($0.start + $0.end)/2 - time) < abs(($1.start + $1.end)/2 - time) })
+        scrollToLine = hit?.id
+        seek(to: time)
     }
 
     // MARK: 导入

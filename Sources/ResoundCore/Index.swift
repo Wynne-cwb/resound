@@ -288,36 +288,43 @@ public final class Index {
     /// 时间范围（含端点，本地 yyyy-MM-dd）。
     public typealias DateRange = (from: String, to: String)
 
-    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil) throws -> [SearchHit] {
-        // vec0 的 KNN 不支持前置过滤：带日期时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
-        let knnK = dateRange == nil ? k : max(k, 4000)
+    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil, recordingId: String? = nil) throws -> [SearchHit] {
+        // vec0 的 KNN 不支持前置过滤：带日期/限定录音时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
+        let filtered = dateRange != nil || recordingId != nil
+        let knnK = filtered ? max(k, 4000) : k
         let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
+        let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
         let sql = """
         select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id, c.recording_date
         from chunks_vec v join chunks c on c.id = v.rowid
-        where v.embedding match ? and k = \(knnK) \(dateClause) order by v.distance limit \(k)
+        where v.embedding match ? and k = \(knnK) \(dateClause) \(recClause) order by v.distance limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
-        bindText(st, 1, vectorJSON(normalize(queryVec)))
-        if let r = dateRange { bindText(st, 2, r.from); bindText(st, 3, r.to) }
+        var bi: Int32 = 1
+        bindText(st, bi, vectorJSON(normalize(queryVec))); bi += 1
+        if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
+        if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
         return readHits(st)
     }
 
-    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil) throws -> [SearchHit] {
+    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil, recordingId: String? = nil) throws -> [SearchHit] {
         let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "") + "\""
         let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
+        let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
         let sql = """
         select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id, c.recording_date
         from chunks_fts f join chunks c on c.id = f.rowid
-        where chunks_fts match ? \(dateClause) order by f.rank limit \(k)
+        where chunks_fts match ? \(dateClause) \(recClause) order by f.rank limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
-        bindText(st, 1, phrase)
-        if let r = dateRange { bindText(st, 2, r.from); bindText(st, 3, r.to) }
+        var bi: Int32 = 1
+        bindText(st, bi, phrase); bi += 1
+        if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
+        if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
         return readHits(st)
     }
 

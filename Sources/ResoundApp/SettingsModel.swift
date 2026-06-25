@@ -44,7 +44,10 @@ final class SettingsModel: ObservableObject {
     @Published var launchAtLogin: Bool { didSet { setBool(oldValue, launchAtLogin, "resound.toggle.launch") } }
     @Published var menuBarResident: Bool { didSet { setBool(oldValue, menuBarResident, "resound.toggle.menubar") } }
     @Published var autoDetect: Bool { didSet { setBool(oldValue, autoDetect, "resound.toggle.autodetect") } }
-    @Published var showReminder: Bool { didSet { setBool(oldValue, showReminder, "resound.toggle.reminder") } }
+    /// 检测到会议时自动开始录音（无需确认）。键与 RecordingController.autoStartKey 一致。
+    @Published var autoStartRec: Bool { didSet { setBool(oldValue, autoStartRec, "resound.toggle.autostart") } }
+    /// 会议结束时自动停止录音（无需确认）；关则弹「停止录音？」一键弹窗。键与 RecordingController.autoStopKey 一致。
+    @Published var autoStopRec: Bool { didSet { setBool(oldValue, autoStopRec, "resound.toggle.autostop") } }
 
     private static let defKey = "resound.defaultTemplate"
     let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}"]
@@ -55,7 +58,8 @@ final class SettingsModel: ObservableObject {
         launchAtLogin = d.object(forKey: "resound.toggle.launch") as? Bool ?? true
         menuBarResident = d.object(forKey: "resound.toggle.menubar") as? Bool ?? true
         autoDetect = d.object(forKey: "resound.toggle.autodetect") as? Bool ?? true
-        showReminder = d.object(forKey: "resound.toggle.reminder") as? Bool ?? true
+        autoStartRec = d.object(forKey: "resound.toggle.autostart") as? Bool ?? false   // 默认关：需用户显式开启自动录音
+        autoStopRec = d.object(forKey: "resound.toggle.autostop") as? Bool ?? false     // 默认关：结束时弹窗确认，不静默停
     }
 
     private func setBool(_ old: Bool, _ new: Bool, _ key: String) { UserDefaults.standard.set(new, forKey: key) }
