@@ -6,9 +6,11 @@ struct LibraryView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var vm: LibraryModel
     @EnvironmentObject var rec: RecordingController
+    @EnvironmentObject var documents: DocumentsModel
     @Environment(\.palette) var pal
     @State private var hoverId: String?
     @State private var hoverFolderId: String?
+    @State private var scrollRelatedToken = 0   // 摘要区「N 篇文档已纳入」提示 → 滚到上方「相关文档」卡
 
     var body: some View {
         let _ = Perf.body("LibraryView")
@@ -370,6 +372,7 @@ struct LibraryView: View {
                         .font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 5)
                         .textSelection(.enabled)
                     PlayerBar(vm: vm, playhead: vm.playhead, sel: sel, pal: pal).padding(.top, 22)
+                    relatedDocsCard(sel).padding(.top, 18).id("rs-related-docs")
                     tabBar.padding(.top, 24)
                     if vm.loadingDetail { detailLoadingCard }
                     else if vm.tab == .summary { summaryTab }
@@ -391,6 +394,7 @@ struct LibraryView: View {
             // 本场提问：新消息进来 / 回答结束时滚到底部，让回答可见
             .onChange(of: vm.recMsgs.count) { _, _ in if vm.tab == .ask { withAnimation { proxy.scrollTo("recAskBottom", anchor: .bottom) } } }
             .onChange(of: vm.recAskBusy) { _, b in if !b && vm.tab == .ask { withAnimation { proxy.scrollTo("recAskBottom", anchor: .bottom) } } }
+            .onChange(of: scrollRelatedToken) { _, _ in withAnimation { proxy.scrollTo("rs-related-docs", anchor: .top) } }
         }
     }
 
@@ -402,6 +406,57 @@ struct LibraryView: View {
             withAnimation { proxy.scrollTo(id, anchor: .center) }
             vm.scrollToLine = nil
         }
+    }
+
+    /// 录音详情「相关文档」区：反查关联到本场的文档，可点开、可「管理」（从录音侧选文档/导入）。
+    private func relatedDocsCard(_ sel: RecordingSummary) -> some View {
+        let docs = documents.relatedDocuments(forRecording: sel.id)
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text").font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.doc)
+                Text("相关文档 · \(docs.count)").font(.system(size: 13, weight: .bold)).foregroundStyle(pal.text)
+                Spacer()
+                Button { documents.openLinkFromRec(sel.id) } label: {
+                    HStack(spacing: 5) { Image(systemName: "plus").font(.system(size: 11, weight: .bold)); Text("管理").font(.system(size: 12, weight: .semibold)) }
+                        .foregroundStyle(pal.text).padding(.horizontal, 11).frame(height: 28)
+                        .background(pal.bg, in: RoundedRectangle(cornerRadius: 7, style: .continuous)).stroke(pal.borderStrong, corner: 7)
+                }.buttonStyle(.plainHit).hoverCursor()
+            }
+            .padding(.horizontal, 15).padding(.vertical, 12)
+            Rectangle().fill(pal.border).frame(height: 1)
+            if docs.isEmpty {
+                Text("没有关联到这场会议的文档。点「管理」把会前材料、纪要或 PRD 关联进来，它们会一起参与问答。")
+                    .font(.system(size: 12.5)).foregroundStyle(pal.text3).lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 15).padding(.vertical, 14)
+            } else {
+                ForEach(docs) { d in relatedDocRow(d) }
+            }
+        }
+        .card(pal, corner: 13)
+    }
+
+    private func relatedDocRow(_ d: DocumentSummary) -> some View {
+        Button { documents.select(d.id); app.page = .documents } label: {
+            HStack(spacing: 12) {
+                ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.docSoft)
+                    Image(systemName: "doc.text").font(.system(size: 14)).foregroundStyle(pal.doc) }.frame(width: 30, height: 30)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(d.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(d.sourceFormat.lowercased() == "txt" ? "纯文本" : "Markdown").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                        ForEach(d.tags.prefix(2), id: \.self) { t in
+                            Text(t).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(pal.doc)
+                                .padding(.horizontal, 7).padding(.vertical, 1).background(pal.docSoft, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        }
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text3)
+            }
+            .padding(.horizontal, 15).padding(.vertical, 11).contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
+        .overlay(alignment: .top) { Rectangle().fill(pal.border).frame(height: 1) }
     }
 
     private var detailLoadingCard: some View {
@@ -494,6 +549,7 @@ struct LibraryView: View {
                 .buttonStyle(.plainHit).hoverCursor()
             }
             .padding(.top, 18).zIndex(1)   // 让模板下拉浮在摘要卡之上
+            summaryDocsHint
             SummaryMarkdown(text: text, pal: pal, highlight: vm.findOpen ? vm.findQuery : "")
                 .equatable()   // 切页/折叠时 LibraryView.body 重跑也不重解析 Markdown
                 .padding(22).frame(maxWidth: .infinity, alignment: .leading).card(pal).padding(.top, 14)
@@ -513,11 +569,45 @@ struct LibraryView: View {
                     .buttonStyle(.plainHit).hoverCursor()
                 }
                 .padding(.top, 20)
+                summaryDocsHintPending.padding(.top, 14)
             }
             .frame(maxWidth: .infinity).padding(34)
             .background(pal.inset, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [5])).foregroundStyle(pal.borderStrong))
             .padding(.top, 18)
+        }
+    }
+
+    /// 本场关联文档数（实时由当前 links 推导）。
+    private var relatedDocCount: Int {
+        vm.selectedId.map { documents.relatedDocuments(forRecording: $0).count } ?? 0
+    }
+
+    /// 已生成摘要时：一行可点提示，点击滚动到上方「相关文档」卡。仅当本场有关联文档时显示。
+    @ViewBuilder private var summaryDocsHint: some View {
+        if relatedDocCount > 0 {
+            Button { scrollRelatedToken &+= 1 } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "doc.text").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.doc)
+                    Text("本场关联的 \(relatedDocCount) 篇文档已作为背景纳入").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                    Image(systemName: "chevron.up").font(.system(size: 9, weight: .bold)).foregroundStyle(pal.text3)
+                }
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(pal.docSoft, in: Capsule())
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plainHit).hoverCursor().help("点击查看本场关联的文档")
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12)
+        }
+    }
+
+    /// 未生成摘要时：空状态里提示「将纳入 N 篇关联文档作为背景」。
+    @ViewBuilder private var summaryDocsHintPending: some View {
+        if relatedDocCount > 0 {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.doc)
+                Text("将纳入本场关联的 \(relatedDocCount) 篇文档作为背景").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+            }
         }
     }
 

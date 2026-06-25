@@ -4,7 +4,7 @@ import Combine
 /// App 级状态：导航 / 主题 / 全局 toast / 录音库刷新令牌。录音引擎在 [RecordingController]。
 @MainActor
 final class AppModel: ObservableObject {
-    enum Page: String, CaseIterable, Identifiable { case ask, library, templates, settings; var id: String { rawValue } }
+    enum Page: String, CaseIterable, Identifiable { case ask, library, documents, templates, settings; var id: String { rawValue } }
 
     @Published var page: Page = .ask
     @Published var isDark: Bool { didSet { UserDefaults.standard.set(isDark, forKey: Self.themeKey); palette = .make(dark: isDark) } }

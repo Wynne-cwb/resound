@@ -82,6 +82,7 @@ final class LibraryModel: ObservableObject {
         var status: Status
         var error: String? = nil        // 失败原因（供 UI 显示 + 重试前清空）
         var source: String = "import"   // "import"（用户文件，原处可重导）/ "meeting"（录音兜底，url 是抢救出的音频）
+        var title: String? = nil        // 入库标题：会议兜底带会议名（否则重试会落回文件名 id）；导入留 nil 用 defaultTitle
         enum Status { case queued, transcribing, identifying, done, failed }
     }
 
@@ -931,7 +932,11 @@ final class LibraryModel: ObservableObject {
     /// 导入：立即入列 + 关闭弹窗，转写/索引/摘要全部放后台异步进行（适合批量迁移，不再卡等）。
     func startImport() {
         guard !importItems.isEmpty, vaultURL() != nil else { return }
-        let queued = importItems.map { ImportItem(url: $0.url, name: $0.name, status: .transcribing) }
+        let queued = importItems.map {
+            var it = ImportItem(url: $0.url, name: $0.name, status: .transcribing)
+            it.source = $0.source; it.title = $0.title   // 保留来源/标题，别在重建时丢
+            return it
+        }
         importItems = []; importOpen = false; importing = false
         pendingImports.append(contentsOf: queued)
         app?.toast("已加入 \(queued.count) 个文件，正在后台转写…")
@@ -954,7 +959,7 @@ final class LibraryModel: ObservableObject {
         setPendingStatus(p.id, .transcribing); setPendingError(p.id, nil)
         do {
             let out = try await IngestPipeline(vaultRoot: vault)
-                .ingest(audioPath: p.url, title: nil, source: p.source, tags: [],
+                .ingest(audioPath: p.url, title: p.title, source: p.source, tags: [],
                         model: "large-v3", language: "zh", hints: [], push: false)
             if let cfg {
                 // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
@@ -1006,6 +1011,7 @@ final class LibraryModel: ObservableObject {
         let name = (title?.isEmpty == false ? title! : safe.deletingPathExtension().lastPathComponent)
         var item = ImportItem(url: safe, name: name, status: .failed)
         item.error = error; item.source = "meeting"
+        item.title = (title?.isEmpty == false) ? title : nil   // 重试时把会议名传进 ingest，别落回文件名 id
         pendingImports.append(item)
         AppLog.log("⚠️ 录音转写失败，音频已抢救到：\(safe.path)")
     }

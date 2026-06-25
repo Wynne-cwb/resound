@@ -5,6 +5,92 @@
 
 ---
 
+## 文档 P3 增强：PDF/图片 OCR 提取后 LLM 排版整理（编译+CLI 实测，已重启待实机）（2026-06-25）
+
+**诉求**：用户传 PDF 后提取出文本但 markdown 排版乱（标题被拆成多行、每页重复 Notion 页眉页脚/页码、表格挤成一行）不可读。要在文本识别后用 LLM 保语义整理排版。
+
+**做了什么**：新增 [MarkdownTidier.swift](../Sources/ResoundCore/MarkdownTidier.swift)——`tidy()` 按行分批（≤4000 字/批、限并发 4）调 ChatClient 整理，严格 reflow prompt（保全部实质信息、删重复页眉页脚页码、合并拆行标题、重建 markdown 表格；禁改写/总结/翻译）；双重安全闸（单批输出<原 50% 回退该批 / 全局<原 50% 回退原文）+ 异常回退，**绝不丢内容**。`tidiedExtraction(result:config:model:)` 仅对 `sourceFormat ∈ {pdf,image}` 生效，接在 extractDocument 之后、写 content.md 之前（App `ingestFile` + CLI `import-doc` 共用）。新增 `.tidying`「整理排版中…」进度档；CLI `extract-doc --tidy [--model X]` 供无头调试。
+
+**关键决策与依据（含一次自我纠错）**：默认模型 = **`config.correctModel`（v4-flash）**，即用户原意「沿用转录校对那套」。
+- **踩坑+纠错**：我一度误判「flash 整理不动、必须上 pro」。真相是**第一次测 flash 用的是保守版 prompt**（"不准删任何内容+拿不准就原样保留" 与 "去页眉页脚" 自相矛盾→模型选择不动）。我随后**同时**改强 prompt 又换 pro，把功劳错记到模型上。用户质疑后**重新公平对比**：同一版强 prompt 下，**flash 连跑 3 次都能正确整理**（标题合并/删页眉页脚/重建表格，14243→~13.5k），与 pro 基本同档。**真正的杠杆是 prompt（给够"删噪声/合并/重建表"的明确授权），不是模型**。故默认回 flash；`--model`/`tidiedExtraction(model:)` 仍可覆盖成强模型。
+- **教训**：A/B 一次只改一个变量。同时改 prompt + 模型，把 prompt 的功劳错算给了模型，差点把默认模型钉错。
+
+**旧文档回溯**：tidy 只在导入时跑 → 上线前导入的旧文档不会自动整理。新增 CLI **`retidy-doc <docDir>`**（从 original.* 重提取→整理→重写 content.md→重建该文档索引）补这个缺口；已对用户那份 AfterShip OS doc 跑过（14243→13309、33 chunks 重建）。
+
+**取舍/残留**：分批拼回可能跨批标题层级略不一致（可接受）；flash 偶发一次性"原样回吐"过（多次未复现，安全闸不拦"原样"但不丢内容，重导即可）。
+
+---
+
+## 踩坑：会议录音转写失败重试后「丢会议名、id 变文件名」（已修，编译通过待实机）（2026-06-25）
+
+**现象**：用户报「录音本来拿 Google Meet 名字，转换后名字变了」。查真实 vault：有条 `source:meeting` 录音 `id=2026-06-25-1912-1782385867-resound-meeting-<uuid>`（文件夹名是抢救音频的临时文件名）而非会议名 slug，旁边还有条同会议、id 正常的 `…-platform-department-weekly-meeting`。
+
+**根因**：`LibraryModel.ingestOne`（导入/重试/会议失败兜底重试**共用**路径）**写死 `title: nil`** 调 `IngestPipeline.ingest` → `displayTitle` 落回 `defaultTitle(from: audioPath)` = 抢救音频文件名 `<ts>-resound-meeting-<uuid>`。而 `recordFailedRecording` 明明把会议名存进了 `ImportItem.name`（仅用于显示），却没传给 ingest。直录成功路径（`RecordingController.stopAndIngest` 直接调 ingest 带 title）不受影响——**仅"会议录音转写失败→重试"这条会中招**：重试后 title+id 都变成文件名乱码（用户多半事后手动 `renameRecording` 改回 title，故 manifest.title 看着对、但文件夹 id 仍是乱码）。
+
+**修复**：`ImportItem` 加独立 `title: String?`；`recordFailedRecording` 写 `item.title = 会议名`；`ingestOne` 改传 `title: p.title`；`startImport` 重建 ImportItem 时保留 `source/title`。普通文件导入仍 `title:nil` 走 `defaultTitle`（文件名去扩展名）——**零回归**。已坏的历史文件夹 id 不迁移（只是目录名，功能无碍）。
+
+**教训**：共用 ingest 辅助函数图省事写死 `title:nil`，把上游辛苦保留的标题在汇聚点丢了。多入口共用的辅助函数，**该透传的字段要透传到底**，别在中途硬编码默认值。
+
+---
+
+## 文档模块 P3：富格式解析（PDF/docx/pptx/HTML/图片）—— 自研零依赖（M1 CLI 验证全绿，M2 待实机）（2026-06-25）
+
+**背景/诉求**：导入只吃 md/txt；用户要导入真实会议材料（PDF/Word/PPT/HTML/图片含扫描件）。spec [specs/2026-06-25-documents-p3-rich-formats-design.md](superpowers/specs/2026-06-25-documents-p3-rich-formats-design.md) / 计划 [plans/…-p3-…-plan.md](superpowers/plans/2026-06-25-documents-p3-rich-formats-plan.md)。
+
+**关键决策与依据**：
+1. **选「自研零依赖」而非用库**。调研最优库 **SwiftText**（MIT，自带标题推断+表格、macOS 26 自动升级结构化 OCR），但它用 **Swift package traits（SE-0450）需 tools-version 6.1**；而升 6.1 要么升 macOS 15（Xcode 16.3 要求；用户在 14.5，**动静太大**），要么装独立 toolchain（build/打包要切 `TOOLCHAINS`、SwiftPM 无完整 Xcode 有小毛病）。用户原选「升级用库」，确认要升系统后改判 → **退回自研**。底层能力同源（都是 PDFKit/Vision），自研只多写标题推断/表格/mini-zip 代码，换来**零升级零依赖**，当前 Swift 6.0.3/macOS 14.5 直接可跑。`Package.swift` 不动、不加 SPM/C 依赖（系统框架 import 即自动链接）。
+2. **PDF 不直接 OCR**：数字版用 PDFKit `attributedString` 取文本+字号（字号/加粗→`#`/`##` 排版推断标题），**仅扫描件**（文本层近空）才渲染每页走 Vision OCR——直接 OCR 数字 PDF 反而丢真字、引识别错。
+3. **OCR 范围/语言**：图片必走 + 扫描型 PDF 回退；`recognitionLanguages=["zh-Hans","zh-Hant","en-US"]`、accurate。
+4. **mini-zip 用 Apple Compression 框架**：docx/pptx 是 zip+XML，手写 ~150 行最小 zip 读取器，`compression_decode_buffer(COMPRESSION_ZLIB)` 正好解 zip 条目的 raw deflate（Apple 的 COMPRESSION_ZLIB = 无头 raw deflate），**不 shell out、不加依赖**。
+5. **架构=单一入口 + 一处接入**：新增 `DocumentExtractor.extractDocument(url)→ExtractResult{markdown,sourceFormat,warnings}`（**失败不抛**，空正文+warnings，原件照常留档）；`DocumentStore.importDocument` 加 `originalFileURL`（拷贝真原件为 `original.<ext>`，nil 时与现状逐字节一致）；下游切块/embedding/检索/问答/纪要纳入**零改**。
+
+**做了什么**：新增 [DocumentExtractor.swift](../Sources/ResoundCore/DocumentExtractor.swift) + [MiniZip.swift](../Sources/ResoundCore/MiniZip.swift)；改 `Document.swift` importDocument；CLI `import-doc` 接 extractDocument + 新增 `extract-doc` 调试命令；App 侧 `importFiles/importFile/ingestFile`（后台 Task.detached 解析 + 真原件 + warnings→toast）、`DocImportItem.Status.parsing`、文件选择器 `docImportContentTypes()`。
+
+**踩坑**：①HTML 粗体正则 `<(?:strong|b)[^>]*>` 把 **`<body>`** 当成 `<b>`（b+"ody"）→ 开头多 `**`、错位。**对策**：标签名后须接 `>` 或 `\s` 属性（`<(?:strong|b)(?:\s[^>]*)?>`），同样修 h1-6/li/a。②自制测试 PDF（headless swift 渲染）PingFang 被替换成 Times → 中文标点落私用区乱码——**是造样例的副作用，非提取器问题**（真 Word/Pages PDF 正常），但提醒：测 PDF 解析要用真实/嵌字体 PDF。
+
+**验证**：CLI `extract-doc` 无头实测 md/txt/html/docx/pptx/pdf/png 全过（docx 表格、pptx 分页、pdf 字号标题、png OCR 均正确），broken.docx 兜底告警不崩，完整 `import-doc` 落 content.md + 真 original.pdf + 建索引全绿。**M2 App 仅编译验证**（用户录音中，未 `killall` 重建）。
+
+**未做/留后续**：macOS 26 的 Vision `RecognizeDocumentsRequest`（结构化表格/列表，以后 `#available` 接）；Excel；P4 在线源；内嵌图片图注 OCR。PDF 表格/多列在 14.5 受 PDFKit 文本层限制偏弱（已记取舍）。
+
+---
+
+## 文档模块 P2：纪要生成纳入关联文档（编译通过，待实机验收）（2026-06-25）
+
+**背景**：P1 把文档做成与录音平级的检索/问答来源后，用户的原始诉求「文档辅助 LLM 生成」进入 P2。经三轮澄清锁定**最小形态**：录音侧「会议摘要」生成时自动把本场关联文档当背景。spec [specs/2026-06-25-documents-p2-summary-with-docs-design.md](superpowers/specs/2026-06-25-documents-p2-summary-with-docs-design.md)。
+
+**三个定调决策**：①核心形态=增强现有录音侧纪要（非独立生成新文档）；②文档注入=**全文 + 字数上限兜底**（非检索式裁剪）；③可见性=**自动用 + 可见**（复用 P1 的「相关文档」卡 + 摘要区一行提示）。
+
+**做了什么**：
+- Core：`Document.swift` 加 `linkedDocumentTexts(vaultRoot:recordingId:)`（按 document.yaml.links 反查关联文档正文）；`Prompting` 加 `maxReferenceDocChars=16000`；`Summarizer` 加 `buildReferenceDocsBlock`（拼「参考文档」块，顶部消歧提示，超限边界截断+标注「已截断」/「其余 N 篇未纳入」）；`summarize(referenceDocs:)` 加 `{documents}` 占位符（模板含则用、不含但有文档则注入到 `{transcript}` 前——镜像现有 `{transcript}` 兜底）。
+- **关键决策：gather 放在 Core 的 `IndexPipeline.summarizeRecording`**（从 `config.vaultPath` 反查 + 传 referenceDocs），而非 App 各处——所有摘要触发路径（手动生成 / 重新生成 / 录音入库后自动摘要）**一处改、全路径生效**，比原 plan 的「App 侧 gather(T2.1)」更省更不易漏。
+- App：`LibraryView` 摘要区加可点提示「本场关联的 N 篇文档已作为背景纳入」（点击滚到上方「相关文档」卡，复用 ScrollViewReader + `id("rs-related-docs")`）；空状态加「将纳入 N 篇文档」提示。Templates 页占位符说明 + 插入 chip + `SummaryTemplate` 注释加 `{documents}`。README 双语 + STATE/DECISIONS 同步。
+
+**取舍**：
+1. **不持久化「本次实际用了哪几篇」**：提示由当前 links 实时推导，事后改关联会轻微不一致——可接受，省存储 schema。
+2. **全文+上限**而非检索式裁剪：会议文档多为中等体量，全文最忠实；检索式留作后续可选。
+3. **零回归是硬约束**：referenceDocs 为空时 `summarize` 组出的 prompt 与改动前逐字节一致（{documents} 不注入、replace 为 no-op）。
+4. **消歧提示**写进块顶（「文档是背景、请优先以转录为准，别当成会上说过的话」），降低 LLM 把文档内容误当作发言。
+
+**未做（仍留后续独立 spec）**：Documents 页独立「生成新文档」(手选多来源)、Ask 答案存成文档、P3 富格式、P4 在线源。
+
+**待实机验收**：①给录音关联文档→生成摘要应体现文档背景+提示出现；②无关联→同今天（零回归）；③超长文档→截断不崩；④模板手写 `{documents}`→位置正确。
+
+## 文档模块 P1 UI 接线落地（M3，App 编译通过）（2026-06-25）
+
+**做了什么（Wave 3，按用户的 Claude Design handoff 设计稿 `Resound.dc.html` 落地）**：
+- **主题/导航**：Theme 加 `doc`/`docSoft` 蓝色 token（浅 `#3f72b8` / 深 `#7aa7e0`，取自设计稿），与录音橙、警示色并列；`AppModel.Page` 加 `.documents`；RootView 主导航入口（侧栏 `doc.text` + 角标）、TopBar 标题、content 懒挂载常驻；ResoundApp 注入 `DocumentsModel` 并启动即 `load()`（录音详情「相关文档」反查依赖它，不能等进 Documents 页才加载）。
+- **文档主面** [DocumentsView.swift](../Sources/ResoundApp/DocumentsView.swift)：左列表（标题/导入按钮、搜索、标签筛选 chips、导入进度行、文档行带标签+日期+关联数、空态）；右详情（header+编辑/查看原件/删除、元数据标签、关联录音卡、tab=文档/向本文档提问）。正文用 `SummaryMarkdown` 渲染；「向本文档提问」镜像 recAskTab（打字机+本篇引用折叠）。
+- **导入/关联弹窗**（DocumentsView 内两个 struct，自带 @State 表单）：`DocImportModal`（选择文件/粘贴文本切换 + 标题 + 标签 chips）；`DocLinkPickerModal`（两模式 staged：fromDoc 选录音 / fromRec 选文档，复选 + 「完成」才落盘；fromRec 还有「导入新文档…」自动回关）。编辑/删除模态在 Overlays。
+- **关联双向**：DocumentsModel 重构 link picker 为 `LinkPickerMode{fromDoc,fromRec}` + `linkWorking` 工作集 + `applyDocLinks`/`applyRecLinks`（后者对受影响的每篇文档增删 `recording:<id>`）；`relatedDocuments(forRecording:)` 给录音详情反查。录音详情 [LibraryView.swift](../Sources/ResoundApp/LibraryView.swift) 加「相关文档」卡（PlayerBar 与 tabBar 之间）。
+- **Ask 跨源引用** [ChatView.swift](../Sources/ResoundApp/ChatView.swift)/[ChatStore.swift](../Sources/ResoundApp/ChatStore.swift)：`Cite` 加 `isDoc/docId/docTitle`（StoredCite 同步、缺省 false 向后兼容）；`ask()` 按 `hit.isDocument` 分流；MessageRow 引用卡分「🎙️录音(橙、点击跳录音)」「📄文档(蓝、点击跳文档)」；点文档引用→`DocumentsModel.openFromCite(docId:snippet:)` 切到 Documents、选中、正文 tab、`docHighlight` 在正文上方显示被引原文高亮卡。
+
+**取舍**：
+1. **正文渲染复用 MarkdownUI（`SummaryMarkdown`）**，不照搬设计稿的手写 markdown block 渲染器——保持全 App 一致、复用既有高质量渲染。代价：无法精确高亮「被引的那一段」，故文档引用跳转改为「正文上方一张高亮卡展示被引原文」，达成「看到被引内容」的意图。后续若要精确段落高亮需引入带 anchor 的 block 渲染器（留作 P 后续）。
+2. **DocumentsModel 启动即全量 `load()`**（不像 Library 的 prefetchCount 懒加载）——因为录音详情「相关文档」要随时反查，文档扫盘很轻（小 yaml），值得。
+3. **改关联不重 embedding**（沿用 M2 决策）；关联事实源是各 document.yaml 的 links，`doc_links` 表只是检索镜像。
+
+**待实机验收**：侧栏入口/角标、导入(文件+粘贴)→建索引→入列表、详情正文/编辑/删除/查看原件、关联双向(三入口)、全局 Ask 文档引用+跳转高亮、向本文档提问。
+
 ## 开源：repo 设为 public + 体检（2026-06-25）
 
 **做了**：把 `Wynne-cwb/resound` 设为公开前的安全体检 + 收尾。结论：代码与全部 git 历史**无任何 key/token 泄露**，`.env`/`*.sqlite`/`vaults/` 从未进过 git。处理项：①`experiments/diar-py/*.py` 写死的 `/Users/wb.chen/...` 绝对路径 → `os.path.dirname(__file__)`（不再泄露用户名）；②README 拆**英文为主双语**（[README.md](../README.md) + [README.zh-CN.md](../README.zh-CN.md)），顶部互切；③`.gitignore` 补 `__pycache__/`。**坑/取舍**：提交者邮箱（QQ）在全 commit 上，公开即永久——用户判断可接受，**不改写历史**（改写会变所有 SHA、收益低）。私有 vault repo `wayne-resound` 含个人数据，**不应在公开文档当模板**：删掉 README 的模板 TIP，改成「从零建自己 Vault」可复制脚手架；data-contract/DECISIONS/CLAUDE 里的具体引用泛化为 `<你>/my-resound-vault`（名字仍残留在旧 commit 历史里，但私有 repo 名≠访问权，无实际风险）。

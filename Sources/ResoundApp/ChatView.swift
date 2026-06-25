@@ -4,7 +4,12 @@ import ResoundCore
 /// 问答页：查询规划（时间）→ 检索/汇总 → 综合，答案带时间范围 + 可点来源。= CLI 的 ask。
 @MainActor
 final class ChatVM: ObservableObject {
-    struct Cite: Identifiable { let id = UUID(); let speaker: String; let meeting: String; let time: String; let snippet: String; let recId: String; let t: Double }
+    struct Cite: Identifiable {
+        let id = UUID()
+        let speaker: String; let meeting: String; let time: String; let snippet: String; let recId: String; let t: Double
+        // 文档来源（isDoc=true 时 speaker/meeting/time/recId 留空）
+        var isDoc = false; var docId: String? = nil; var docTitle: String? = nil
+    }
     struct Source: Identifiable { let id = UUID(); let title: String; let date: String; let recId: String }
     struct Msg: Identifiable {
         enum Phase { case searching, thinking, answering, done, empty, emptyTime }
@@ -61,9 +66,13 @@ final class ChatVM: ObservableObject {
                 } else if r.hits.isEmpty {
                     patch(aid) { $0.phase = (r.plan.dateRange != nil) ? .emptyTime : .empty; $0.timeRange = range }
                 } else {
-                    let cites = r.hits.prefix(6).map { h in
-                        Cite(speaker: h.personId ?? "未知", meeting: titles[h.recordingId] ?? h.recordingId,
-                             time: mmss(h.start), snippet: h.text, recId: h.recordingId, t: h.start)
+                    let cites = r.hits.prefix(6).map { h -> Cite in
+                        if h.isDocument {
+                            return Cite(speaker: "", meeting: "", time: "", snippet: h.text, recId: "", t: 0,
+                                        isDoc: true, docId: h.docId, docTitle: h.docTitle)
+                        }
+                        return Cite(speaker: h.personId ?? "未知", meeting: titles[h.recordingId] ?? h.recordingId,
+                                    time: mmss(h.start), snippet: h.text, recId: h.recordingId, t: h.start)
                     }
                     patch(aid) { $0.full = r.text; $0.timeRange = range; $0.cites = Array(cites) }
                     startReveal(aid)
@@ -104,7 +113,7 @@ final class ChatVM: ObservableObject {
             m.phase = .done
             m.timeRange = sm.timeRange
             m.isDigest = sm.isDigest
-            m.cites = sm.cites.map { Cite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t) }
+            m.cites = sm.cites.map { Cite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t, isDoc: $0.isDoc, docId: $0.docId, docTitle: $0.docTitle) }
             m.sources = sm.sources.map { Source(title: $0.title, date: $0.date, recId: $0.recId) }
             return m
         }
@@ -165,7 +174,7 @@ final class ChatVM: ObservableObject {
         }
         guard m.isUser || !text.isEmpty else { return nil }
         return StoredMsg(isUser: m.isUser, text: text, timeRange: m.timeRange, isDigest: m.isDigest,
-                         cites: m.cites.map { StoredCite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t) },
+                         cites: m.cites.map { StoredCite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t, isDoc: $0.isDoc, docId: $0.docId, docTitle: $0.docTitle) },
                          sources: m.sources.map { StoredSource(title: $0.title, date: $0.date, recId: $0.recId) })
     }
 
@@ -204,6 +213,7 @@ final class ChatVM: ObservableObject {
 struct ChatView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var library: LibraryModel
+    @EnvironmentObject var documents: DocumentsModel
     @EnvironmentObject var vm: ChatVM
     @Environment(\.palette) var pal
     @State private var hoverConvId: UUID?
@@ -239,7 +249,8 @@ struct ChatView: View {
                             ForEach(vm.msgs) { msg in
                                 MessageRow(pal: pal, msg: msg, expanded: expandedCites.contains(msg.id),
                                            onToggle: { toggleCite(msg.id) },
-                                           onOpenCite: { recId, t in library.openCitation(recId: recId, time: t); app.page = .library })
+                                           onOpenCite: { recId, t in library.openCitation(recId: recId, time: t); app.page = .library },
+                                           onOpenDoc: { docId, snippet in documents.openFromCite(docId: docId, snippet: snippet); app.page = .documents })
                                     .equatable().id(msg.id)
                             }
                         }
@@ -361,6 +372,7 @@ private struct MessageRow: View, Equatable {
     let expanded: Bool
     let onToggle: () -> Void
     let onOpenCite: (String, Double) -> Void
+    let onOpenDoc: (String, String) -> Void
 
     // 只比较影响渲染的值（忽略闭包）。msg.cites/sources 设定后不再变，比 count 足矣。
     static func == (a: MessageRow, b: MessageRow) -> Bool {
@@ -446,26 +458,49 @@ private struct MessageRow: View, Equatable {
             citeHeader("来源 · \(msg.cites.count)")
             if expanded {
                 ForEach(msg.cites) { c in
-                    Button { onOpenCite(c.recId, c.t) } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 7) {
-                                Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
-                                Text("·").foregroundStyle(pal.text3)
-                                Text(c.meeting).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
-                                Spacer(minLength: 8)
-                                Text(c.time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
-                            }
-                            Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 11).padding(.vertical, 8)
-                        .card(pal, corner: 9)
-                    }
-                    .buttonStyle(.plainHit).hoverCursor()
+                    if c.isDoc { docCite(c) } else { recCite(c) }
                 }
             }
         }
         .padding(.top, 12)
+    }
+
+    /// 录音引用卡（橙色调）。
+    private func recCite(_ c: ChatVM.Cite) -> some View {
+        Button { onOpenCite(c.recId, c.t) } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Label("录音", systemImage: "waveform").labelStyle(.titleAndIcon)
+                        .font(.system(size: 9.5, weight: .bold)).foregroundStyle(pal.accent)
+                        .padding(.horizontal, 6).padding(.vertical, 2).background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
+                    Text(c.meeting).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(c.time).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
+                }
+                Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 8).card(pal, corner: 9)
+        }.buttonStyle(.plainHit).hoverCursor()
+    }
+
+    /// 文档引用卡（蓝色调，点击跳转到该文档并高亮被引段落）。
+    private func docCite(_ c: ChatVM.Cite) -> some View {
+        Button { if let id = c.docId { onOpenDoc(id, c.snippet) } } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Label("文档", systemImage: "doc.text").labelStyle(.titleAndIcon)
+                        .font(.system(size: 9.5, weight: .bold)).foregroundStyle(pal.doc)
+                        .padding(.horizontal, 6).padding(.vertical, 2).background(pal.docSoft, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    Text(c.docTitle ?? c.docId ?? "未命名文档").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.doc).lineLimit(1)
+                    Spacer(minLength: 8)
+                }
+                Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 11).padding(.vertical, 8)
+            .background(pal.elev, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(pal.border, lineWidth: 1))
+        }.buttonStyle(.plainHit).hoverCursor()
     }
 
     private var sourcesView: some View {

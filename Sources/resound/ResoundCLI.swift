@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ImportDoc.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
     )
 }
 
@@ -436,12 +436,45 @@ struct Summarize: AsyncParsableCommand {
     }
 }
 
+/// resound extract-doc <file> —— 只解析富格式 → markdown，打印结果（无头调试，不建索引/不需配置）
+struct ExtractDoc: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "extract-doc",
+        abstract: "解析文档为 markdown 并打印（调试用；支持 pdf/docx/pptx/html/图片/md/txt）")
+
+    @Argument(help: "文档文件路径")
+    var file: String
+
+    @Flag(name: .long, help: "只打印元信息（格式/字数/告警），不打印正文")
+    var brief = false
+
+    @Flag(name: .long, help: "用快速模型整理排版（仅 PDF/图片生效，需配置 chat key）")
+    var tidy = false
+
+    @Option(name: .long, help: "整理排版用的模型（默认 correctModel；调试可指定更强模型）")
+    var model: String?
+
+    func run() async throws {
+        var r = extractDocument(url: URL(fileURLWithPath: file))
+        if tidy {
+            let before = r.markdown.count
+            r = await tidiedExtraction(r, config: try? Config.load(), model: model) { print($0) }
+            print("🪄 排版整理：\(before) → \(r.markdown.count) 字")
+        }
+        print("== 格式: \(r.sourceFormat) | 正文 \(r.markdown.count) 字 | 告警 \(r.warnings.count) 条 ==")
+        for w in r.warnings { print("⚠️ \(w)") }
+        if !brief {
+            print("---- markdown ----")
+            print(r.markdown)
+        }
+    }
+}
+
 /// resound import-doc <file> --vault <path> —— 导入文档并建索引（文档模块 P1）
 struct ImportDoc: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "import-doc",
-        abstract: "导入本地 md/txt 文档到 vault + 建索引（文档与录音一起参与问答）")
+        abstract: "导入本地文档到 vault + 建索引（md/txt/pdf/docx/pptx/html/图片，与录音一起参与问答）")
 
-    @Argument(help: "文档文件路径（.md / .txt）")
+    @Argument(help: "文档文件路径（.md/.txt/.pdf/.docx/.pptx/.html/图片）")
     var file: String
 
     @Option(name: .long, help: "vault 根目录")
@@ -466,8 +499,9 @@ struct ImportDoc: AsyncParsableCommand {
         let cfg = try Config.load()
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         let fileURL = URL(fileURLWithPath: file)
-        let text = try String(contentsOf: fileURL, encoding: .utf8)
-        let fmt = fileURL.pathExtension.lowercased() == "txt" ? "txt" : "markdown"
+        // PDF/图片 OCR 排版乱 → v4-flash 保语义整理（其它格式原样）
+        let result = await tidiedExtraction(extractDocument(url: fileURL), config: cfg) { print($0) }
+        for w in result.warnings { FileHandle.standardError.write(Data("⚠️ \(w)\n".utf8)) }
         let tagList = (tags ?? "").split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let links = link.map { "recording:\($0)" }
@@ -475,9 +509,43 @@ struct ImportDoc: AsyncParsableCommand {
 
         let store = DocumentStore(vaultRoot: URL(fileURLWithPath: vault))
         let (manifest, dir) = try store.importDocument(
-            title: titleArg, text: text, sourceFormat: fmt, tags: tagList, links: links)
-        print("📄 导入：\(manifest.id) → \(dir.path)")
+            title: titleArg, text: result.markdown, sourceFormat: result.sourceFormat,
+            tags: tagList, links: links, originalFileURL: fileURL)
+        print("📄 导入：\(manifest.id)（\(result.sourceFormat)，正文 \(result.markdown.count) 字）→ \(dir.path)")
         try await IndexPipeline(config: cfg).indexDocument(docDir: dir, indexPath: indexURL, enrichContext: context)
+    }
+}
+
+/// resound retidy-doc <docDir> —— 对已导入文档：从 original.* 重新提取+排版整理→重写 content.md→重建该文档索引
+/// （给 P3 排版整理上线前导入的旧文档补整理；只动这一篇，不碰其它）
+struct RetidyDoc: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "retidy-doc",
+        abstract: "重排版已导入文档（从原件重提取→LLM 整理→重写 content.md→重建索引）")
+
+    @Argument(help: "文档目录（含 document.yaml + original.<ext>）")
+    var dir: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Option(name: .long, help: "整理用模型（默认 correctModel）")
+    var model: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let docDir = URL(fileURLWithPath: dir)
+        let files = (try? FileManager.default.contentsOfDirectory(at: docDir, includingPropertiesForKeys: nil)) ?? []
+        guard let original = files.first(where: { $0.lastPathComponent.hasPrefix("original.") }) else {
+            throw ValidationError("该目录没有 original.<ext> 原件：\(docDir.path)")
+        }
+        let before = (try? String(contentsOf: docDir.appendingPathComponent("content.md"), encoding: .utf8))?.count ?? 0
+        let r = await tidiedExtraction(extractDocument(url: original), config: cfg, model: model) { print($0) }
+        for w in r.warnings { FileHandle.standardError.write(Data("⚠️ \(w)\n".utf8)) }
+        try r.markdown.data(using: .utf8)?.write(to: docDir.appendingPathComponent("content.md"))
+        print("📝 content.md：\(before) → \(r.markdown.count) 字")
+        try await IndexPipeline(config: cfg).indexDocument(
+            docDir: docDir, indexPath: index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath())
+        print("✅ 已重排版并重建索引：\(docDir.lastPathComponent)")
     }
 }
 

@@ -82,8 +82,16 @@ resound-vault/
 │           └── labels.json           # spk_N → person_id 映射（用户确认，最珍贵的事实）
 ├── notes/
 │   └── 2026-06-18-架构讨论.md         # 自由 markdown 笔记（带 frontmatter）
+├── documents/
+│   └── 2026/06/
+│       └── 2026-06-17-q3-prd/         # 一篇导入文档 = 一个文件夹，id 即文件夹名
+│           ├── document.yaml          # 文档元数据清单（人可编辑：标题/标签/关联）
+│           ├── content.md             # 归一化后的正文文本（检索/渲染用，事实源）
+│           └── original.md            # 原件留档（P1 与 content 同源；P3 起为真实原件 pdf/docx…）
 └── .gitignore
 ```
+
+> **documents/ vs notes/**：notes 是在 Resound 里手写的笔记；documents 是从外部**导入**的材料（会前 PRD、纪要、合规要求…）。两者平级、都进检索，但来源/生命周期不同，故分目录。
 
 设计决策：
 - **一次录音一个文件夹**：音频+转录+分段+标注内聚，整体可移动/删除，git diff 清晰。
@@ -245,6 +253,24 @@ links: [recording:2026-06-18-1430-standup] # 关联录音
 正文……
 ```
 
+### 3.9 `documents/**/document.yaml`（导入文档清单 —— resound.document/1）
+
+```yaml
+schema: resound.document/1
+id: 2026-06-17-q3-prd               # = 文件夹名（日期-slug，冲突追加序号）
+title: Q3 产品需求文档：说话人分离
+source_format: pdf                  # markdown | txt | pdf | docx | pptx | html | image
+imported_at: 2026-06-17T14:20:00+08:00
+tags: [产品, 路线图]
+links: [recording:2026-06-18-1430-standup]   # 关联录音（与 notes 同款 recording:<id> 前缀）
+```
+
+- 文档正文落 `content.md`（解析出的结构化 markdown，检索与渲染都读它），原件留 `original.<ext>`。
+  - **P3 富格式**：导入 pdf/docx/pptx/html/图片时，`DocumentExtractor` 全用 macOS 原生框架解析成 markdown（PDFKit 文本层+排版推断标题、扫描件/图片走 Vision OCR、docx/pptx 用 Compression mini-zip + XMLParser）。`original.<ext>` 此时是**真实原件二进制**（md/txt 与粘贴文本仍与 content 同源）。解析失败/空正文仍建文档 + 留档原件，由 UI/CLI warning 提示。
+  - **PDF/图片 OCR 排版整理**：这两类提取后排版乱，导入时再过一道 `MarkdownTidier`（默认快速模型 correctModel，保语义重排：合并拆行、删重复页眉页脚、重建表格），`content.md` 存的是整理后的版本。整理失败/异常一律回退原始提取文本（不丢内容）。仅作用于 pdf/image。旧文档可用 CLI `retidy-doc <docDir>` 就地补整理 + 重建索引。
+- `links` 是**关联的事实源**（双向关联两端都以此为准）；Index 的 `doc_links` 表只是它的检索镜像。改关联只重写本文件 + 刷镜像，**不重新 embedding**。
+- 文档无时间轴/说话人，故切块 `start/end=0`、不参与"时间范围"问答过滤；但和录音一样进全局检索/问答，引用区分 📄文档 / 🎙️录音。
+
 ---
 
 ## 4. Index（派生，本地，可重建）
@@ -257,12 +283,16 @@ SQLite 单文件，放 `~/Library/Application Support/Resound/index.sqlite`，**
 meta                 -- 索引级元信息（见下，对账用）
 people               -- 从 people.yaml 镜像
 recordings           -- 从 recording.yaml 镜像
+documents            -- 从 document.yaml 镜像（id, title, imported_at）
+doc_links            -- 文档↔录音关联镜像（doc_id, recording_id），事实源是 document.yaml.links
 speaker_embeddings   -- 声纹向量（sqlite-vec），由 audio + labels 重算
-chunks               -- 切块：text, context, person_id, recording_id, start, end, tags...
+chunks               -- 切块：text, context, source_kind('recording'|'document'), recording_id?, doc_id?, person_id, start, end, tags...
 chunks_fts           -- FTS5 全文索引（关键词路 / BM25）
 chunks_vec           -- sqlite-vec 向量表，dim=1024（向量路）
 enrichment_cache     -- LLM 派生缓存：key=hash(chunk+prompt+model) → context 文本
 ```
+
+> `chunks` 用 `source_kind` 区分录音/文档块（`addColumnIfMissing` 增量迁移，旧库默认 recording）；文档块 `recording_id` 为空、`doc_id` 指向 documents 表。检索/问答与录音同管线，引用按 `source_kind` 区分展示。
 
 ### `meta` 表内容（重建对账的核心）
 

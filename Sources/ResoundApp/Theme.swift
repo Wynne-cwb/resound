@@ -26,6 +26,7 @@ struct Palette: Equatable {
     let text, text2, text3: Color
     let border, borderStrong: Color
     let accent, accentSoft: Color
+    let doc, docSoft: Color
     let rec, recSoft: Color
     let ok, warn, warnSoft, warnBorder: Color
     let hover: Color
@@ -40,6 +41,7 @@ struct Palette: Equatable {
                 text: Color(hex: 0xf3f3f5), text2: Color(hex: 0xa4a4ac), text3: Color(hex: 0x6e6e78),
                 border: Color(hex: 0xffffff, alpha: 0.08), borderStrong: Color(hex: 0xffffff, alpha: 0.15),
                 accent: Color(hex: 0xe3a35f), accentSoft: Color(hex: 0xe3a35f, alpha: 0.18),
+                doc: Color(hex: 0x7aa7e0), docSoft: Color(hex: 0x7aa7e0, alpha: 0.16),
                 rec: Color(hex: 0xff6b54), recSoft: Color(hex: 0xff6b54, alpha: 0.16),
                 ok: Color(hex: 0x4cc38a), warn: Color(hex: 0xe8b34a),
                 warnSoft: Color(hex: 0xe8b34a, alpha: 0.16), warnBorder: Color(hex: 0xe8b34a, alpha: 0.30),
@@ -53,6 +55,7 @@ struct Palette: Equatable {
                 text: Color(hex: 0x1d1d1f), text2: Color(hex: 0x6b6b72), text3: Color(hex: 0x9c9ca3),
                 border: Color(hex: 0x000000, alpha: 0.075), borderStrong: Color(hex: 0x000000, alpha: 0.13),
                 accent: Color(hex: 0xe85f2c), accentSoft: Color(hex: 0xe85f2c, alpha: 0.10),
+                doc: Color(hex: 0x3f72b8), docSoft: Color(hex: 0x3f72b8, alpha: 0.10),
                 rec: Color(hex: 0xdd4b35), recSoft: Color(hex: 0xdd4b35, alpha: 0.10),
                 ok: Color(hex: 0x2e9e6b), warn: Color(hex: 0xbf8a1e),
                 warnSoft: Color(hex: 0xbf8a1e, alpha: 0.10), warnBorder: Color(hex: 0xbf8a1e, alpha: 0.25),

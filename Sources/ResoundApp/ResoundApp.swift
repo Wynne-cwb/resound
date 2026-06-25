@@ -7,6 +7,7 @@ struct ResoundApp: App {
     @StateObject private var app = AppModel()
     @StateObject private var recorder = RecordingController()
     @StateObject private var library = LibraryModel()
+    @StateObject private var documents = DocumentsModel()
     @StateObject private var settings = SettingsModel()
     @StateObject private var chat = ChatVM()
     @StateObject private var providers = ProvidersModel()
@@ -17,6 +18,7 @@ struct ResoundApp: App {
                 .environmentObject(app)
                 .environmentObject(recorder)
                 .environmentObject(library)
+                .environmentObject(documents)
                 .environmentObject(settings)
                 .environmentObject(chat)
                 .environmentObject(providers)
@@ -27,6 +29,8 @@ struct ResoundApp: App {
                     recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
                     library.app = app
                     library.prefetchCount()      // 侧栏 Library 角标即时正确，不等进 Library 全量加载
+                    documents.app = app
+                    documents.load()             // 文档列表启动即载入：侧栏角标 + 录音详情「相关文档」都依赖它
                     settings.app = app
                     providers.app = app
                     providers.load()             // 迁移旧 .env → providers.json；决定是否首启引导

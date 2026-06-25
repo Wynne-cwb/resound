@@ -50,7 +50,7 @@ final class SettingsModel: ObservableObject {
     @Published var autoStopRec: Bool { didSet { setBool(oldValue, autoStopRec, "resound.toggle.autostop") } }
 
     private static let defKey = "resound.defaultTemplate"
-    let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}"]
+    let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}", "{documents}"]
 
     init() {
         let d = UserDefaults.standard

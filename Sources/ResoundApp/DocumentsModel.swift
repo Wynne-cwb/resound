@@ -33,9 +33,9 @@ final class DocumentsModel: ObservableObject {
         var name: String
         var status: Status
         var error: String? = nil
-        enum Status { case indexing, done, failed }
+        enum Status { case parsing, tidying, indexing, done, failed }
     }
-    struct EditState: Identifiable { let id: String; var title: String; var tags: String }
+    struct EditState: Identifiable { let id: String; var title: String; var tags: [String]; var tagDraft = "" }
 
     // data
     @Published var documents: [DocumentSummary] = [] { didSet { documentCount = documents.count } }
@@ -45,6 +45,7 @@ final class DocumentsModel: ObservableObject {
     @Published var loadingDetail = false
     @Published var loadError: String?
     @Published var query = ""                  // 列表搜索（标题/标签）
+    @Published var tagFilter: String?          // 标签筛选（nil = 全部）
     @Published var tab: DetailTab = .content
 
     // 录音标题镜像（关联展示/选择器用）
@@ -61,9 +62,16 @@ final class DocumentsModel: ObservableObject {
     @Published var editState: EditState?
     @Published var deleteDocId: String?
 
-    // 关联录音选择器
-    @Published var linkPickerOpen = false
+    // 关联选择器（双向：从文档侧选录音 / 从录音侧选文档）。staged：编辑工作集，「完成」才落盘。
+    enum LinkPickerMode: Equatable { case fromDoc(docId: String); case fromRec(recId: String) }
+    struct LinkItem: Identifiable { let id: String; let title: String; let sub: String; let isDoc: Bool }
+    @Published var linkPicker: LinkPickerMode?
     @Published var linkPickerQuery = ""
+    @Published var linkWorking: Set<String> = []   // 工作集：录音 id（fromDoc）或文档 id（fromRec）
+    /// 经由 Ask 文档引用跳转过来时，高亮展示被引用的段落原文（轻量：内容上方一张高亮卡）。
+    @Published var docHighlight: String?
+    /// 从录音侧「导入新文档」进来时，导入成功后自动关联到该录音。
+    private var importPrefillRecId: String?
 
     // 向本文档提问（按 docId 分桶）
     @Published var docChats: [String: [DocAskMsg]] = [:]
@@ -138,8 +146,20 @@ final class DocumentsModel: ObservableObject {
     func select(_ id: String?) {
         selectedId = id
         tab = .content
-        linkPickerOpen = false
+        linkPicker = nil
+        docHighlight = nil
         refreshDetail()
+    }
+
+    /// 从 Ask 的文档引用跳转过来：选中该文档、切到正文 tab、高亮被引段落。
+    func openFromCite(docId: String, snippet: String) {
+        select(docId)
+        docHighlight = snippet
+    }
+
+    /// 选中文档关联的录音（id + 标题）；供录音侧「相关文档」反查。
+    func relatedDocuments(forRecording recId: String) -> [DocumentSummary] {
+        documents.filter { $0.linkedRecordingIds.contains(recId) }
     }
 
     private var detailToken = 0
@@ -161,43 +181,116 @@ final class DocumentsModel: ObservableObject {
         }
     }
 
-    /// 列表（按搜索过滤标题/标签）。
-    func filtered() -> [DocumentSummary] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return documents }
-        return documents.filter { d in
-            d.title.lowercased().contains(q) || d.tags.contains { $0.lowercased().contains(q) }
-        }
+    /// 所有标签去重（标签筛选条用），按出现频次降序。
+    var allTags: [String] {
+        var counts: [String: Int] = [:]
+        for d in documents { for t in d.tags { counts[t, default: 0] += 1 } }
+        return counts.keys.sorted { (counts[$0]!, $1) > (counts[$1]!, $0) }
     }
+
+    /// 列表（先标签筛选，再按搜索过滤标题/标签）。最新的排在最前。
+    func filtered() -> [DocumentSummary] {
+        var list = documents
+        if let tag = tagFilter { list = list.filter { $0.tags.contains(tag) } }
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if !q.isEmpty {
+            list = list.filter { d in
+                d.title.lowercased().contains(q) || d.tags.contains { $0.lowercased().contains(q) }
+            }
+        }
+        return list.reversed()   // documents 按 importedAt 升序；列表展示新→旧
+    }
+
+    /// 列表筛选标签（点同一个再点取消）。
+    func toggleTagFilter(_ tag: String) { tagFilter = (tagFilter == tag) ? nil : tag }
+
+    /// 列表空结果时，用于提示的当前筛选词。
+    var filterLabel: String { tagFilter ?? query }
 
     // MARK: 导入
 
     func openImport() { importItems = []; importOpen = true }
 
-    /// 选本地 md/txt 文件导入。
+    /// 取出并清空一次性的「导入后自动关联录音」预设。
+    private func consumePrefillLinks() -> [String] {
+        defer { importPrefillRecId = nil }
+        return importPrefillRecId.map { ["recording:\($0)"] } ?? []
+    }
+
+    /// 导入文件选择器支持的类型（md/txt/pdf/docx/pptx/html/图片）。openFilePicker 与导入弹窗共用。
+    func docImportContentTypes() -> [UTType] {
+        var types: [UTType] = [.plainText, .text, .pdf, .html, .image]
+        for ext in ["md", "markdown", "docx", "pptx"] {
+            if let t = UTType(filenameExtension: ext) { types.append(t) }
+        }
+        return types
+    }
+
+    /// 选本地文档导入（md/txt/pdf/docx/pptx/html/图片）。
     func openFilePicker() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        var types: [UTType] = [.plainText, .text]
-        if let md = UTType(filenameExtension: "md") { types.append(md) }
-        if let markdown = UTType(filenameExtension: "markdown") { types.append(markdown) }
-        panel.allowedContentTypes = types
+        panel.allowedContentTypes = docImportContentTypes()
         if panel.runModal() == .OK { importFiles(panel.urls) }
     }
 
-    /// 导入若干本地文件（写 vault + 建索引，逐个异步）。
+    /// 导入若干本地文件（先解析富格式 → 写 vault + 真原件 + 建索引，逐个异步）。
     func importFiles(_ urls: [URL]) {
         guard let vault = vaultURL() else { app?.toast("未设置录音库路径（去设置配置 vault）"); return }
+        guard !urls.isEmpty else { return }
         importOpen = false
-        for url in urls {
-            let item = DocImportItem(name: url.lastPathComponent, status: .indexing)
-            importItems.append(item)
-            let fmt = url.pathExtension.lowercased() == "txt" ? "txt" : "markdown"
-            let title = url.deletingPathExtension().lastPathComponent
-            Task { await ingest(itemId: item.id, vault: vault, title: title,
-                                text: (try? String(contentsOf: url, encoding: .utf8)) ?? "",
-                                sourceFormat: fmt, tags: [], links: []) }
+        app?.toast(urls.count == 1 ? "正在导入并解析「\(urls[0].lastPathComponent)」…" : "正在导入 \(urls.count) 个文档…")
+        let links = consumePrefillLinks()   // 多文件共用同一组预填关联
+        for url in urls { startFileImport(vault: vault, title: "", url: url, tags: [], links: links) }
+    }
+
+    /// 单文件导入（标题/标签来自导入弹窗）。
+    func importFile(title: String, url: URL, tags: [String]) {
+        guard let vault = vaultURL() else { app?.toast("未设置录音库路径（去设置配置 vault）"); return }
+        importOpen = false
+        app?.toast("正在导入并解析「\(url.lastPathComponent)」…")
+        startFileImport(vault: vault, title: title, url: url, tags: tags, links: consumePrefillLinks())
+    }
+
+    private func startFileImport(vault: URL, title: String, url: URL, tags: [String], links: [String]) {
+        let item = DocImportItem(name: url.lastPathComponent, status: .parsing)
+        importItems.append(item)
+        let resolved = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? url.deletingPathExtension().lastPathComponent : title
+        Task { await ingestFile(itemId: item.id, vault: vault, title: resolved, url: url, tags: tags, links: links) }
+    }
+
+    /// 富格式导入主流程：后台解析 → 写 vault（含真原件）→ 建索引。warnings 走 toast，文档照常建。
+    private func ingestFile(itemId: UUID, vault: URL, title: String, url: URL,
+                            tags: [String], links: [String]) async {
+        let raw = await Task.detached { extractDocument(url: url) }.value   // 解析/OCR 离开主线程
+        let cfgNow = cfg()
+        let willTidy = cfgNow != nil && (raw.sourceFormat == "pdf" || raw.sourceFormat == "image")
+            && !raw.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if willTidy { setImportStatus(itemId, .tidying) }
+        // PDF/图片 OCR 排版乱 → v4-flash 保语义整理成可读 markdown（其它格式原样返回）
+        let result = await tidiedExtraction(raw, config: cfgNow) { AppLog.log($0) }
+        setImportStatus(itemId, .indexing)
+        if let first = result.warnings.first { app?.toast("⚠️ \(first)（已导入，原件留档）") }
+        do {
+            let store = DocumentStore(vaultRoot: vault)
+            let (manifest, dir) = try store.importDocument(
+                title: title, text: result.markdown, sourceFormat: result.sourceFormat,
+                tags: tags, links: links, originalFileURL: url)
+            if let cfg = cfg() {
+                try await IndexPipeline(config: cfg).indexDocument(docDir: dir, indexPath: defaultIndexPath())
+            }
+            setImportStatus(itemId, .done)
+            autoPushVault("doc: 导入 \(manifest.title)")
+            if let sum = loadDocumentSummary(dir: dir) { insertDocument(sum); select(sum.id) }
+            importItems.removeAll { $0.id == itemId }
+            if result.warnings.isEmpty { app?.toast("📄 已加入文档「\(manifest.title)」") }
+        } catch {
+            AppLog.error("文档导入失败「\(title)」", error)
+            setImportStatus(itemId, .failed)
+            setImportError(itemId, String(describing: error))
+            app?.toast("❌ 文档导入失败「\(title)」：\(shortErr(error))")
         }
     }
 
@@ -209,8 +302,24 @@ final class DocumentsModel: ObservableObject {
         let name = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "粘贴的文档" : title
         let item = DocImportItem(name: name, status: .indexing)
         importItems.append(item)
+        app?.toast("正在导入文档…")
+        let effectiveLinks = links.isEmpty ? consumePrefillLinks() : links
         Task { await ingest(itemId: item.id, vault: vault, title: title, text: body,
-                            sourceFormat: "markdown", tags: tags, links: links) }
+                            sourceFormat: "markdown", tags: tags, links: effectiveLinks) }
+    }
+
+    /// 导入弹窗统一入口（标题 + 标签 + 来源已在 UI 收齐）。
+    func importComposed(title: String, text: String, sourceFormat: String, tags: [String]) {
+        guard let vault = vaultURL() else { app?.toast("未设置录音库路径（去设置配置 vault）"); return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { app?.toast("内容为空"); return }
+        importOpen = false
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "导入的文档" : title
+        let item = DocImportItem(name: name, status: .indexing)
+        importItems.append(item)
+        app?.toast("正在导入文档…")
+        let links = consumePrefillLinks()
+        Task { await ingest(itemId: item.id, vault: vault, title: title, text: text,
+                            sourceFormat: sourceFormat, tags: tags, links: links) }
     }
 
     private func ingest(itemId: UUID, vault: URL, title: String, text: String,
@@ -226,10 +335,12 @@ final class DocumentsModel: ObservableObject {
             autoPushVault("doc: 导入 \(manifest.title)")
             if let sum = loadDocumentSummary(dir: dir) { insertDocument(sum); select(sum.id) }
             importItems.removeAll { $0.id == itemId }   // 成功即从进度条移除
+            app?.toast("📄 已加入文档「\(manifest.title)」")
         } catch {
             AppLog.error("文档导入失败「\(title)」", error)
             setImportStatus(itemId, .failed)
             setImportError(itemId, String(describing: error))
+            app?.toast("❌ 文档导入失败「\(title)」：\(shortErr(error))")
         }
     }
 
@@ -247,15 +358,31 @@ final class DocumentsModel: ObservableObject {
     }
     func dismissImportItem(_ id: UUID) { importItems.removeAll { $0.id == id } }
 
+    /// 错误转 toast 用的短文案（截断，避免 toast 撑爆）。
+    private func shortErr(_ error: Error) -> String {
+        let s = (error as NSError).localizedDescription
+        return s.count > 60 ? String(s.prefix(60)) + "…" : s
+    }
+
     // MARK: 编辑元数据 / 删除
 
     func openEdit(_ id: String) {
         guard let d = documents.first(where: { $0.id == id }) else { return }
-        editState = EditState(id: id, title: d.title, tags: d.tags.joined(separator: ", "))
+        editState = EditState(id: id, title: d.title, tags: d.tags)
+    }
+    func addEditTag() {
+        guard var st = editState else { return }
+        let t = st.tagDraft.trimmingCharacters(in: .whitespaces)
+        if !t.isEmpty, !st.tags.contains(t) { st.tags.append(t) }
+        st.tagDraft = ""; editState = st
+    }
+    func removeEditTag(_ t: String) {
+        guard var st = editState else { return }
+        st.tags.removeAll { $0 == t }; editState = st
     }
     func saveEdit() {
         guard let st = editState, let d = documents.first(where: { $0.id == st.id }) else { return }
-        let tags = st.tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let tags = st.tags
         let title = st.title.trimmingCharacters(in: .whitespaces)
         editState = nil
         let dir = d.dir
@@ -280,29 +407,124 @@ final class DocumentsModel: ObservableObject {
 
     // MARK: 关联录音（双向；事实源 document.yaml，索引镜像 doc_links）
 
-    func addLink(_ recId: String) { setLinks(adding: recId) }
-    func removeLink(_ recId: String) { setLinks(removing: recId) }
-
-    private func setLinks(adding: String? = nil, removing: String? = nil) {
+    /// 文档详情里「关联录音」行内移除（即时落盘，作用于当前选中文档）。
+    func removeLink(_ recId: String) {
         guard let d = selected else { return }
-        var ids = d.linkedRecordingIds
-        if let a = adding, !ids.contains(a) { ids.append(a) }
-        if let r = removing { ids.removeAll { $0 == r } }
-        let links = ids.map { "recording:\($0)" }
-        let dir = d.dir; let id = d.id; let dd = dim()
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self else { return }
-            // 改关联只重写 yaml + 更新索引镜像（不重新 embedding）。
-            _ = try? DocumentStore(vaultRoot: dir.deletingLastPathComponent()).updateManifest(dir: dir, links: links)
-            try? Index(path: defaultIndexPath(), dim: dd).setDocLinks(docId: id, recordingIds: ids)
-            await MainActor.run { self.reload(reselect: id); self.autoPushVault("doc: 关联录音 \(id)") }
+        var ids = d.linkedRecordingIds; ids.removeAll { $0 == recId }
+        applyDocLinks(docId: d.id, dir: d.dir, recIds: ids)
+    }
+
+    // -- 选择器（两模式 staged）--
+
+    func openLinkFromDoc() {
+        guard let d = selected else { return }
+        linkPicker = .fromDoc(docId: d.id)
+        linkWorking = Set(d.linkedRecordingIds)
+        linkPickerQuery = ""
+    }
+    func openLinkFromRec(_ recId: String) {
+        linkPicker = .fromRec(recId: recId)
+        linkWorking = Set(relatedDocuments(forRecording: recId).map { $0.id })
+        linkPickerQuery = ""
+    }
+    func toggleLinkWorking(_ id: String) {
+        if linkWorking.contains(id) { linkWorking.remove(id) } else { linkWorking.insert(id) }
+    }
+    func cancelLinkPicker() { linkPicker = nil; linkWorking = []; linkPickerQuery = "" }
+    func saveLinkPicker() {
+        switch linkPicker {
+        case .fromDoc(let docId):
+            if let d = documents.first(where: { $0.id == docId }) {
+                applyDocLinks(docId: docId, dir: d.dir, recIds: Array(linkWorking))
+            }
+        case .fromRec(let recId):
+            applyRecLinks(recId: recId, docIds: linkWorking)
+        case nil: break
+        }
+        cancelLinkPicker()
+    }
+
+    var linkPickerTitle: String {
+        switch linkPicker { case .fromDoc: return "关联录音"; case .fromRec: return "关联文档"; case nil: return "" }
+    }
+    var linkPickerSubtitle: String {
+        switch linkPicker {
+        case .fromDoc: return "选择要和这篇文档关联的录音。关联后会一起参与问答，并出现在答案的引用里。"
+        case .fromRec: return "选择要和这场录音关联的文档，或导入一篇新文档。"
+        case nil: return ""
+        }
+    }
+    var linkPickerPlaceholder: String {
+        switch linkPicker { case .fromDoc: return "搜索录音…"; case .fromRec, nil: return "搜索文档…" }
+    }
+    var linkPickerShowImport: Bool { if case .fromRec = linkPicker { return true }; return false }
+
+    func linkPickerItems() -> [LinkItem] {
+        let q = linkPickerQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        switch linkPicker {
+        case .fromDoc:
+            return allRecordings
+                .filter { q.isEmpty || $0.title.lowercased().contains(q) }
+                .map { LinkItem(id: $0.id, title: $0.title, sub: "录音", isDoc: false) }
+        case .fromRec:
+            return documents
+                .filter { q.isEmpty || $0.title.lowercased().contains(q) || $0.tags.contains { $0.lowercased().contains(q) } }
+                .map { LinkItem(id: $0.id, title: $0.title, sub: $0.sourceFormat, isDoc: true) }
+        case nil:
+            return []
         }
     }
 
-    func recordingPickerCandidates() -> [(id: String, title: String)] {
-        let linked = Set(selected?.linkedRecordingIds ?? [])
-        let q = linkPickerQuery.trimmingCharacters(in: .whitespaces).lowercased()
-        return allRecordings.filter { !linked.contains($0.id) && (q.isEmpty || $0.title.lowercased().contains(q)) }
+    /// 从录音侧选择器点「导入新文档」：关掉选择器、打开导入，成功后自动关联回该录音。
+    func openImportForRec(_ recId: String) {
+        importPrefillRecId = recId
+        cancelLinkPicker()
+        openImport()
+    }
+
+    // -- 落盘 helper（改关联只重写 yaml + 更新索引镜像，不重新 embedding）--
+
+    /// 把某文档的关联录音整体设为 recIds。
+    private func applyDocLinks(docId: String, dir: URL, recIds: [String]) {
+        let links = recIds.map { "recording:\($0)" }
+        let dd = dim()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            _ = try? DocumentStore(vaultRoot: dir.deletingLastPathComponent()).updateManifest(dir: dir, links: links)
+            try? Index(path: defaultIndexPath(), dim: dd).setDocLinks(docId: docId, recordingIds: recIds)
+            await MainActor.run {
+                self.reload(reselect: self.selectedId == docId ? docId : self.selectedId)
+                self.autoPushVault("doc: 关联录音 \(docId)")
+            }
+        }
+    }
+
+    /// 让某录音的关联文档集恰好为 docIds（对每篇文档增删 recording:<recId>）。
+    private func applyRecLinks(recId: String, docIds: Set<String>) {
+        let dd = dim()
+        // 计算差异：需要含 recId 的文档 = docIds；当前已含的 = 反查。
+        let current = Set(relatedDocuments(forRecording: recId).map { $0.id })
+        let toAdd = docIds.subtracting(current)
+        let toRemove = current.subtracting(docIds)
+        let affected = toAdd.union(toRemove)
+        guard !affected.isEmpty else { return }
+        // 收集每篇受影响文档的目录与新关联集
+        let plan: [(id: String, dir: URL, recIds: [String])] = affected.compactMap { id in
+            guard let d = documents.first(where: { $0.id == id }) else { return nil }
+            var ids = d.linkedRecordingIds
+            if toAdd.contains(id), !ids.contains(recId) { ids.append(recId) }
+            if toRemove.contains(id) { ids.removeAll { $0 == recId } }
+            return (id, d.dir, ids)
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            for p in plan {
+                _ = try? DocumentStore(vaultRoot: p.dir.deletingLastPathComponent())
+                    .updateManifest(dir: p.dir, links: p.recIds.map { "recording:\($0)" })
+                try? Index(path: defaultIndexPath(), dim: dd).setDocLinks(docId: p.id, recordingIds: p.recIds)
+            }
+            await MainActor.run { self.reload(); self.autoPushVault("doc: 录音 \(recId) 关联文档") }
+        }
     }
 
     // MARK: 向本文档提问（检索限定单篇文档）

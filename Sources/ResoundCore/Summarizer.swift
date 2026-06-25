@@ -1,7 +1,8 @@
 import Foundation
 
 /// 一个可自定义的摘要模板：不同会议场景用不同 prompt（1-on-1 / 团队会 / 头脑风暴 / 通用）。
-/// prompt 支持占位符：{date} {weekday} {title} {speakers} {transcript}
+/// prompt 支持占位符：{date} {weekday} {title} {speakers} {transcript} {documents}
+/// {documents}=本场关联文档全文（作背景）；模板不写它、但本场有关联文档时，会自动注入到 {transcript} 之前。
 public struct SummaryTemplate: Codable, Identifiable, Hashable {
     public var id: String
     public var name: String
@@ -100,7 +101,34 @@ public struct SummaryTemplateStore {
     }
 }
 
-/// 生成会议摘要：把转录 + 录音时间（作锚点）+ 模板交给 LLM。
+/// 组装「参考文档」块（关联文档全文当背景）。总字数超 maxChars 在边界截断当前篇并标注，
+/// 其余篇不纳入并在块尾说明。空数组 → 返回空串。顶部带消歧提示（文档是背景、转录是主依据）。
+public func buildReferenceDocsBlock(_ docs: [(title: String, text: String)],
+                                    maxChars: Int = maxReferenceDocChars) -> String {
+    guard !docs.isEmpty else { return "" }
+    var out = "## 参考文档（仅作背景资料，纪要请优先以会议转录为准；不要把文档内容当成会上说过的话）\n"
+    var used = 0
+    var included = 0
+    var truncated = false
+    for doc in docs {
+        if used >= maxChars { break }
+        let remaining = maxChars - used
+        var body = doc.text
+        if body.count > remaining {
+            body = String(body.prefix(remaining)) + "\n（文档过长，已截断）"
+            truncated = true
+        }
+        out += "\n### \(doc.title)\n" + body + "\n"
+        used += doc.text.count
+        included += 1
+        if truncated { break }
+    }
+    let dropped = docs.count - included
+    if dropped > 0 { out += "\n（其余 \(dropped) 篇关联文档因长度上限未纳入）\n" }
+    return out
+}
+
+/// 生成会议摘要：把转录 + 录音时间（作锚点）+ 模板 + 关联文档（背景）交给 LLM。
 public struct Summarizer {
     let chat: ChatClient
     public init(chat: ChatClient) { self.chat = chat }
@@ -114,18 +142,29 @@ public struct Summarizer {
         }
     }
 
-    public func summarize(transcript: String, meta: Meta, template: SummaryTemplate) async throws -> String {
+    public func summarize(transcript: String, meta: Meta, template: SummaryTemplate,
+                          referenceDocs: [(title: String, text: String)] = []) async throws -> String {
         let date = localDate(fromISO: meta.recordedAt) ?? String(meta.recordedAt.prefix(10))
         let weekday = weekdayZh(fromISO: meta.recordedAt) ?? ""
         let speakers = meta.speakers.isEmpty ? "未知" : meta.speakers.joined(separator: "、")
+        let docsBlock = buildReferenceDocsBlock(referenceDocs)
         // 兜底：模板没有 {transcript} 占位符则补一段，确保转录一定被填进去（否则 AI 会反问「请提供原文」）
         var promptText = template.prompt
         if !promptText.contains("{transcript}") { promptText += "\n\n转录：\n{transcript}" }
+        // 关联文档：模板含 {documents} 用它；不含但本场有关联文档 → 自动注入到 {transcript} 之前（镜像 {transcript} 兜底）。
+        if !promptText.contains("{documents}"), !docsBlock.isEmpty {
+            if let r = promptText.range(of: "{transcript}") {
+                promptText.replaceSubrange(r, with: "{documents}\n\n{transcript}")
+            } else {
+                promptText += "\n\n{documents}"
+            }
+        }
         let filled = promptText
             .replacingOccurrences(of: "{date}", with: date)
             .replacingOccurrences(of: "{weekday}", with: weekday)
             .replacingOccurrences(of: "{title}", with: meta.title.isEmpty ? "（无标题）" : meta.title)
             .replacingOccurrences(of: "{speakers}", with: speakers)
+            .replacingOccurrences(of: "{documents}", with: docsBlock)
             .replacingOccurrences(of: "{transcript}", with: transcript)
         return try await chat.complete(
             system: """

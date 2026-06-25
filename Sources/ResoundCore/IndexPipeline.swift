@@ -259,11 +259,15 @@ public struct IndexPipeline {
             speakers = Array(Set(diar.map { $0.speaker })).filter { $0 != "?" }.sorted()
         }
         let tmpl = SummaryTemplateStore.template(id: templateId)
+        // 关联文档当背景：从 vault 反查本场关联的文档全文（P2）。无关联 / 无 vault 路径 → 空数组，行为同现状。
+        let refDocs = config.vaultPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+            .map { linkedDocumentTexts(vaultRoot: $0, recordingId: manifest.id) } ?? []
+        if !refDocs.isEmpty { log("📎 纳入 \(refDocs.count) 篇关联文档作为背景") }
         log("📝 生成摘要（模板：\(tmpl.name)）…")
         let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel))
             .summarize(transcript: transcriptText,
                        meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers),
-                       template: tmpl)
+                       template: tmpl, referenceDocs: refDocs)
         try summary.data(using: .utf8)?.write(to: recDir.appendingPathComponent("summary.md"))
         if let indexPath {
             let idx = try Index(path: indexPath, dim: config.embeddingDim)

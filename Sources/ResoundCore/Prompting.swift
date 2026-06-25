@@ -10,6 +10,10 @@ public let zhWritingStyle = """
 与中文标点（，。、；：）相邻处也不加空格。
 """
 
+/// 生成纪要时「参考文档」块的总字数上限（关联文档全文注入，超出按边界截断并标注）。
+/// 取相对宽松值（约几 k token），覆盖 PRD/议程/纪要这类中等体量文档；后续可设为可配。
+public let maxReferenceDocChars = 16000
+
 /// 问答用的「今天」锚点：让综合/汇总回答涉及相对时间时不臆测年份。
 public func todayAnchor(_ now: Date = Date()) -> String {
     "今天是 \(localDate(now))（\(weekdayZh(now))）。回答涉及「最近 / 今年 / 上周 / 这个季度」等相对时间时以此为基准，不要自行假设或编造年份。"

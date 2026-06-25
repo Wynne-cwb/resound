@@ -6,6 +6,7 @@ struct OverlayHost: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var rec: RecordingController
     @EnvironmentObject var library: LibraryModel
+    @EnvironmentObject var documents: DocumentsModel
     @EnvironmentObject var settings: SettingsModel
     @EnvironmentObject var chat: ChatVM
     @Environment(\.palette) var pal
@@ -24,6 +25,10 @@ struct OverlayHost: View {
             folderDeleteModal
             sessionRenameModal
             sessionDeleteModal
+            if documents.importOpen { DocImportModal() }
+            if documents.linkPicker != nil { DocLinkPickerModal() }
+            docEditModal
+            docDeleteModal
             toast
         }
         .animation(.easeOut(duration: 0.16), value: app.toastText)
@@ -358,6 +363,55 @@ struct OverlayHost: View {
                             confirm: "删除", onCancel: { library.confirmDeleteFolderId = nil }, onConfirm: { library.confirmDeleteFolder() })
             }
         }
+    }
+
+    // MARK: 文档：编辑信息 / 删除确认
+
+    @ViewBuilder private var docEditModal: some View {
+        if documents.editState != nil {
+            ModalScrim(pal: pal, onClose: { documents.editState = nil }) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("编辑文档信息").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
+                    fieldLabel("标题").padding(.top, 18)
+                    TextField("文档标题", text: Binding(get: { documents.editState?.title ?? "" }, set: { documents.editState?.title = $0 }))
+                        .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(pal.text)
+                        .padding(.horizontal, 13).frame(height: 40).background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.borderStrong, corner: 10).padding(.top, 7)
+                    fieldLabel("标签").padding(.top, 16)
+                    if let tags = documents.editState?.tags, !tags.isEmpty {
+                        FlowLayout(spacing: 7) { ForEach(tags, id: \.self) { docTagChip($0) { documents.removeEditTag($0) } } }.padding(.top, 8)
+                    }
+                    HStack(spacing: 8) {
+                        TextField("输入标签，回车添加", text: Binding(get: { documents.editState?.tagDraft ?? "" }, set: { documents.editState?.tagDraft = $0 }))
+                            .textFieldStyle(.plain).font(.system(size: 13.5)).foregroundStyle(pal.text)
+                            .padding(.horizontal, 12).frame(height: 38).background(pal.bg, in: RoundedRectangle(cornerRadius: 9, style: .continuous)).stroke(pal.borderStrong, corner: 9)
+                            .onSubmit { documents.addEditTag() }
+                        secondaryBtn("添加") { documents.addEditTag() }
+                    }.padding(.top, 8)
+                    HStack(spacing: 9) { Spacer(); secondaryBtn("取消") { documents.editState = nil }; primaryBtn("保存") { documents.saveEdit() } }.padding(.top, 22)
+                }
+                .frame(width: 440)
+            }
+        }
+    }
+
+    @ViewBuilder private var docDeleteModal: some View {
+        if let id = documents.deleteDocId {
+            let name = documents.documents.first { $0.id == id }?.title ?? "该文档"
+            ModalScrim(pal: pal, onClose: { documents.deleteDocId = nil }) {
+                confirmCard(title: "删除文档？",
+                            message: AttributedString(name) + AttributedString(" 及其索引将被永久删除，并从全局问答中移除。与它关联的录音不受影响。"),
+                            confirm: "删除", onCancel: { documents.deleteDocId = nil }, onConfirm: { documents.confirmDelete() })
+            }
+        }
+    }
+
+    func docTagChip(_ t: String, onRemove: @escaping (String) -> Void) -> some View {
+        HStack(spacing: 7) {
+            Text(t).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.doc)
+            Button { onRemove(t) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundStyle(pal.doc).frame(width: 15, height: 15) }.buttonStyle(.plainHit).hoverCursor()
+        }
+        .padding(.leading, 11).padding(.trailing, 5).padding(.vertical, 4)
+        .background(pal.docSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // MARK: toast

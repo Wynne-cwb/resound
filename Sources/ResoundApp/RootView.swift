@@ -42,6 +42,7 @@ struct RootView: View {
         ZStack {
             if mounted.contains(.ask) { ChatView().pageVisible(app.page == .ask) }
             if mounted.contains(.library) { LibraryView().pageVisible(app.page == .library) }
+            if mounted.contains(.documents) { DocumentsView().pageVisible(app.page == .documents) }
             if mounted.contains(.templates) { TemplatesView().pageVisible(app.page == .templates) }
             if mounted.contains(.settings) { SettingsView().pageVisible(app.page == .settings) }
         }
@@ -86,6 +87,7 @@ struct TopBar: View {
     private var title: String {
         switch app.page {
         case .ask: return "Ask Resound"; case .library: return "Library"
+        case .documents: return "Documents"
         case .templates: return "Templates"; case .settings: return "Settings"
         }
     }
@@ -232,6 +234,7 @@ struct PulseDot: View {
 struct Sidebar: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var library: LibraryModel
+    @EnvironmentObject var documents: DocumentsModel
     @EnvironmentObject var settings: SettingsModel
     @Environment(\.palette) var pal
 
@@ -255,6 +258,7 @@ struct Sidebar: View {
             VStack(spacing: collapsed ? 6 : 2) {
                 navRow(.ask, "Ask Resound", "bubble.left")
                 navRow(.library, "Library", "waveform", trailingCount: library.recordingCount)
+                navRow(.documents, "Documents", "doc.text", trailingCount: documents.documentCount)
                 navRow(.templates, "Templates", "square.grid.2x2", trailingCount: settings.templates.count)
                 navRow(.settings, "Settings", "slider.horizontal.3", attn: settings.needsAttention)
             }

@@ -31,7 +31,8 @@ struct TemplatesView: View {
                 Text("摘要模板").font(.system(size: 22, weight: .bold)).foregroundStyle(pal.text)
                 (Text("为不同类型的会议预设结构与侧重。生成摘要时选择对应模板，即可得到贴合场景的纪要。提示词支持占位符 ")
                     .foregroundStyle(pal.text2)
-                 + Text("{date} {title} {speakers} {transcript}").font(.system(size: 12, design: .monospaced)).foregroundStyle(pal.text))
+                 + Text("{date} {title} {speakers} {transcript} {documents}").font(.system(size: 12, design: .monospaced)).foregroundStyle(pal.text)
+                 + Text("（{documents}=本场关联文档，不写也会在有关联文档时自动作为背景纳入）").foregroundStyle(pal.text3))
                     .font(.system(size: 13)).lineSpacing(3).frame(maxWidth: 580, alignment: .leading)
             }
             Spacer(minLength: 12)

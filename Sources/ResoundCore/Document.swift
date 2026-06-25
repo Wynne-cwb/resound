@@ -113,6 +113,18 @@ public func listDocuments(vaultRoot: URL) -> [DocumentSummary] {
         .sorted { $0.importedAt < $1.importedAt }
 }
 
+/// 反查关联到某录音的文档正文（生成纪要时把文档当背景用）。
+/// 事实源是各 document.yaml 的 links；读不到/空正文的文档跳过。按导入时间排序。
+public func linkedDocumentTexts(vaultRoot: URL, recordingId: String) -> [(title: String, text: String)] {
+    listDocuments(vaultRoot: vaultRoot)
+        .filter { $0.linkedRecordingIds.contains(recordingId) }
+        .compactMap { doc in
+            guard let text = documentContent(doc.dir),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return (doc.title, text)
+        }
+}
+
 /// 递归找 documents/ 下所有含 document.yaml 的目录。
 public func findDocuments(_ vaultRoot: URL) -> [URL] {
     let root = vaultRoot.appendingPathComponent("documents")
@@ -148,10 +160,13 @@ public struct DocumentStore {
     public func allDocumentDirs() -> [URL] { findDocuments(vaultRoot) }
 
     /// 导入：生成 id → 写 document.yaml + content.md + original.<ext>，返回 manifest 与目录。
+    /// `originalFileURL` 非 nil（P3 富格式）→ 原样拷贝真实原件为 original.<真实扩展名>；
+    /// nil（P1 md/txt、粘贴文本）→ 沿用旧逻辑按 content 写 original.<ext>（与现状逐字节一致）。
     @discardableResult
     public func importDocument(title rawTitle: String, text: String, sourceFormat: String,
                                tags: [String] = [], links: [String] = [],
-                               date: Date = Date()) throws -> (manifest: DocumentManifest, dir: URL) {
+                               date: Date = Date(),
+                               originalFileURL: URL? = nil) throws -> (manifest: DocumentManifest, dir: URL) {
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? firstLineTitle(text) : rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let (id, dir) = uniqueIdAndDir(title: title, date: date)
@@ -163,9 +178,16 @@ public struct DocumentStore {
         try manifest.yaml().data(using: .utf8)?.write(to: dir.appendingPathComponent("document.yaml"))
         let data = text.data(using: .utf8)
         try data?.write(to: dir.appendingPathComponent("content.md"))
-        // 原件留档（P1：与 content 同源；P3 起为真实原件）
-        let ext = sourceFormat == "txt" ? "txt" : "md"
-        try data?.write(to: dir.appendingPathComponent("original.\(ext)"))
+        // 原件留档
+        if let src = originalFileURL {
+            let srcExt = src.pathExtension.isEmpty ? "bin" : src.pathExtension.lowercased()
+            let dest = dir.appendingPathComponent("original.\(srcExt)")
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: src, to: dest)
+        } else {
+            let ext = sourceFormat == "txt" ? "txt" : "md"
+            try data?.write(to: dir.appendingPathComponent("original.\(ext)"))
+        }
         return (manifest, dir)
     }
 

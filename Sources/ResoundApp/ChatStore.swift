@@ -6,6 +6,9 @@ struct StoredCite: Codable, Identifiable {
     var id = UUID()
     var speaker, meeting, time, snippet, recId: String
     var t: Double
+    var isDoc = false           // 旧数据缺省 false（向后兼容）
+    var docId: String? = nil
+    var docTitle: String? = nil
 }
 struct StoredSource: Codable, Identifiable {
     var id = UUID()
