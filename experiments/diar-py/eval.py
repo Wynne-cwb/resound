@@ -6,7 +6,8 @@ import sys, time, argparse
 import soundfile as sf
 import sherpa_onnx as so
 
-HERE = "/Users/wb.chen/Documents/Project/Resound/experiments/diar-py/models"
+import os
+HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 # 用户钉死：CR 是转写误标，实为 GGbond
 SPEAKER_FIX = {"CR": "GGbond"}

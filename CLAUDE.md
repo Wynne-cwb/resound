@@ -53,5 +53,5 @@ swift build                                   # 首次会拉 WhisperKit/FluidAud
 - Swift 6 工具链但 **language mode v5**（避开严格并发）。`@main` 不放 `main.swift`。
 - C 依赖用 amalgamation + C target 静态链（见 CSQLiteVec）。
 - 提交：用户要求才 commit/push；`.env`/`vaults/`/`.build/`/`*.sqlite` 绝不进 git。
-- **改了功能就同步 README**：每次 commit/push **前**必须检查 [README.md](README.md) 是否需要更新（尤其「功能特性」/「配置」/「CLI 命令」）——面向用户的能力有增删改就一起改 README，纯内部重构/修 bug 无外部可见变化可跳过，但要确认过。
+- **改了功能就同步 README**：每次 commit/push **前**必须检查 README 是否需要更新（尤其「功能特性」/「配置」/「CLI 命令」）——面向用户的能力有增删改就一起改 README，纯内部重构/修 bug 无外部可见变化可跳过，但要确认过。**README 是双语**：英文 [README.md](README.md)（主，GitHub 默认展示）+ 中文 [README.zh-CN.md](README.zh-CN.md)，改一份必须同步另一份，别让两边漂移。
 - 质量 > 速度（用户定的原则）：凡"快 vs 准"默认选准。

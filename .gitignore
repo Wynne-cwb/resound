@@ -31,3 +31,7 @@ experiments/diar-py/models/
 
 # sherpa-onnx 静态库(派生物，~百MB，用 scripts/build-sherpa-onnx.sh 重建)
 Vendor/sherpa-onnx/
+
+# Python bytecode
+__pycache__/
+*.pyc

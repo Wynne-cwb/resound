@@ -4,165 +4,176 @@
 
 # Resound
 
-**把每一场对话变成可检索的个人记忆。**
+**Turn every conversation into searchable personal memory.**
 
-macOS 原生（Swift / SwiftUI · Apple Silicon）个人 wiki：
-录音 → 转录 → 说话人识别 → 切块入库 → 检索与问答，全链路打通。
+A native macOS (Swift / SwiftUI · Apple Silicon) personal wiki:
+record → transcribe → diarize → chunk & index → search & ask, end to end.
 
 ![platform](https://img.shields.io/badge/platform-macOS%2014%2B-black)
 ![arch](https://img.shields.io/badge/arch-Apple%20Silicon-orange)
 ![swift](https://img.shields.io/badge/Swift-6%20(lang%20mode%205)-f05138)
 
+**English** · [简体中文](README.zh-CN.md)
+
 </div>
 
 ---
 
-Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时间轴的逐句文稿，
-生成结构化会议纪要，并把全部内容切块建索引——之后你可以像查个人知识库一样
-**用自然语言提问，拿到带引用、带日期的答案**。
+Resound records your meetings and one-on-ones, turns them into speaker-labeled,
+timestamped, sentence-level transcripts, generates structured meeting notes, and
+chunks and indexes everything — so you can query your own knowledge base in
+**natural language and get answers with citations and dates**.
 
-它会越用越懂你：给说话人命名一次，下次同一个声音自动认出；
-把团队黑话加进词表，转录里就不再写错。
+It gets to know you the more you use it: name a speaker once and the same voice is
+recognized automatically next time; add your team's jargon to the glossary and the
+transcripts stop getting it wrong.
 
 > [!NOTE]
-> Resound 本身是**纯实现，不含任何个人数据**。你的音频、转录、标注都存在
-> 你自己指定的、符合[数据契约](docs/data-contract.md)的 git 仓库（vault）中。
+> Resound itself is a **pure implementation that contains no personal data**. Your
+> audio, transcripts, and annotations all live in a git repository (vault) that you
+> designate yourself and that conforms to the [data contract](docs/data-contract.md).
 
-## 功能特性
+## Features
 
-- **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路混音）；检测到 Meet 自动弹屏级提示，可设为**会议开始自动开录 / 结束自动停录**（或弹一键确认窗），全程无需手动。
-- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做人声响度归一，转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
-- **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。
-- **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；**Templates 页**可增删改模板、AI 协助生成 / 润色提示词、设默认。
-- **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**；支持「上周四的一对一聊了啥」这类时间感知查询。也可**针对单条录音提问**（录音详情「向本场提问」标签，检索严格限定本场、引用可点跳转到对应时间）。
-- **录音库** — 搜索、文件夹分组、⌘F 查找替换（修转录错字）、逐句点跳播放、说话人试听；反复改同一个错词会**自动建议加入词表**，一键确认。
-- **自带 Provider 配置** — 接入任意 OpenAI 兼容服务（OpenAI / Claude / DeepSeek / Groq / AIHUBMIX / 本地 Ollama / 自定义）：对话、向量、转写三种能力分别配置，一键「测试连接」实时验证（验证状态持久化，改 Key/模型自动失效）；首次启动有引导，转写不配则自动兜底本地 Whisper。录音库路径 / git 自动推送也在应用内配，改完即时生效、无需重编。
-- **菜单栏驻留** — 关掉主窗口不退出，常驻菜单栏随时开录；浅 / 深双主题。
+- **Meeting recording** — One click captures your mic + the other side of a Google Meet call (dual-track mix via ScreenCaptureKit). When a Meet call is detected it pops a screen-level prompt; you can set it to **auto-start on meeting begin / auto-stop on meeting end** (or surface a one-click confirmation panel), no manual steps needed.
+- **Transcription** — Defaults to online `whisper-large-v3-turbo` (fast), with local WhisperKit as an offline fallback. Before upload, silero VAD **trims long silences/noise** (cutting whisper's "thanks for watching"-style hallucinations and saving tokens, with timestamps mapped back to the original timeline), then loudness-normalizes speech. After transcription: Traditional→Simplified normalization + glossary correction + **LLM proofreading** (fixing homophone typos and misheard English proper nouns).
+- **Speaker diarization** — Sortformer neural segmentation (running on the Apple Neural Engine) → silero VAD to drop silence → CAM++ voiceprints → match against the enrollment library for real names; clusters are merged when voiceprints are close, with naming kept mutually exclusive to prevent mismatches. Name a voice once and its voiceprint is remembered, recognized automatically across recordings — the more you label, the more accurate it gets.
+- **AI meeting notes** — Templated summaries (general / one-on-one / team meeting / brainstorm), written into the searchable index. The **Templates page** lets you add, edit, and delete templates, get AI help generating/polishing prompts, and set a default.
+- **Search & Q&A** — FTS5 keyword + vector recall + RRF fusion + LLM rerank + synthesis; answers come **with citations and dates** and support time-aware queries like "what did we discuss in last Thursday's one-on-one." You can also **ask about a single recording** (the "Ask this recording" tab in the recording detail strictly scopes retrieval to that recording, with clickable citations that jump to the matching timestamp).
+- **Recording library** — Search, folder grouping, ⌘F find & replace (to fix transcription typos), click-to-jump sentence playback, and speaker preview; repeatedly fixing the same wrong word **auto-suggests adding it to the glossary** with one-click confirm.
+- **Bring-your-own provider** — Connect to any OpenAI-compatible service (OpenAI / Claude / DeepSeek / Groq / AIHUBMIX / local Ollama / custom): chat, embedding, and transcription are each configured separately, with a one-click "Test connection" that validates live (validation state is persisted and auto-invalidated when you change the key/model). First launch has an onboarding flow; leave transcription unconfigured and it falls back to local Whisper. The vault path and git auto-push are also configured in-app, taking effect immediately with no rebuild.
+- **Menu-bar resident** — Closing the main window doesn't quit; it stays in the menu bar ready to record anytime. Light / dark themes.
 
-## 架构边界
+## Architecture boundaries
 
-Resound 把三样东西**物理分开**，互不混存：
+Resound keeps three things **physically separate** and never mixes them:
 
-| | 内容 | 位置 | 性质 |
+| | Contents | Location | Nature |
 |---|---|---|---|
-| **App**（本仓库） | Swift / SwiftUI 实现 | `Wynne-cwb/resound` | 程序，不含数据 |
-| **Vault** | 音频 / 转录 / 标注 / 人物 / 笔记 | 用户配置的 git repo | **事实源**，可移植 |
-| **Index** | SQLite + FTS5 + sqlite-vec + 声纹向量 | 本地 App Support | **派生物**，可重建 |
+| **App** (this repo) | Swift / SwiftUI implementation | `Wynne-cwb/resound` | Program, no data |
+| **Vault** | Audio / transcripts / annotations / people / notes | A git repo you configure | **Source of truth**, portable |
+| **Index** | SQLite + FTS5 + sqlite-vec + voiceprint vectors | Local App Support | **Derived**, rebuildable |
 
 > [!IMPORTANT]
-> 核心不变量：**删掉整个 Index，App 能从 Vault 完整重建。**
-> 这条决定了什么进 Vault、什么进 Index——详见[数据契约](docs/data-contract.md)。
+> Core invariant: **delete the entire Index and the App can fully rebuild it from the Vault.**
+> This decides what goes into the Vault vs. the Index — see the [data contract](docs/data-contract.md).
 
-## 快速上手
+> [!TIP]
+> Want to dive in fast? [`Wynne-cwb/wayne-resound`](https://github.com/Wynne-cwb) is a vault you
+> can use as a template — mirror its directory layout and `resound.yaml` / `people.yaml` /
+> `glossary.txt` structure to create your own vault repo.
 
-### 前置条件
+## Getting started
+
+### Prerequisites
 
 - macOS 14+ / Apple Silicon
-- Swift 6 工具链（Xcode 16+ 或 `swiftly`）
-- 声纹依赖 sherpa-onnx 静态库（首次需本地编出，约百 MB，已 gitignore）
+- Swift 6 toolchain (Xcode 16+ or `swiftly`)
+- Voiceprints depend on the sherpa-onnx static library (built locally on first use, ~hundreds of MB, gitignored)
 
 ```bash
-# 1. 编译 sherpa-onnx 声纹静态库（一次性）
+# 1. Build the sherpa-onnx voiceprint static library (one-time)
 scripts/build-sherpa-onnx.sh
 
-# 2. 配置密钥：在仓库根目录创建 .env（见下方「配置」表）
+# 2. Configure keys: create .env in the repo root (see the "Configuration" table below)
 
-# 3. 编译（首次会拉 WhisperKit / FluidAudio / MarkdownUI 等依赖）
+# 3. Build (first run pulls WhisperKit / FluidAudio / MarkdownUI etc.)
 swift build
 ```
 
-### 跑 CLI
+### Run the CLI
 
 ```bash
-.build/debug/resound doctor                      # 自检关键依赖
-.build/debug/resound record                      # 录音 → 转录 → 写入 vault
-.build/debug/resound index                       # 从 vault 重建检索索引
-.build/debug/resound ask "上周的一对一聊了什么"     # 带引用的问答
+.build/debug/resound doctor                      # self-check key dependencies
+.build/debug/resound record                      # record → transcribe → write to vault
+.build/debug/resound index                       # rebuild the search index from the vault
+.build/debug/resound ask "what did last week's one-on-one cover"   # Q&A with citations
 ```
 
-### 打包并运行 App
+### Bundle and run the App
 
 ```bash
-scripts/bundle-app.sh release    # 产物：build/Resound.app（含权限声明 + ad-hoc 签名）
+scripts/bundle-app.sh release    # output: build/Resound.app (with entitlements + ad-hoc signing)
 open build/Resound.app
 ```
 
 > [!TIP]
-> 改完重新打包后，若旧实例还在跑，`open` 只会切前台。先 `killall Resound` 再 `open`。
+> After rebuilding, if an old instance is still running `open` just brings it to the front.
+> Run `killall Resound` first, then `open`.
 
-## 配置
+## Configuration
 
-**普通用户（应用内）**：首次启动按引导，在 **设置 › AI 服务** 里选服务商预设（或自定义）、填 Base URL / API Key / 模型，「测试连接」通过即用。至少需一个**对话模型** + 一个**向量模型**（可来自不同服务商）；转写可留空走本地 Whisper。配置存本机 `~/Library/Application Support/Resound/providers.json`，密钥不出本机，可导入导出，改完即时生效。
+**Regular users (in-app):** Follow the onboarding on first launch — in **Settings › AI Services**, pick a provider preset (or go custom), fill in Base URL / API Key / model, and you're good once "Test connection" passes. You need at least one **chat model** + one **embedding model** (they can be from different providers); transcription can be left blank to use local Whisper. Config is stored on-device at `~/Library/Application Support/Resound/providers.json`, keys never leave your machine, can be imported/exported, and changes take effect immediately.
 
-**CLI / 进阶**：也可用仓库根目录 `.env`（已 gitignore，**绝不提交**），接口均为 OpenAI 兼容。App 优先读 `providers.json`、缺失时回退 `.env`（已有 `.env` 的老用户首启会自动迁移）。下表为 `.env` 变量：
+**CLI / advanced:** You can also use a `.env` in the repo root (gitignored, **never committed**); all endpoints are OpenAI-compatible. The App reads `providers.json` first and falls back to `.env` when missing (existing `.env` users are auto-migrated on first launch). The `.env` variables:
 
-| 变量 | 用途 |
+| Variable | Purpose |
 |---|---|
-| `AIHUBMIX_API_KEY` / `AIHUBMIX_BASE_URL` | Embedding（向量），缺省也用于在线转录 |
-| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 向量模型与维度 |
-| `CHAT_API_KEY` / `CHAT_BASE_URL` | LLM（DeepSeek 官方，OpenAI 兼容） |
-| `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | 在线转录开关与模型（关则走本地 WhisperKit） |
-| `TRANSCRIBE_API_KEY` / `TRANSCRIBE_BASE_URL` | 转录端点，缺省同 Embedding |
-| `CONTEXT_MODEL` | 逐 chunk contextual 增强（高频，默认 flash） |
-| `CORRECT_MODEL` | 转录 AI 校对（默认 flash） |
-| `RERANK_MODEL` | 召回重排 |
-| `ANSWER_MODEL` / `SUMMARY_MODEL` | 最终综合 / 摘要（默认 pro） |
+| `AIHUBMIX_API_KEY` / `AIHUBMIX_BASE_URL` | Embeddings (vectors); also used for online transcription by default |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | Embedding model and dimension |
+| `CHAT_API_KEY` / `CHAT_BASE_URL` | LLM (DeepSeek official, OpenAI-compatible) |
+| `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | Online transcription toggle and model (off → local WhisperKit) |
+| `TRANSCRIBE_API_KEY` / `TRANSCRIBE_BASE_URL` | Transcription endpoint; defaults to the Embedding one |
+| `CONTEXT_MODEL` | Per-chunk contextual enrichment (high frequency, defaults to flash) |
+| `CORRECT_MODEL` | Transcription AI proofreading (defaults to flash) |
+| `RERANK_MODEL` | Recall reranking |
+| `ANSWER_MODEL` / `SUMMARY_MODEL` | Final synthesis / summary (defaults to pro) |
 
-App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Resound/.env`，并补 `VAULT_PATH`、`SPEAKER_MODEL`。
+At runtime the App copies the root `.env` to `~/Library/Application Support/Resound/.env` and adds `VAULT_PATH` and `SPEAKER_MODEL`.
 
-## CLI 命令
+## CLI commands
 
-| 命令 | 说明 |
+| Command | Description |
 |---|---|
-| `record` / `record-meeting` | 麦克风录音 / 会议双路录音 → 转录 → 写入 vault |
-| `transcribe` | 把已有音频转录并写入 vault |
-| `transcribe-correct` | 对已有转录补做 AI 校对（修同音错字 / 术语） |
-| `watch-meet` | 监听 Chrome 是否在开 Google Meet |
-| `diarize` / `speaker-recognize` | 说话人分割 / 用声纹库识别说话人 |
-| `speaker-identify` | 用注册声纹识别并写回（注册新人后批量修旧录音） |
-| `speaker-enroll` / `speaker-label` | 注册声纹 / 给已有索引就地打标签 |
-| `diarize-eval` / `diarize-compare` | 用 ground-truth 评测 / 对比说话人识别方案 |
-| `normalize` | 对已有转录重做繁→简归一 + 别名纠正 |
-| `redate` | 按标题里的日期修正录音的会议日期 |
-| `index` | 从 vault 重建检索索引（切块 → embedding → SQLite/FTS5/vec） |
-| `search` | hybrid 检索（FTS5 + 向量 + RRF） |
-| `summarize` | 为录音生成 AI 摘要（写 summary.md + 入索引） |
-| `ask` | 问答：检索 + 重排 + LLM 综合，输出带引用的答案 |
-| `doctor` | 自检 sqlite-vec 等关键依赖 |
+| `record` / `record-meeting` | Mic recording / dual-track meeting recording → transcribe → write to vault |
+| `transcribe` | Transcribe existing audio and write to vault |
+| `transcribe-correct` | Run AI proofreading over an existing transcript (fix homophone typos / terms) |
+| `watch-meet` | Watch whether Chrome has a Google Meet open |
+| `diarize` / `speaker-recognize` | Speaker segmentation / identify speakers via the voiceprint library |
+| `speaker-identify` | Identify with enrolled voiceprints and write back (batch-fix old recordings after enrolling someone new) |
+| `speaker-enroll` / `speaker-label` | Enroll a voiceprint / label an existing index in place |
+| `diarize-eval` / `diarize-compare` | Evaluate against ground truth / compare diarization approaches |
+| `normalize` | Redo Traditional→Simplified normalization + alias correction over an existing transcript |
+| `redate` | Fix a recording's meeting date from the date in its title |
+| `index` | Rebuild the search index from the vault (chunk → embedding → SQLite/FTS5/vec) |
+| `search` | Hybrid retrieval (FTS5 + vector + RRF) |
+| `summarize` | Generate an AI summary for a recording (writes summary.md + indexes it) |
+| `ask` | Q&A: retrieve + rerank + LLM synthesis, output an answer with citations |
+| `doctor` | Self-check key dependencies such as sqlite-vec |
 
-## 工作原理
+## How it works
 
 ```
-录音 ─► VAD 门控(剪静音/噪声) ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
-   └─► 说话人识别(Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
+record ─► VAD gating (trim silence/noise) ─► transcribe (online whisper / local WhisperKit) ─► zh normalization + glossary correction + LLM proofread
+   └─► diarization (Sortformer segmentation @ANE → VAD → CAM++ voiceprints → enrollment match)
                           │
-切块 ─► contextual 增强 ─► embedding ─► SQLite(FTS5 + sqlite-vec)
+chunk ─► contextual enrichment ─► embedding ─► SQLite (FTS5 + sqlite-vec)
                                               │
-提问 ─► QueryPlanner(LLM 抽时间范围 / 判 qa·digest)
-   └─► FTS5 + 向量召回 ─► RRF 融合 ─► LLM 重排 ─► 综合(带引用·带日期)
+ask ─► QueryPlanner (LLM extracts time range / decides qa·digest)
+   └─► FTS5 + vector recall ─► RRF fusion ─► LLM rerank ─► synthesis (with citations · with dates)
 ```
 
-## 技术栈
+## Tech stack
 
-- **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
-- **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
-- **API**：任意 OpenAI 兼容服务——对话 / 向量 / 转写三种能力可分别指派给不同服务商
+- **Local:** AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio (Sortformer segmentation / silero VAD) · sherpa-onnx (CAM++ voiceprints) · SQLite (FTS5 + sqlite-vec)
+- **Dependencies:** [WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
+- **API:** Any OpenAI-compatible service — chat / embedding / transcription can each be assigned to a different provider
 
-## 项目结构
+## Project structure
 
 ```
 Sources/
-  ResoundApp/    SwiftUI App（窗口 / 录音库 / 设置 / 弹窗）
-  ResoundCore/   核心逻辑（转录 / 声纹 / 切块 / 索引 / 检索 / 摘要）
-  resound/       CLI 入口
-  CSQLiteVec/    sqlite-vec C 桥接
-  CSherpaOnnx/   sherpa-onnx 声纹 C API 桥接
+  ResoundApp/    SwiftUI App (windows / library / settings / panels)
+  ResoundCore/   Core logic (transcription / voiceprints / chunking / indexing / retrieval / summaries)
+  resound/       CLI entry point
+  CSQLiteVec/    sqlite-vec C bridge
+  CSherpaOnnx/   sherpa-onnx voiceprint C API bridge
 scripts/         build-sherpa-onnx.sh · bundle-app.sh
 docs/            data-contract.md · DECISIONS.md · STATE.md
 ```
 
-## 文档
+## Documentation
 
-- [数据契约](docs/data-contract.md) — 项目地基，所有模块遵守
-- [决策日志](docs/DECISIONS.md) — 选型、踩坑与已完成实践
-- [当前状态](docs/STATE.md) — 进行中 / 下一步快照
+- [Data contract](docs/data-contract.md) — the project's foundation, followed by every module
+- [Decision log](docs/DECISIONS.md) — choices, pitfalls, and completed practices
+- [Current state](docs/STATE.md) — in-progress / next-step snapshot
