@@ -45,7 +45,7 @@ swift build                                   # 首次会拉 WhisperKit/FluidAud
 .build/debug/resound <子命令>                  # transcribe/record/normalize/diarize/diarize-eval/index/search/ask/doctor
 ```
 - 配置/密钥：repo 根 `.env`（gitignored，含 aihubmix embedding key + DeepSeek chat key）。
-- 用户 vault 本地工作副本：`vaults/wayne-resound/`（gitignored）。
+- 用户 vault 本地工作副本：`vaults/<your-vault>/`（gitignored）。
 - 索引：`~/Library/Application Support/Resound/index.sqlite`（派生物，可重建）。
 
 ## 工程约定

@@ -58,10 +58,45 @@ Resound keeps three things **physically separate** and never mixes them:
 > Core invariant: **delete the entire Index and the App can fully rebuild it from the Vault.**
 > This decides what goes into the Vault vs. the Index — see the [data contract](docs/data-contract.md).
 
-> [!TIP]
-> Want to dive in fast? [`Wynne-cwb/wayne-resound`](https://github.com/Wynne-cwb) is a vault you
-> can use as a template — mirror its directory layout and `resound.yaml` / `people.yaml` /
-> `glossary.txt` structure to create your own vault repo.
+### Create your own vault
+
+A vault is just a folder (a git repo you own) with a small, fixed structure. Scaffold a minimal one:
+
+```bash
+mkdir my-resound-vault && cd my-resound-vault && git init
+
+# Audio goes through Git LFS (keeps the repo text-diffable and portable)
+cat > .gitattributes <<'EOF'
+*.m4a  filter=lfs diff=lfs merge=lfs -text
+*.flac filter=lfs diff=lfs merge=lfs -text
+*.wav  filter=lfs diff=lfs merge=lfs -text
+EOF
+
+# Vault config (schema versioned — keep the schema line)
+cat > resound.yaml <<'EOF'
+schema: resound.vault/1
+vault_name: my-wiki
+timezone: Asia/Singapore
+default_language: en
+EOF
+
+# People registry — starts with just you; speakers get named here over time
+mkdir people && cat > people/people.yaml <<'EOF'
+schema: resound.people/1
+people:
+  - id: p_self
+    name: Me
+    aliases: [myself]
+EOF
+
+mkdir recordings
+git add -A && git commit -m "init vault"
+```
+
+Then point Resound at this folder — in **Settings › Storage › Recording library**, or set `VAULT_PATH` in `.env` for the CLI. The app validates `resound.yaml` + `recordings/` + `people/`, reads and writes this local copy, and (if you enable git sync) commits and pushes back to your repo.
+
+> [!IMPORTANT]
+> Your vault holds your personal data (audio, transcripts, who-said-what). **Push it to a _private_ repo you own** — never a public one. The full schema for every file is in the [data contract](docs/data-contract.md).
 
 ## Getting started
 

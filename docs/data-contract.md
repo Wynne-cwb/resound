@@ -19,7 +19,7 @@
 
 ### 0.1 Vault 是可配置的数据源，不是写死的 repo
 
-App（`resound`）只是**纯实现**，不绑定任何具体数据 repo。Vault 是用户在设置里**指定**的、符合本契约的任意 git repo（如 `github.com/Wynne-cwb/wayne-resound`）。
+App（`resound`）只是**纯实现**，不绑定任何具体数据 repo。Vault 是用户在设置里**指定**的、符合本契约的任意 git repo（如 `github.com/<你>/my-resound-vault`，**应为私有 repo**，因含个人数据）。
 
 交互模型：**App 操作本地工作副本，git 只当同步/版本层**——不直接调 GitHub API。
 
@@ -305,7 +305,7 @@ for 每个 recording:
 
 | # | 问题 | 决策 |
 |---|---|---|
-| 1 | Vault / App 是否分 repo | ✅ **分**。App = `github.com/Wynne-cwb/resound`（纯实现）；Vault = 用户可配置的数据 repo，作者本人的是 `github.com/Wynne-cwb/wayne-resound` |
+| 1 | Vault / App 是否分 repo | ✅ **分**。App = `github.com/Wynne-cwb/resound`（纯实现，公开）；Vault = 用户自配的**私有**数据 repo（如 `github.com/<你>/my-resound-vault`） |
 | 2 | Vault 是否写死 | ❌ 不写死，**用户设置里指定**，App 操作本地工作副本（见 0.1） |
 | 3 | 音频格式 | **m4a**（AAC），走 **Git LFS**（见 0.2） |
 | 4 | LLM enrichment 缓存放哪 | 默认放 Index（不提交）；若需跨机免重付 LLM 费用 + 完全可复现，再单独建 `cache/` 提交。**先放 Index** |

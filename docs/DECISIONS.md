@@ -491,7 +491,7 @@
 - **三边界**：App(本仓库，纯实现) / Vault(用户自配的数据 repo，事实源) / Index(本地 SQLite，派生物可重建)。不变量：删 Index 能从 Vault 完整重建。
 - **Vault 可配置**：App 不写死数据 repo，用户在设置里指定；App 操作本地工作副本，git 当同步层。音频走 Git LFS。
 - 完整契约见 [data-contract.md](data-contract.md)。源 vs 派生分四档：纯事实 / 昂贵可修正(转录、diarization) / 免费可重算(embedding、FTS) / LLM 派生(必须缓存)。
-- repos：App=`Wynne-cwb/resound`，Vault=`Wynne-cwb/wayne-resound`(private，已有起始 resound.yaml/people.yaml/glossary.txt/.gitattributes)。
+- repos：App=`Wynne-cwb/resound`(公开)，Vault=用户自配的私有数据 repo(起始含 resound.yaml/people.yaml/glossary.txt/.gitattributes)。
 
 ## 核心原则
 

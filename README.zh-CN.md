@@ -55,9 +55,45 @@ Resound 把三样东西**物理分开**，互不混存：
 > 核心不变量：**删掉整个 Index，App 能从 Vault 完整重建。**
 > 这条决定了什么进 Vault、什么进 Index——详见[数据契约](docs/data-contract.md)。
 
-> [!TIP]
-> 想直接上手？[`Wynne-cwb/wayne-resound`](https://github.com/Wynne-cwb) 是一个可参照的 vault 模板——
-> 照着它的目录与 `resound.yaml` / `people.yaml` / `glossary.txt` 结构，建一个你自己的 vault repo 即可。
+### 建一个属于自己的 Vault
+
+Vault 就是一个你自己拥有的文件夹（一个 git repo），结构小而固定。最小可用的脚手架：
+
+```bash
+mkdir my-resound-vault && cd my-resound-vault && git init
+
+# 音频走 Git LFS（让 repo 文本可 diff、可移植）
+cat > .gitattributes <<'EOF'
+*.m4a  filter=lfs diff=lfs merge=lfs -text
+*.flac filter=lfs diff=lfs merge=lfs -text
+*.wav  filter=lfs diff=lfs merge=lfs -text
+EOF
+
+# Vault 配置（schema 带版本号，保留 schema 行）
+cat > resound.yaml <<'EOF'
+schema: resound.vault/1
+vault_name: my-wiki
+timezone: Asia/Singapore
+default_language: zh
+EOF
+
+# 人物注册表——先只有你自己；之后给说话人命名都记在这里
+mkdir people && cat > people/people.yaml <<'EOF'
+schema: resound.people/1
+people:
+  - id: p_self
+    name: 我
+    aliases: [本人]
+EOF
+
+mkdir recordings
+git add -A && git commit -m "init vault"
+```
+
+然后在 **设置 › 存储 › 录音库目录** 里把 Resound 指向这个文件夹（CLI 则在 `.env` 设 `VAULT_PATH`）。App 会校验 `resound.yaml` + `recordings/` + `people/`，全程读写这份本地副本，并在开启 git 同步后 commit + push 回你的 repo。
+
+> [!IMPORTANT]
+> Vault 里是你的个人数据（音频、转录、谁说了什么）。**请 push 到你自己的「私有」repo**，绝不要用公开 repo。每个文件的完整 schema 见[数据契约](docs/data-contract.md)。
 
 ## 快速上手
 
