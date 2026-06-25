@@ -9,6 +9,23 @@
 
 **做了**：把 `Wynne-cwb/resound` 设为公开前的安全体检 + 收尾。结论：代码与全部 git 历史**无任何 key/token 泄露**，`.env`/`*.sqlite`/`vaults/` 从未进过 git。处理项：①`experiments/diar-py/*.py` 写死的 `/Users/wb.chen/...` 绝对路径 → `os.path.dirname(__file__)`（不再泄露用户名）；②README 拆**英文为主双语**（[README.md](../README.md) + [README.zh-CN.md](../README.zh-CN.md)），顶部互切；③`.gitignore` 补 `__pycache__/`。**坑/取舍**：提交者邮箱（QQ）在全 commit 上，公开即永久——用户判断可接受，**不改写历史**（改写会变所有 SHA、收益低）。私有 vault repo `wayne-resound` 含个人数据，**不应在公开文档当模板**：删掉 README 的模板 TIP，改成「从零建自己 Vault」可复制脚手架；data-contract/DECISIONS/CLAUDE 里的具体引用泛化为 `<你>/my-resound-vault`（名字仍残留在旧 commit 历史里，但私有 repo 名≠访问权，无实际风险）。
 
+## 文档模块 P1 后端落地（M1，CLI 验证通过）（2026-06-25）
+
+**做了什么（Wave 1 后端，UI 无关）**，按 [plans/2026-06-25-documents-p1-plan.md](superpowers/plans/2026-06-25-documents-p1-plan.md)：
+- **T1.1** 新增 [Document.swift](../Sources/ResoundCore/Document.swift)：`DocumentManifest`（resound.document/1：id/title/source_format/imported_at/tags/links）+ `DocumentStore`（写 documents/YYYY/MM/<id>/ 的 document.yaml+content.md+original；日期-slug id，冲突追加序号）+ `parseDocumentManifest`/`documentContent`/`findDocuments` 自由函数。复用既有 `slugify`/`iso8601`（删了重复定义）。
+- **T1.2** [Index.swift](../Sources/ResoundCore/Index.swift)：`chunks` 加 `source_kind`('recording'|'document', default recording) + `doc_id`（`addColumnIfMissing` 增量迁移）；新增 `documents`/`doc_links` 表；`insertChunk` 的 recordingId 改可空 + 加 sourceKind/docId；`SearchHit` 加 sourceKind/docId/docTitle；`vector/ftsSearch` select 出新列 + left join documents 取标题 + 加 docId scoping；新增 upsertDocument/deleteChunks(docId:)/setDocLinks/documentsLinked(toRecording:)/deleteDocument。
+- **T1.3** Chunker 加 `chunk(text:)`（无时间轴：空行/Markdown 标题分块，累积到 targetChars 切，超 maxChars 硬切，start/end=0）；IndexPipeline 加 `indexDocument`/`indexOneDocument`（读 yaml+content→切块→enrichment+embedding 复用→insertChunk(document)+镜像 doc_links；recording_date=null 故不参与时间过滤），`build` 加 documents/ 并行循环。
+- **T1.4** CLI 新增 `import-doc <file> --vault [--title --tags --link --index --no-context]`（无头验证主入口）；注册进 subcommands。
+- **T1.5** IndexPipeline `search` 加 docId 参数；新增 `answerInDocument`（按 docId scoping）；Synthesizer 与 CLI Ask「来源」按 sourceKind 区分 `📄文档：标题` / `🎙️录音 日期 id @时间 👤人`。
+
+**验证（CLI，真跑 embedding + chat；临时 vault/index 不污染真实数据）**：
+1. 导入一篇含独有事实的 md（--no-context）→ vault 结构正确、1 chunk 入库 source_kind=document；
+2. 纯文档问答 → 答案命中 + 来源标 `📄`；
+3. 真实旧 index 打开自动迁移出 source_kind/doc_id 两列，录音问答零回归（🎙️ 引用含说话人+时间完好）；
+4. **真·跨源**（复制真实 index + 加该文档）问横跨问题 → 一段答案里同时引用 📄文档[1] 与 🎙️录音[2-8]，正确区分。
+
+**坑/取舍**：①`slugify`/`iso8601` ResoundCore 里已有（IngestPipeline），首版重复定义致编译冲突 → 删重复、复用现有（slug 加 60 字上限）。②文档块 `recording_date=null`：有意为之——避免「上周导入的文档」污染「上周的会议」这类时间过滤查询；文档仍进全局/无时间过滤问答。③`insertChunk` recordingId 由 String 改 String?，旧录音调用（传 String）隐式兼容、零改。
+
 ## 文档模块 P1 设计（地基）（2026-06-25）
 
 **背景**：Resound 定位「会议知识库」，会议常伴文档做信息同步，需支持文档上传并与录音结合、辅助 LLM 检索与生成。整体是大方向（3 类生成诉求 + md/PDF/docx/PPT/在线多格式），故**分期**，本轮只设计 **P1 地基**。spec：[superpowers/specs/2026-06-25-documents-p1-design.md](superpowers/specs/2026-06-25-documents-p1-design.md)。

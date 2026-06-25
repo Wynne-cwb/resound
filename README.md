@@ -170,6 +170,7 @@ At runtime the App copies the root `.env` to `~/Library/Application Support/Reso
 | `diarize-eval` / `diarize-compare` | Evaluate against ground truth / compare diarization approaches |
 | `normalize` | Redo Traditional→Simplified normalization + alias correction over an existing transcript |
 | `redate` | Fix a recording's meeting date from the date in its title |
+| `import-doc` | Import a local md/txt document into the vault + index it (documents join recordings in Q&A) |
 | `index` | Rebuild the search index from the vault (chunk → embedding → SQLite/FTS5/vec) |
 | `search` | Hybrid retrieval (FTS5 + vector + RRF) |
 | `summarize` | Generate an AI summary for a recording (writes summary.md + indexes it) |

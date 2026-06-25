@@ -166,6 +166,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 | `diarize-eval` / `diarize-compare` | 用 ground-truth 评测 / 对比说话人识别方案 |
 | `normalize` | 对已有转录重做繁→简归一 + 别名纠正 |
 | `redate` | 按标题里的日期修正录音的会议日期 |
+| `import-doc` | 导入本地 md/txt 文档到 vault + 建索引（文档与录音一起参与问答） |
 | `index` | 从 vault 重建检索索引（切块 → embedding → SQLite/FTS5/vec） |
 | `search` | hybrid 检索（FTS5 + 向量 + RRF） |
 | `summarize` | 为录音生成 AI 摘要（写 summary.md + 入索引） |

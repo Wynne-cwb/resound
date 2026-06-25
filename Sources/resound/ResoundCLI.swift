@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ImportDoc.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
     )
 }
 
@@ -379,9 +379,13 @@ struct Ask: AsyncParsableCommand {
         } else if !result.hits.isEmpty {
             print("\n— 来源 —")
             for (i, h) in result.hits.enumerated() {
-                let who = h.personId.map { " 👤\($0)" } ?? ""
-                let date = h.recordingDate.map { "\($0) " } ?? ""
-                print("[\(i + 1)] \(date)\(h.recordingId) @\(Int(h.start))-\(Int(h.end))s\(who)")
+                if h.isDocument {
+                    print("[\(i + 1)] 📄 \(h.docTitle ?? h.docId ?? "未命名文档")")
+                } else {
+                    let who = h.personId.map { " 👤\($0)" } ?? ""
+                    let date = h.recordingDate.map { "\($0) " } ?? ""
+                    print("[\(i + 1)] 🎙️ \(date)\(h.recordingId) @\(Int(h.start))-\(Int(h.end))s\(who)")
+                }
             }
         }
     }
@@ -429,6 +433,51 @@ struct Summarize: AsyncParsableCommand {
             }
         }
         print("✅ 摘要完成")
+    }
+}
+
+/// resound import-doc <file> --vault <path> —— 导入文档并建索引（文档模块 P1）
+struct ImportDoc: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "import-doc",
+        abstract: "导入本地 md/txt 文档到 vault + 建索引（文档与录音一起参与问答）")
+
+    @Argument(help: "文档文件路径（.md / .txt）")
+    var file: String
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "标题（默认取文件名）")
+    var title: String?
+
+    @Option(name: .long, help: "标签，逗号分隔")
+    var tags: String?
+
+    @Option(name: .long, help: "关联录音 id（可重复 --link a --link b）")
+    var link: [String] = []
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Flag(name: .long, inversion: .prefixedNo, help: "contextual 增强（默认开，--no-context 关）")
+    var context = true
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let fileURL = URL(fileURLWithPath: file)
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+        let fmt = fileURL.pathExtension.lowercased() == "txt" ? "txt" : "markdown"
+        let tagList = (tags ?? "").split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let links = link.map { "recording:\($0)" }
+        let titleArg = title ?? fileURL.deletingPathExtension().lastPathComponent
+
+        let store = DocumentStore(vaultRoot: URL(fileURLWithPath: vault))
+        let (manifest, dir) = try store.importDocument(
+            title: titleArg, text: text, sourceFormat: fmt, tags: tagList, links: links)
+        print("📄 导入：\(manifest.id) → \(dir.path)")
+        try await IndexPipeline(config: cfg).indexDocument(docDir: dir, indexPath: indexURL, enrichContext: context)
     }
 }
 

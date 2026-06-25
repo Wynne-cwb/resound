@@ -21,6 +21,20 @@ public struct SearchHit {
     public let score: Double   // 该路的分数（向量=距离；FTS=rank）
     public let personId: String?   // 说话人（声纹识别填；nil=未标注/unknown）
     public let recordingDate: String?   // 录音本地日期 yyyy-MM-dd（时间检索/引用用）
+    public let sourceKind: String   // "recording" | "document"
+    public let docId: String?       // 文档来源时填
+    public let docTitle: String?    // 文档标题（镜像自 documents 表；引用展示用）
+
+    public init(rowid: Int64, text: String, recordingId: String, start: Double, end: Double,
+                score: Double, personId: String?, recordingDate: String?,
+                sourceKind: String = "recording", docId: String? = nil, docTitle: String? = nil) {
+        self.rowid = rowid; self.text = text; self.recordingId = recordingId
+        self.start = start; self.end = end; self.score = score
+        self.personId = personId; self.recordingDate = recordingDate
+        self.sourceKind = sourceKind; self.docId = docId; self.docTitle = docTitle
+    }
+
+    public var isDocument: Bool { sourceKind == "document" }
 }
 
 /// 派生索引：SQLite + FTS5(trigram) + sqlite-vec。向量存前 L2 归一化（L2 排序≈cosine）。
@@ -66,9 +80,13 @@ public final class Index {
         create virtual table if not exists chunks_vec using vec0(embedding float[\(dim)]);
         create table if not exists enrichment_cache(hash text primary key, context text, model text);
         create table if not exists speaker_refs(name text primary key, count integer, vec text);
+        create table if not exists documents(id text primary key, title text, imported_at text);
+        create table if not exists doc_links(doc_id text, recording_id text);
         """)
         // 增量迁移（旧库 create-if-not-exists 不会加新列）。
         addColumnIfMissing(table: "chunks", column: "recording_date", decl: "text")
+        addColumnIfMissing(table: "chunks", column: "source_kind", decl: "text default 'recording'")
+        addColumnIfMissing(table: "chunks", column: "doc_id", decl: "text")
         addColumnIfMissing(table: "recordings", column: "summary", decl: "text")
         addColumnIfMissing(table: "recordings", column: "summary_template", decl: "text")
     }
@@ -183,19 +201,91 @@ public final class Index {
         try exec("delete from chunks where recording_id='\(recordingId.replacingOccurrences(of: "'", with: "''"))'")
     }
 
-    public func insertChunk(recordingId: String, idx: Int, text: String, context: String?,
+    // MARK: 文档（来源类型 document）
+
+    public func upsertDocument(id: String, title: String, importedAt: String) throws {
+        let sql = """
+        insert into documents(id,title,imported_at) values(?,?,?)
+        on conflict(id) do update set title=excluded.title, imported_at=excluded.imported_at
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, id); bindText(st, 2, title); bindText(st, 3, importedAt)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
+    /// 删除某文档已有的 chunks（重建幂等）。
+    public func deleteChunks(docId: String) throws {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select id from chunks where doc_id=?", -1, &st, nil)
+        bindText(st, 1, docId)
+        var ids: [Int64] = []
+        while sqlite3_step(st) == SQLITE_ROW { ids.append(sqlite3_column_int64(st, 0)) }
+        sqlite3_finalize(st)
+        for rid in ids {
+            try exec("delete from chunks_fts where rowid=\(rid)")
+            try exec("delete from chunks_vec where rowid=\(rid)")
+        }
+        try exec("delete from chunks where doc_id='\(docId.replacingOccurrences(of: "'", with: "''"))'")
+    }
+
+    /// 重写某文档的关联录音镜像（事实源是 document.yaml；这里只做快速反查镜像）。
+    public func setDocLinks(docId: String, recordingIds: [String]) throws {
+        var del: OpaquePointer?
+        sqlite3_prepare_v2(db, "delete from doc_links where doc_id=?", -1, &del, nil)
+        bindText(del, 1, docId)
+        _ = sqlite3_step(del); sqlite3_finalize(del)
+        for rid in recordingIds {
+            var st: OpaquePointer?
+            sqlite3_prepare_v2(db, "insert into doc_links(doc_id,recording_id) values(?,?)", -1, &st, nil)
+            bindText(st, 1, docId); bindText(st, 2, rid)
+            _ = sqlite3_step(st); sqlite3_finalize(st)
+        }
+    }
+
+    /// 某录音关联的文档（id+title），供录音详情「相关文档」反查。
+    public func documentsLinked(toRecording recordingId: String) -> [(id: String, title: String)] {
+        let sql = """
+        select d.id, d.title from doc_links l join documents d on d.id = l.doc_id
+        where l.recording_id=? order by d.imported_at desc
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, recordingId)
+        var out: [(String, String)] = []
+        while sqlite3_step(st) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(st, 0)), String(cString: sqlite3_column_text(st, 1))))
+        }
+        return out
+    }
+
+    /// 删除某文档的全部索引数据（chunks + documents 行 + 关联镜像）。
+    public func deleteDocument(id: String) throws {
+        try deleteChunks(docId: id)
+        let safe = id.replacingOccurrences(of: "'", with: "''")
+        try exec("delete from doc_links where doc_id='\(safe)'")
+        try exec("delete from documents where id='\(safe)'")
+    }
+
+    public func insertChunk(recordingId: String?, idx: Int, text: String, context: String?,
                             start: Double, end: Double, personId: String?,
-                            recordingDate: String?, embedding: [Float]) throws {
+                            recordingDate: String?, embedding: [Float],
+                            sourceKind: String = "recording", docId: String? = nil) throws {
         var st: OpaquePointer?
         sqlite3_prepare_v2(db,
-            "insert into chunks(recording_id,idx,text,context,start,end,person_id,recording_date) values(?,?,?,?,?,?,?,?)",
+            "insert into chunks(recording_id,idx,text,context,start,end,person_id,recording_date,source_kind,doc_id) values(?,?,?,?,?,?,?,?,?,?)",
             -1, &st, nil)
-        bindText(st, 1, recordingId); sqlite3_bind_int64(st, 2, Int64(idx))
+        if let r = recordingId { bindText(st, 1, r) } else { sqlite3_bind_null(st, 1) }
+        sqlite3_bind_int64(st, 2, Int64(idx))
         bindText(st, 3, text)
         if let c = context { bindText(st, 4, c) } else { sqlite3_bind_null(st, 4) }
         sqlite3_bind_double(st, 5, start); sqlite3_bind_double(st, 6, end)
         if let p = personId { bindText(st, 7, p) } else { sqlite3_bind_null(st, 7) }
         if let d = recordingDate { bindText(st, 8, d) } else { sqlite3_bind_null(st, 8) }
+        bindText(st, 9, sourceKind)
+        if let d = docId { bindText(st, 10, d) } else { sqlite3_bind_null(st, 10) }
         guard sqlite3_step(st) == SQLITE_DONE else { sqlite3_finalize(st); throw IndexError.sql(lastErr()) }
         sqlite3_finalize(st)
         let rowid = sqlite3_last_insert_rowid(db)
@@ -288,16 +378,20 @@ public final class Index {
     /// 时间范围（含端点，本地 yyyy-MM-dd）。
     public typealias DateRange = (from: String, to: String)
 
-    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil, recordingId: String? = nil) throws -> [SearchHit] {
-        // vec0 的 KNN 不支持前置过滤：带日期/限定录音时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
-        let filtered = dateRange != nil || recordingId != nil
+    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil,
+                             recordingId: String? = nil, docId: String? = nil) throws -> [SearchHit] {
+        // vec0 的 KNN 不支持前置过滤：带日期/限定录音或文档时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
+        let filtered = dateRange != nil || recordingId != nil || docId != nil
         let knnK = filtered ? max(k, 4000) : k
         let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
         let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
+        let docClause = docId == nil ? "" : "and c.doc_id = ?"
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id, c.recording_date
+        select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id, c.recording_date,
+               c.source_kind, c.doc_id, d.title
         from chunks_vec v join chunks c on c.id = v.rowid
-        where v.embedding match ? and k = \(knnK) \(dateClause) \(recClause) order by v.distance limit \(k)
+        left join documents d on d.id = c.doc_id
+        where v.embedding match ? and k = \(knnK) \(dateClause) \(recClause) \(docClause) order by v.distance limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
@@ -306,17 +400,22 @@ public final class Index {
         bindText(st, bi, vectorJSON(normalize(queryVec))); bi += 1
         if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
         if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
+        if let did = docId { bindText(st, bi, did); bi += 1 }
         return readHits(st)
     }
 
-    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil, recordingId: String? = nil) throws -> [SearchHit] {
+    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil,
+                          recordingId: String? = nil, docId: String? = nil) throws -> [SearchHit] {
         let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "") + "\""
         let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
         let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
+        let docClause = docId == nil ? "" : "and c.doc_id = ?"
         let sql = """
-        select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id, c.recording_date
+        select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id, c.recording_date,
+               c.source_kind, c.doc_id, d.title
         from chunks_fts f join chunks c on c.id = f.rowid
-        where chunks_fts match ? \(dateClause) \(recClause) order by f.rank limit \(k)
+        left join documents d on d.id = c.doc_id
+        where chunks_fts match ? \(dateClause) \(recClause) \(docClause) order by f.rank limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
@@ -325,6 +424,7 @@ public final class Index {
         bindText(st, bi, phrase); bi += 1
         if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
         if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
+        if let did = docId { bindText(st, bi, did); bi += 1 }
         return readHits(st)
     }
 
@@ -333,15 +433,22 @@ public final class Index {
         while sqlite3_step(st) == SQLITE_ROW {
             let person = sqlite3_column_text(st, 6).map { String(cString: $0) }
             let date = sqlite3_column_text(st, 7).map { String(cString: $0) }
+            let kind = sqlite3_column_text(st, 8).map { String(cString: $0) } ?? "recording"
+            let docId = sqlite3_column_text(st, 9).map { String(cString: $0) }
+            let docTitle = sqlite3_column_text(st, 10).map { String(cString: $0) }
+            let recId = sqlite3_column_text(st, 2).map { String(cString: $0) } ?? ""
             hits.append(SearchHit(
                 rowid: sqlite3_column_int64(st, 0),
                 text: String(cString: sqlite3_column_text(st, 1)),
-                recordingId: String(cString: sqlite3_column_text(st, 2)),
+                recordingId: recId,
                 start: sqlite3_column_double(st, 3),
                 end: sqlite3_column_double(st, 4),
                 score: sqlite3_column_double(st, 5),
                 personId: person,
-                recordingDate: date))
+                recordingDate: date,
+                sourceKind: kind,
+                docId: docId,
+                docTitle: docTitle))
         }
         return hits
     }

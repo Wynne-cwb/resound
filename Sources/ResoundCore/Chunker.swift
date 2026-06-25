@@ -51,4 +51,53 @@ public struct Chunker {
         flush()
         return chunks
     }
+
+    /// 无时间轴文本（文档）切块：按空行/Markdown 标题分段，累积到 targetChars 切；
+    /// 单段超 maxChars 硬切。start/end 留 0（文档无时间轴）。
+    public func chunk(text: String) -> [Chunk] {
+        // 1) 切成 block：空行分隔；Markdown 标题自成一 block（兼作边界 + 上下文锚）
+        var blocks: [String] = []
+        var cur = ""
+        func pushCur() {
+            let t = cur.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { blocks.append(t) }
+            cur = ""
+        }
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { pushCur(); continue }
+            if trimmed.hasPrefix("#") { pushCur(); blocks.append(trimmed); continue }
+            cur += (cur.isEmpty ? "" : "\n") + line
+        }
+        pushCur()
+
+        // 2) 合并 block 到 chunk
+        var chunks: [Chunk] = []
+        var buf = ""
+        var idx = 0
+        func flush() {
+            let t = buf.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { chunks.append(Chunk(index: idx, text: t, start: 0, end: 0)); idx += 1 }
+            buf = ""
+        }
+        for b in blocks {
+            if b.count > maxChars {
+                flush()
+                var rest = Substring(b)
+                while rest.count > maxChars {
+                    let cut = rest.index(rest.startIndex, offsetBy: maxChars)
+                    chunks.append(Chunk(index: idx, text: String(rest[..<cut]), start: 0, end: 0)); idx += 1
+                    rest = rest[cut...]
+                }
+                buf = String(rest)
+                if buf.count >= targetChars { flush() }
+                continue
+            }
+            buf += (buf.isEmpty ? "" : "\n\n") + b
+            if buf.count >= targetChars { flush() }
+        }
+        flush()
+        return chunks
+    }
 }

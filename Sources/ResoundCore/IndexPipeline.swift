@@ -37,7 +37,18 @@ public struct IndexPipeline {
                 recDir: recDir, index: index, embedder: embedder, chunker: chunker,
                 enrichContext: enrichContext, contextModel: contextModel, log: log)
         }
-        log("✅ 索引完成：\(recordings.count) 录音 / \(totalChunks) chunks → \(indexPath.path)")
+
+        let documents = findDocuments(vaultRoot)
+        var totalDocChunks = 0
+        if !documents.isEmpty {
+            log("🔎 发现 \(documents.count) 篇文档")
+            for docDir in documents {
+                totalDocChunks += try await indexOneDocument(
+                    docDir: docDir, index: index, embedder: embedder, chunker: chunker,
+                    enrichContext: enrichContext, contextModel: contextModel, log: log)
+            }
+        }
+        log("✅ 索引完成：\(recordings.count) 录音 / \(totalChunks) chunks + \(documents.count) 文档 / \(totalDocChunks) chunks → \(indexPath.path)")
     }
 
     /// 只索引单条录音（录完即用：chunk → 说话人标注 → 上下文 → embed → 入库）。幂等。
@@ -56,6 +67,59 @@ public struct IndexPipeline {
             chunker: Chunker(), enrichContext: enrichContext, contextModel: contextModel,
             labelSpeakers: labelSpeakers, log: log)
         log("✅ 已索引：\(recDir.lastPathComponent)（\(n) chunks）")
+    }
+
+    /// 只索引单篇文档（导入即用）。幂等。
+    public func indexDocument(docDir: URL, indexPath: URL,
+                              enrichContext: Bool = true, contextModel: String? = nil,
+                              log: (String) -> Void = { print($0) }) async throws {
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        try index.setMeta("embedding_model", config.embeddingModel)
+        try index.setMeta("embedding_dim", String(config.embeddingDim))
+        try index.setMeta("distance", "cosine")
+        let n = try await indexOneDocument(
+            docDir: docDir, index: index, embedder: EmbeddingClient(config: config),
+            chunker: Chunker(), enrichContext: enrichContext, contextModel: contextModel, log: log)
+        log("✅ 已索引文档：\(docDir.lastPathComponent)（\(n) chunks）")
+    }
+
+    /// 单篇文档的索引逻辑（build 与 indexDocument 共用）。返回 chunk 数。
+    /// 文档无时间轴/说话人：start/end=0、person_id=null、recording_date=null（故不参与时间过滤检索）。
+    private func indexOneDocument(docDir: URL, index: Index, embedder: EmbeddingClient,
+                                  chunker: Chunker, enrichContext: Bool, contextModel: String?,
+                                  log: (String) -> Void) async throws -> Int {
+        guard let manifest = parseDocumentManifest(docDir) else {
+            log("  ⚠️ 跳过（无 document.yaml）：\(docDir.lastPathComponent)"); return 0
+        }
+        guard let text = documentContent(docDir),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            log("  ⚠️ 跳过（无 content.md）：\(manifest.id)"); return 0
+        }
+        let chunks = chunker.chunk(text: text)
+        try index.upsertDocument(id: manifest.id, title: manifest.title, importedAt: manifest.importedAt)
+        try index.deleteChunks(docId: manifest.id)   // 幂等重建
+        try index.setDocLinks(docId: manifest.id, recordingIds: manifest.linkedRecordingIds)
+
+        var contexts: [Int: String] = [:]
+        if enrichContext {
+            contexts = try await enrichAll(chunks: chunks, document: text, index: index,
+                model: contextModel ?? config.contextModel, log: log)
+        }
+        for batch in chunks.chunked(into: 32) {
+            let texts = batch.map { c -> String in
+                if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
+                return c.text
+            }
+            let vecs = try await embedder.embedDocuments(texts)
+            for (chunk, vec) in zip(batch, vecs) {
+                try index.insertChunk(recordingId: nil, idx: chunk.index,
+                    text: chunk.text, context: contexts[chunk.index],
+                    start: 0, end: 0, personId: nil, recordingDate: nil, embedding: vec,
+                    sourceKind: "document", docId: manifest.id)
+            }
+        }
+        log("  ✓ \(manifest.id)：\(chunks.count) chunks（文档）")
+        return chunks.count
     }
 
     /// 单条录音的索引逻辑（build 与 indexRecording 共用）。返回 chunk 数。
@@ -167,11 +231,11 @@ public struct IndexPipeline {
                        rerank: Bool = false, rerankModel: String? = nil,
                        rerankCandidates: Int = 15,
                        dateRange: Index.DateRange? = nil,
-                       recordingId: String? = nil) async throws -> [SearchHit] {
+                       recordingId: String? = nil, docId: String? = nil) async throws -> [SearchHit] {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         let qvec = try await EmbeddingClient(config: config).embedQuery(query)
-        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange, recordingId: recordingId)
-        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange, recordingId: recordingId)
+        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange, recordingId: recordingId, docId: docId)
+        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange, recordingId: recordingId, docId: docId)
         let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
         guard rerank else { return Array(fused.prefix(topK)) }
 
@@ -250,6 +314,17 @@ public struct IndexPipeline {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         let hits = try await search(query: question, indexPath: indexPath, topK: topK,
                                     rerank: true, recordingId: recordingId)
+        let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
+        return (text, hits)
+    }
+
+    /// 「向本文档提问」：检索严格限定在单篇文档内 + 综合带引用（answerInRecording 的文档镜像）。
+    public func answerInDocument(question: String, documentId: String, indexPath: URL,
+                                 topK: Int = 6, answerModel: String? = nil,
+                                 history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let hits = try await search(query: question, indexPath: indexPath, topK: topK,
+                                    rerank: true, docId: documentId)
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)
     }
