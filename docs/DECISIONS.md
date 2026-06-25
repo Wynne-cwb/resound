@@ -5,6 +5,26 @@
 
 ---
 
+## 开源：repo 设为 public + 体检（2026-06-25）
+
+**做了**：把 `Wynne-cwb/resound` 设为公开前的安全体检 + 收尾。结论：代码与全部 git 历史**无任何 key/token 泄露**，`.env`/`*.sqlite`/`vaults/` 从未进过 git。处理项：①`experiments/diar-py/*.py` 写死的 `/Users/wb.chen/...` 绝对路径 → `os.path.dirname(__file__)`（不再泄露用户名）；②README 拆**英文为主双语**（[README.md](../README.md) + [README.zh-CN.md](../README.zh-CN.md)），顶部互切；③`.gitignore` 补 `__pycache__/`。**坑/取舍**：提交者邮箱（QQ）在全 commit 上，公开即永久——用户判断可接受，**不改写历史**（改写会变所有 SHA、收益低）。私有 vault repo `wayne-resound` 含个人数据，**不应在公开文档当模板**：删掉 README 的模板 TIP，改成「从零建自己 Vault」可复制脚手架；data-contract/DECISIONS/CLAUDE 里的具体引用泛化为 `<你>/my-resound-vault`（名字仍残留在旧 commit 历史里，但私有 repo 名≠访问权，无实际风险）。
+
+## 文档模块 P1 设计（地基）（2026-06-25）
+
+**背景**：Resound 定位「会议知识库」，会议常伴文档做信息同步，需支持文档上传并与录音结合、辅助 LLM 检索与生成。整体是大方向（3 类生成诉求 + md/PDF/docx/PPT/在线多格式），故**分期**，本轮只设计 **P1 地基**。spec：[superpowers/specs/2026-06-25-documents-p1-design.md](superpowers/specs/2026-06-25-documents-p1-design.md)。
+
+**关键决策（与用户对齐）**：
+- **D1 文档=wiki 一等公民，可关联 0~N 场录音、也可不关联**（不是「会议附件」）。最 wiki-native，现有 `notes/`+`chunks` 几乎已备好。
+- **D2 主干方案 A：边缘归一化**——各格式入库转纯文本/markdown，下游只认归一化文本、原件留档；结构感知（页码/页号）作后续增量增强（方案 B），外部转换器/LLM（方案 C）仅难格式局部兜底、默认本地优先。
+- **D3 分期 P1→P4**：P1 地基（md/txt 一等公民+跨源检索问答+手动关联）/ P2 生成 / P3 富格式抽取(PDF/PPT/docx，OCR 最后) / P4 在线集成(Google Docs/Notion/URL)。第一期即可用，不必等所有格式做完。
+- **D4 `documents/` 与 `notes/` 分两个实体**：notes=app 内手写自由笔记；documents=导入的外部文档（带原件/格式/导入溯源）。P1 都是 md 但语义与未来不同。
+
+**技术地基（已核对现状）**：检索/问答管线（hybrid→RRF→rerank→synthesize）是 **source-agnostic** 的——文档切块进 `chunks` 即自动可检索/问答；`chunks` 的 source 本就是个 `recording_id` 文本列、`start/end/person_id` 可空。P1 后端改动仅三处：① vault 新增 `documents/<id>/`(document.yaml + content.md + original) ② `chunks` 加 `source_kind`('recording'|'document') + `doc_id` 两列（`addColumnIfMissing` 增量迁移）+ `doc_links` 镜像表 ③ 复用 Chunker/embedding 的文档 ingest 循环。问答引用按 `source_kind` 区分 🎙️录音(跳时间轴)/📄文档(跳原文段落)。
+
+**UI（功能定，视觉交 Claude Design）**：5 个功能面=文档主面/导入流程/文档详情(含「向本文档提问」)/关联录音(双向)/问答跨源引用区分。spec §8.1 附**不预设视觉方向**的 handoff prompt，用户拿去让 Claude Design 出图。
+
+**下一步**：用户 review spec → 转 writing-plans 出实现计划。
+
 ## 会议自动开始/停止录音（对称双开关 + 起止弹窗）（2026-06-25）
 
 **需求**：①会议结束自动停录；②设置里加「会议开始自动开录」开关。追加：自动停录也做成开关，且**会议结束时弹「停止录音？」一键弹窗**（关掉自动停时）。
