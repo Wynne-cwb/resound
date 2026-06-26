@@ -79,6 +79,7 @@ public final class Index {
         create virtual table if not exists chunks_fts using fts5(text, tokenize='trigram');
         create virtual table if not exists chunks_vec using vec0(embedding float[\(dim)]);
         create table if not exists enrichment_cache(hash text primary key, context text, model text);
+        create table if not exists embedding_cache(hash text primary key, vec text, model text);
         create table if not exists speaker_refs(name text primary key, count integer, vec text);
         create table if not exists documents(id text primary key, title text, imported_at text);
         create table if not exists doc_links(doc_id text, recording_id text);
@@ -165,6 +166,30 @@ public final class Index {
         sqlite3_prepare_v2(db, sql, -1, &st, nil)
         defer { sqlite3_finalize(st) }
         bindText(st, 1, hash); bindText(st, 2, context); bindText(st, 3, model)
+        guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
+    }
+
+    // MARK: embedding 缓存（按 hash(model+入向量文本) 缓存原始向量，避免重建索引/改错字重复付费）
+    // 存的是 embedDocuments 返回的**原始**向量；归一化由 insertChunk 统一做。
+
+    public func cachedEmbedding(hash: String) -> [Float]? {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select vec from embedding_cache where hash=?", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, hash)
+        guard sqlite3_step(st) == SQLITE_ROW, let c = sqlite3_column_text(st, 0) else { return nil }
+        return parseVectorJSON(String(cString: c))
+    }
+
+    public func setCachedEmbedding(hash: String, vec: [Float], model: String) throws {
+        let sql = """
+        insert into embedding_cache(hash,vec,model) values(?,?,?)
+        on conflict(hash) do update set vec=excluded.vec, model=excluded.model
+        """
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        bindText(st, 1, hash); bindText(st, 2, vectorJSON(vec)); bindText(st, 3, model)
         guard sqlite3_step(st) == SQLITE_DONE else { throw IndexError.sql(lastErr()) }
     }
 
@@ -571,4 +596,17 @@ func normalize(_ v: [Float]) -> [Float] {
 
 func vectorJSON(_ v: [Float]) -> String {
     "[" + v.map { String($0) }.joined(separator: ",") + "]"
+}
+
+/// 解析 vectorJSON 写出的 `[f,f,…]`。坏数据 → nil（当作缓存未命中，安全重嵌）。
+func parseVectorJSON(_ s: String) -> [Float]? {
+    let body = s.trimmingCharacters(in: CharacterSet(charactersIn: "[] \n\t"))
+    let parts = body.split(separator: ",")
+    guard !parts.isEmpty else { return nil }
+    var out = [Float](); out.reserveCapacity(parts.count)
+    for p in parts {
+        guard let f = Float(p.trimmingCharacters(in: .whitespaces)) else { return nil }
+        out.append(f)
+    }
+    return out
 }

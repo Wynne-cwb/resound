@@ -110,7 +110,7 @@ public struct IndexPipeline {
                 if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
                 return c.text
             }
-            let vecs = try await embedder.embedDocuments(texts)
+            let vecs = try await embedAll(texts: texts, index: index, embedder: embedder, log: log)
             for (chunk, vec) in zip(batch, vecs) {
                 try index.insertChunk(recordingId: nil, idx: chunk.index,
                     text: chunk.text, context: contexts[chunk.index],
@@ -170,7 +170,7 @@ public struct IndexPipeline {
                 if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
                 return c.text
             }
-            let vecs = try await embedder.embedDocuments(texts)
+            let vecs = try await embedAll(texts: texts, index: index, embedder: embedder, log: log)
             for (chunk, vec) in zip(batch, vecs) {
                 let person = personSpans.isEmpty ? nil : personFor(personSpans, start: chunk.start, end: chunk.end)
                 try index.insertChunk(recordingId: manifest.id, idx: chunk.index,
@@ -609,6 +609,32 @@ public struct IndexPipeline {
             }
         }
         return out
+    }
+
+    // MARK: embedding（带缓存）—— 只对未命中的入向量文本调 API，省「改个错字重嵌全场」的钱
+
+    private func embedAll(texts: [String], index: Index, embedder: EmbeddingClient,
+                          log: (String) -> Void) async throws -> [[Float]] {
+        let model = config.embeddingModel
+        var out = [[Float]?](repeating: nil, count: texts.count)
+        var todoIdx: [Int] = []
+        var todoTexts: [String] = []
+        for (i, t) in texts.enumerated() {
+            if let v = index.cachedEmbedding(hash: chunkHash(model: model, text: t)) {
+                out[i] = v
+            } else {
+                todoIdx.append(i); todoTexts.append(t)
+            }
+        }
+        if !todoTexts.isEmpty {
+            log("  🔢 embedding \(todoTexts.count)/\(texts.count) chunk（\(model)）…")
+            let vecs = try await embedder.embedDocuments(todoTexts)
+            for (j, v) in vecs.enumerated() {
+                out[todoIdx[j]] = v
+                try? index.setCachedEmbedding(hash: chunkHash(model: model, text: todoTexts[j]), vec: v, model: model)
+            }
+        }
+        return out.map { $0 ?? [] }
     }
 }
 

@@ -1159,3 +1159,20 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 - README 双语「建一个属于自己的 Vault」段顶加 `[!TIP]`：应用内选文件夹即自动建库，手动脚手架步骤改定位为「CLI 用户/想预配 git 的人」。
 
 **零回归**：`ensureScaffold` 对已有 vault 是 no-op；CLI 走 `.env` 的 `VAULT_PATH` 路径不变。
+
+## Token 优化审计 + P0 embedding 内容缓存（2026-06-26）
+
+**审计结论（哪些已优化、哪些没）**：
+- ✅ **Contextual 上下文生成**（LLM，1 次/chunk，最贵的 LLM 派生物）：已用 `enrichment_cache(hash,context,model)` 按 `hash(contextModel+chunk文本)` 缓存（[IndexPipeline.enrichAll](../Sources/ResoundCore/IndexPipeline.swift)），重建索引命中不重付；且 [ContextualEnricher](../Sources/ResoundCore/ContextualEnricher.swift) 刻意把整篇文档放 prompt 前部 + 限并发 4，吃 DeepSeek 自动 prefix 缓存（整篇只为输入付一次）。
+- ✅ **AI 校对**：系统提示在各批次相同 → DeepSeek 自动缓存该前缀（小赢），且只在转写时跑一次。
+- ⚠️ **embedding 无缓存**（本次修的缺口）：`indexRecording` 走 `deleteChunks`→对全部 chunk `embedDocuments`，而触发点是 **⌘F 查找替换改错字→`scheduleReindex`**（[LibraryModel.swift:473](../Sources/ResoundApp/LibraryModel.swift)）。即改一个词→整条录音几十上百 chunk 全部重新 embedding。embedding API 无服务端 prompt 缓存，只能客户端按内容哈希省。高频路径，浪费最直接。
+- ⚠️ **测不了缓存命中率**：[ChatClient](../Sources/ResoundCore/ChatClient.swift) 只取 `content`，丢了响应里的 `usage`（含 `prompt_cache_hit_tokens`），所以「上下文靠 prefix 缓存省钱」目前无数据验证。
+
+**决策**：用户拍板只做 **P0（embedding 内容缓存）**，P1（记 usage 埋点）/P2（把缓存从可重建的 index.sqlite 搬到 App Support，使全量删库重建也不重付）暂不做。
+
+**P0 落地**：
+- `Index`：新增 `embedding_cache(hash text primary key, vec text, model text)` 表 + `cachedEmbedding(hash)->[Float]?` / `setCachedEmbedding(hash:vec:model:)`，存 **embedDocuments 返回的原始向量**（vectorJSON 序列化），归一化仍由 `insertChunk` 统一做（避免双重归一/口径分叉）。新增 `parseVectorJSON`（坏数据→nil，当未命中安全重嵌）。
+- `IndexPipeline`：新增 `embedAll(texts:index:embedder:log:)`——按 `chunkHash(model: config.embeddingModel, text)` 查缓存，只对未命中文本调一次 `embedDocuments`，新结果写回缓存；录音/文档两处 `embedder.embedDocuments(texts)` 调用点改走它。key 复用 `chunkHash`（与上下文缓存同函数但分属不同表，无冲突）。
+- **零回归**：首次索引全 miss（行为同前）；二次/改错字后只重嵌变化 chunk。embedding 文本含 context 前缀，context 变则 hash 变、自然重嵌，正确。
+- **验证**：纯 Foundation 单测确认 `vectorJSON↔parseVectorJSON` **bitwise 无损**（含极值/负数/科学计数）、坏数据/空串→nil。`swift build` 通过。缓存命中流与已在生产跑的 `enrichAll` 同构。
+- **未做完整 CLI 实测**：全量 `index` 首跑缓存空要真花 embedding token，没必要只为验证而预付全库；下一次真实 re-index（用户改错字）会自然首付该条→之后命中。
