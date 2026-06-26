@@ -1141,3 +1141,21 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 
 **结论**：原以为是 ANE 崩，**cpuOnly 证伪**——CPU 也崩，是 FluidAudio 0.15.4 离线 embedding extractor 的内存 bug（SIGBUS=非法/未对齐访问），与算力无关。库已是最新版（0.15.4，无更新可升）。硬崩是 signal、**无法 try/catch**，接 production 会拖垮整个 App。
 **决策**：offline 后端**保持禁用/仅 CLI 实验**（代码留 `loadOfflineModelsCPUOnly` + 醒目警告注释）；production 维持 **Sortformer(≤4，干净) + 逐窗回退(>4)**。真要去 4 人上限只能 **vendor/fork FluidAudio 打补丁**（工作量+维护成本大）——等用户拍板是否值得。
+
+## Onboarding 自动建 Vault（2026-06-26）
+
+**需求**：用户在 Onboarding 选好本地存储地址后，自动帮他创建 vault 数据结构（不再要求用户手动 `mkdir`+写 `resound.yaml`）。
+
+**两个决策（用户拍板）**：
+1. **录音库必填**——未设合法 vault 不能进主界面（与 chat+embedding 同级门禁）。理由：没 vault 主功能（录音/索引/问答）全都没法落地，引导期一次配齐最干净。
+2. **只建数据结构，不做 git init**——脚手架只创建文件/目录，git 同步交给用户自行 `git init`+关联远端（与「git 自动推送是可选项」一致，避免替用户决定 remote）。
+
+**落地**：
+- `Vault.ensureScaffold(timezone:language:)`（[Vault.swift](../Sources/ResoundCore/Vault.swift)）：**幂等**——根目录已有 `resound.yaml` 直接返回 `false`（采用现有 vault、绝不覆盖）；否则按数据契约 §2/§3 建最小结构（`resound.yaml` + `people/people.yaml` + `recordings`/`documents`/`notes`(各放 `.gitkeep`) + `glossary.txt` + `.gitattributes`(m4a/flac/wav 走 LFS) + `.gitignore`(.DS_Store)），返回 `true`。timezone 默认取系统、language 默认 zh。错误统一包成 `VaultError.ioFailure`。
+- `AppModel`（[AppModel.swift](../Sources/ResoundApp/AppModel.swift)）：`vaultReady`/`vaultPath` 状态；`refreshVaultReady()` 读 `Config.load().vaultPath` 并用 `Vault.validate()` 校验；`chooseVault()` 走 NSOpenPanel（`canCreateDirectories`）→ `ensureScaffold` → `ConfigStore.save(["VAULT_PATH":…])` → toast「已创建/已使用现有录音库」。
+- `OnboardingView`：新增「录音库位置」卡片（folder 图标，已设显示路径+「更换」，未设显示「选择文件夹…」），`canEnter = chatOK && embeddingOK && vaultReady`，statusHint 加录音库状态点。
+- `ResoundApp.onAppear`：`refreshVaultReady()` 后 `showOnboarding = providers.needsOnboarding || !vaultReady`（老用户已配 vault 不受影响）。
+- `SettingsModel.pickVaultPath`：选目录时也调 `ensureScaffold`，所以「设置›存储›录音库目录」改路径同样自动建库——也是老用户的验证入口。
+- README 双语「建一个属于自己的 Vault」段顶加 `[!TIP]`：应用内选文件夹即自动建库，手动脚手架步骤改定位为「CLI 用户/想预配 git 的人」。
+
+**零回归**：`ensureScaffold` 对已有 vault 是 no-op；CLI 走 `.env` 的 `VAULT_PATH` 路径不变。

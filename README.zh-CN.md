@@ -58,6 +58,9 @@ Resound 把三样东西**物理分开**，互不混存：
 
 ### 建一个属于自己的 Vault
 
+> [!TIP]
+> 在应用内你不用手动建：首次启动引导（以及 **设置 › 存储 › 录音库目录**）会让你选一个文件夹，然后**自动创建好 vault 数据结构**（`resound.yaml`、`people/people.yaml`、`recordings/` `documents/` `notes/`、用于 LFS 的 `.gitattributes`）。选已有 vault 则原样采用。下面的手动步骤面向 CLI 用户，或想自己预先配好 git 的人。
+
 Vault 就是一个你自己拥有的文件夹（一个 git repo），结构小而固定。最小可用的脚手架：
 
 ```bash

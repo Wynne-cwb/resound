@@ -34,7 +34,8 @@ struct ResoundApp: App {
                     settings.app = app
                     providers.app = app
                     providers.load()             // 迁移旧 .env → providers.json；决定是否首启引导
-                    app.showOnboarding = providers.needsOnboarding
+                    app.refreshVaultReady()      // 录音库是否已设（引导门禁的另一半）
+                    app.showOnboarding = providers.needsOnboarding || !app.vaultReady
                     settings.load()          // 预载模板等，侧栏 Templates 计数即时正确
                     chat.app = app
                     chat.loadHistory()

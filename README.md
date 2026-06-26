@@ -61,6 +61,9 @@ Resound keeps three things **physically separate** and never mixes them:
 
 ### Create your own vault
 
+> [!TIP]
+> In the app you don't need to do this by hand: onboarding (and **Settings › Storage › Recording library**) asks you to pick a folder, then **auto-creates the vault structure** for you (`resound.yaml`, `people/people.yaml`, `recordings/` `documents/` `notes/`, `.gitattributes` for LFS). Pick an existing vault and it's adopted as-is. The manual steps below are for CLI users or if you want to pre-configure git.
+
 A vault is just a folder (a git repo you own) with a small, fixed structure. Scaffold a minimal one:
 
 ```bash

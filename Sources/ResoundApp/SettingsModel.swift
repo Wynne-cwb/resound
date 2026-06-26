@@ -125,8 +125,15 @@ final class SettingsModel: ObservableObject {
     func pickVaultPath() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false; panel.prompt = "选为录音库"
-        if panel.runModal() == .OK, let url = panel.url { editConfig.vaultPath = url.path }
+        panel.allowsMultipleSelection = false; panel.canCreateDirectories = true; panel.prompt = "选为录音库"
+        panel.message = "选择一个文件夹作为录音库——Resound 会在其中自动创建数据结构"
+        if panel.runModal() == .OK, let url = panel.url {
+            // 选好即自动建好 vault 数据结构（已是 vault 则采用、不覆盖）。
+            do { let created = try Vault(root: url).ensureScaffold()
+                 app?.toast(created ? "已创建录音库结构：\(url.lastPathComponent)" : "已使用现有录音库：\(url.lastPathComponent)") }
+            catch { app?.toast("创建录音库结构失败：\(error)") }
+            editConfig.vaultPath = url.path
+        }
     }
 
     func exportConfig() {

@@ -10,14 +10,15 @@ struct OnboardingView: View {
 
     private var chatOK: Bool { if case .ok = providers.probe[.chat] { return true } else { return false } }
     private var embeddingOK: Bool { if case .ok = providers.probe[.embedding] { return true } else { return false } }
-    private var canEnter: Bool { chatOK && embeddingOK }
+    private var canEnter: Bool { chatOK && embeddingOK && app.vaultReady }
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    CapabilityCard(cap: .chat, collapsible: false).padding(.top, 16)
+                    vaultCard.padding(.top, 16)
+                    CapabilityCard(cap: .chat, collapsible: false).padding(.top, 12)
                     CapabilityCard(cap: .embedding, collapsible: false).padding(.top, 12)
                     CapabilityCard(cap: .transcribe, collapsible: false).padding(.top, 12)
                     Color.clear.frame(height: 24)
@@ -68,9 +69,52 @@ struct OnboardingView: View {
 
     @ViewBuilder private var statusHint: some View {
         HStack(spacing: 14) {
+            stepDot("录音库", ok: app.vaultReady)
             stepDot("对话模型", ok: chatOK)
             stepDot("向量模型", ok: embeddingOK)
         }
+    }
+
+    /// 录音库位置：选文件夹 → 自动建好 vault 数据结构（AppModel.chooseVault）。
+    private var vaultCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(pal.accentSoft)
+                    Image(systemName: "folder").font(.system(size: 15)).foregroundStyle(pal.accent)
+                }.frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("录音库位置").font(.system(size: 14, weight: .semibold)).foregroundStyle(pal.text)
+                    Text("录音、转录、文档都存在这个本地文件夹。选好后 Resound 会自动建好数据结构。")
+                        .font(.system(size: 12)).foregroundStyle(pal.text2).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                if app.vaultReady { Image(systemName: "checkmark.circle.fill").font(.system(size: 16)).foregroundStyle(pal.ok) }
+            }
+            if app.vaultReady && !app.vaultPath.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.fill").font(.system(size: 11)).foregroundStyle(pal.text3)
+                    Text(app.vaultPath).font(.system(size: 12, design: .monospaced)).foregroundStyle(pal.text2)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Button { app.chooseVault() } label: {
+                        Text("更换").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.accent)
+                    }.buttonStyle(.plainHit).hoverCursor()
+                }
+                .padding(.horizontal, 12).frame(height: 38)
+                .background(pal.inset, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            } else {
+                Button { app.chooseVault() } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "folder.badge.plus").font(.system(size: 12, weight: .semibold))
+                        Text("选择文件夹…").font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white).padding(.horizontal, 16).frame(height: 38)
+                    .background(pal.accent, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }.buttonStyle(.plainHit).hoverCursor()
+            }
+        }
+        .padding(16).card(pal, corner: 13)
     }
 
     private func stepDot(_ label: String, ok: Bool) -> some View {
