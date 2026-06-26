@@ -418,10 +418,23 @@ public struct IndexPipeline {
                                   topK: Int = 6, answerModel: String? = nil,
                                   history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
-        let hits = try await search(query: question, indexPath: indexPath, topK: topK,
+        // 检索用「借历史改写成可独立检索」的查询（追问如"那么时间线呢"才能命中）；综合仍用原问 + 全量历史。
+        let retrievalQuery = await condensedQuery(question, history: history)
+        let hits = try await search(query: retrievalQuery, indexPath: indexPath, topK: topK,
                                     rerank: true, filters: .init(recordingId: recordingId))
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)
+    }
+
+    /// 把可能含指代的追问借对话历史改写成可独立检索的查询；无历史则原样返回。
+    /// 与全局 answer() 一致复用 QueryPlanner 的历史感知改写，只取其 query——
+    /// scope 已被 recordingId/docId 锁定，故忽略 plan 的 shape/filters，仅借它把"那么时间线呢"补全成完整查询。
+    private func condensedQuery(_ question: String, history: [ChatTurn]) async -> String {
+        guard !history.isEmpty else { return question }
+        let plan = await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel))
+            .plan(question, history: history)
+        let q = plan.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return q.isEmpty ? question : q
     }
 
     /// 「向本文档提问」：检索严格限定在单篇文档内 + 综合带引用（answerInRecording 的文档镜像）。
@@ -429,7 +442,8 @@ public struct IndexPipeline {
                                  topK: Int = 6, answerModel: String? = nil,
                                  history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
-        let hits = try await search(query: question, indexPath: indexPath, topK: topK,
+        let retrievalQuery = await condensedQuery(question, history: history)
+        let hits = try await search(query: retrievalQuery, indexPath: indexPath, topK: topK,
                                     rerank: true, filters: .init(docId: documentId))
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)

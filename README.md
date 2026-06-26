@@ -35,7 +35,7 @@ transcripts stop getting it wrong.
 
 ## Features
 
-- **Meeting recording** — One click captures your mic + the other side of a Google Meet call (dual-track mix via ScreenCaptureKit). When a Meet call is detected it pops a screen-level prompt; you can set it to **auto-start on meeting begin / auto-stop on meeting end** (or surface a one-click confirmation panel), no manual steps needed.
+- **Meeting recording** — One click captures your mic + the other side of a Google Meet call (dual-track mix via ScreenCaptureKit). When a Meet call is detected it pops a screen-level prompt; you can set it to **auto-start on meeting begin / auto-stop on meeting end** (or surface a one-click confirmation panel), no manual steps needed. While recording, a small **draggable on-screen indicator** (pulsing dot + elapsed time + stop button) floats above other apps so you always know you're recording and can stop in one click — even when the main window is hidden. Toggle it in **Settings › General › Recording indicator**.
 - **Transcription** — Defaults to online `whisper-large-v3-turbo` (fast), with local WhisperKit as an offline fallback. Before upload, silero VAD **trims long silences/noise** (cutting whisper's "thanks for watching"-style hallucinations and saving tokens, with timestamps mapped back to the original timeline), then loudness-normalizes speech. After transcription: Traditional→Simplified normalization + glossary correction + **LLM proofreading** (fixing homophone typos and misheard English proper nouns).
 - **Speaker diarization** — Sortformer neural segmentation (running on the Apple Neural Engine) → silero VAD to drop silence → CAM++ voiceprints → match against the enrollment library for real names; clusters are merged when voiceprints are close, with naming kept mutually exclusive to prevent mismatches. Name a voice once and its voiceprint is remembered, recognized automatically across recordings — the more you label, the more accurate it gets.
 - **AI meeting notes** — Templated summaries (general / one-on-one / team meeting / brainstorm), written into the searchable index. When a recording has **linked documents**, their full text is automatically fed in as background (with a length cap), so summaries reflect the PRD/agenda/minutes too. The **Templates page** lets you add, edit, and delete templates (placeholders include `{documents}`), get AI help generating/polishing prompts, and set a default.
@@ -113,7 +113,7 @@ scripts/build-sherpa-onnx.sh
 
 # 2. Configure keys: create .env in the repo root (see the "Configuration" table below)
 
-# 3. Build (first run pulls WhisperKit / FluidAudio / MarkdownUI etc.)
+# 3. Build (first run pulls WhisperKit / FluidAudio / swift-markdown etc.)
 swift build
 ```
 
@@ -195,7 +195,7 @@ ask ─► QueryPlanner (LLM extracts time range / decides qa·digest)
 ## Tech stack
 
 - **Local:** AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio (Sortformer segmentation / silero VAD) · sherpa-onnx (CAM++ voiceprints) · SQLite (FTS5 + sqlite-vec)
-- **Dependencies:** [WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
+- **Dependencies:** [WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown](https://github.com/apple/swift-markdown) (parse only; rendering is a native SwiftUI renderer) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
 - **API:** Any OpenAI-compatible service — chat / embedding / transcription can each be assigned to a different provider
 
 ## Project structure

@@ -1,5 +1,4 @@
 import SwiftUI
-import MarkdownUI
 import ResoundCore
 
 struct LibraryView: View {
@@ -384,7 +383,10 @@ struct LibraryView: View {
                 .padding(.horizontal, 40).padding(.top, 32).padding(.bottom, 60)
             }
             .onChange(of: vm.findQuery) { _, _ in
-                if let id = vm.firstMatchLineID() { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+                Perf.measure("find.scrollTo") {
+                    // 不加动画：长转录里动画滚动会强制 LazyVStack 一次性实例化沿途所有行（原 14s 卡死元凶）；直接跳转便宜得多。
+                    if let id = vm.firstMatchLineID() { proxy.scrollTo(id, anchor: .center) }
+                }
             }
             // 引用跳转：scrollToLine 常在本视图挂载**之前**就被后台 refreshDetail 设好（点引用时还在 Ask 页），
             // 单靠 onChange 会错过那次变更 → 永不滚动。故三处都触发待定滚动：挂载时、转录载入后、scrollToLine 变更时。
@@ -647,6 +649,7 @@ struct LibraryView: View {
     // MARK: 转录 Tab
 
     @ViewBuilder private var transcriptTab: some View {
+        let _ = Perf.body("transcriptTab")
         if vm.identifyingSelected && !vm.hasSpeakers {
             HStack(spacing: 14) {
                 Spinner(size: 18, color: pal.accent)
@@ -773,13 +776,20 @@ struct LibraryView: View {
     // 单层 LazyVStack：每行独立懒加载、scrollTo(line.id) 必可寻址（引用跳转可靠）。
     // 说话人 chip 在段首（item.chip 非 nil）随行内联渲染。
     private var transcriptLines: some View {
-        LazyVStack(alignment: .leading, spacing: 2) {
+        let q = (vm.findOpen && !vm.findQuery.isEmpty) ? vm.findQuery : ""
+        let activeID = vm.activeLineID
+        return LazyVStack(alignment: .leading, spacing: 2) {
             ForEach(vm.flatLines) { item in
                 VStack(alignment: .leading, spacing: 2) {
                     if vm.hasSpeakers, let spk = item.chip {
                         transcriptSpeakerChip(spk).padding(.leading, 16).padding(.top, 14).padding(.bottom, 4)
                     }
-                    transcriptRow(item.line)
+                    // Equatable 行：仅当本行的 text/active/查询词/主题变了才重渲——
+                    // 否则 vm 任何无关 @Published 变更（播放头/录音计时/本场提问态…）不再触发全列表 157 行重算。
+                    TranscriptLineRow(lineID: item.line.id, start: item.line.start, text: item.line.text,
+                                      active: activeID == item.line.id, query: q, pal: pal,
+                                      onSeek: { vm.seek(to: item.line.start) })
+                        .equatable()
                 }
                 .id(item.line.id)
             }
@@ -821,31 +831,11 @@ struct LibraryView: View {
         .buttonStyle(.plainHit).hoverCursor()
     }
 
-    /// 单行：时间戳 + 文本，可点击跳转、随播放高亮。说话人名由所属 block 统一只贴一次。
-    @ViewBuilder private func transcriptRow(_ ln: LibraryModel.Line) -> some View {
-        let active = vm.activeLineID == ln.id   // 由 activeLineID 驱动（仅跨行时变），不再读每秒跳动的 currentTime
-        Button { vm.seek(to: ln.start) } label: {
-            HStack(alignment: .top, spacing: 14) {
-                Text(mmss(ln.start)).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 46, alignment: .leading).padding(.top, 2)
-                lineText(ln.text).font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 5)
-            .background(active ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(alignment: .leading) { if active { RoundedRectangle(cornerRadius: 3).fill(pal.accent).frame(width: 3).padding(.vertical, 4) } }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plainHit).hoverCursor()
-    }
-
-    /// 转录行文本：查找时高亮命中片段。
-    private func lineText(_ s: String) -> Text {
-        (vm.findOpen && !vm.findQuery.isEmpty) ? highlightedText(s, query: vm.findQuery, pal: pal) : Text(s)
-    }
 
     // MARK: 向本场提问 Tab
 
     @ViewBuilder private func recAskTab(_ sel: RecordingSummary) -> some View {
+        let _ = Perf.body("recAskTab")
         let msgs = vm.recMsgs
         VStack(alignment: .leading, spacing: 0) {
             if !msgs.isEmpty {
@@ -981,6 +971,44 @@ struct LibraryView: View {
         if cal.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
         if cal.isDateInYesterday(d) { f.dateFormat = "HH:mm"; return "昨天 \(f.string(from: d))" }
         f.dateFormat = "M月d日 HH:mm"; return f.string(from: d)
+    }
+}
+
+// MARK: - 逐句转录单行（Equatable：长转录性能关键）
+//
+// 转录可达数千行；若行是 LibraryView 的内联方法，任何 vm.@Published 变更（播放头/录音计时/本场提问态…）
+// 都会重渲全部已实例化的行（实测一条 157 行转录在交互时 ~597 行/秒重算）。抽成 Equatable 值视图后，
+// 只有「本行 text / 是否高亮当前播放 / 查找词 / 主题」变了才重渲——绝大多数 vm 变更对它是 no-op。
+private struct TranscriptLineRow: View, Equatable {
+    let lineID: Int
+    let start: Double
+    let text: String
+    let active: Bool
+    let query: String        // 查找高亮词；"" = 不在查找
+    let pal: Palette
+    let onSeek: () -> Void
+
+    // 只比值字段；onSeek 闭包不参与（每次重建但语义不变）。
+    static func == (a: TranscriptLineRow, b: TranscriptLineRow) -> Bool {
+        a.lineID == b.lineID && a.start == b.start && a.text == b.text
+            && a.active == b.active && a.query == b.query && a.pal.isDark == b.pal.isDark
+    }
+
+    var body: some View {
+        let _ = Perf.body("transcriptRow")
+        Button(action: onSeek) {
+            HStack(alignment: .top, spacing: 14) {
+                Text(mmss(start)).font(.system(size: 11, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 46, alignment: .leading).padding(.top, 2)
+                (query.isEmpty ? Text(text) : highlightedText(text, query: query, pal: pal))
+                    .font(.system(size: 14)).foregroundStyle(pal.text).lineSpacing(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 5)
+            .background(active ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay(alignment: .leading) { if active { RoundedRectangle(cornerRadius: 3).fill(pal.accent).frame(width: 3).padding(.vertical, 4) } }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor()
     }
 }
 
@@ -1138,10 +1166,9 @@ struct TitlebarDragArea: NSViewRepresentable {
 
 // MARK: - 摘要 Markdown 渲染（MarkdownUI，GitHub 风：嵌套列表/表格/代码块齐全）
 
-// Equatable 是性能关键：MarkdownUI 在 body 里解析 cmark。容器（LibraryView / ChatView）因观察 app，
-// 在切页 / 侧栏折叠动画（每帧改 app.sidebarCollapsed）时 body 频繁重跑 → 若不设 Equatable 边界，
-// 这个 Markdown 每次都重新解析整段文稿 → 卡。加 .equatable() 后，文本/主题不变即剪枝、不重解析。
-// 只比 pal.isDark（主题仅随它变）+ text/highlight；text 是同一 String 实例时 == 走 O(1) 缓冲区判等。
+// Markdown 渲染的统一入口（全 App 7 处调用）。内部走原生 MarkdownNative（swift-markdown 解析 + 自绘 + LazyVStack 虚拟化）。
+// Equatable 仍保留：容器（LibraryView / ChatView）因观察 app，在切页 / 侧栏折叠时 body 频繁重跑；
+// 文本/主题不变即剪枝、不重建子树。只比 pal.isDark + text/highlight。
 struct SummaryMarkdown: View, Equatable {
     let text: String
     let pal: Palette
@@ -1156,47 +1183,7 @@ struct SummaryMarkdown: View, Equatable {
     }
 
     var body: some View {
-        let _ = Perf.body("SummaryMarkdown(parse)")   // 每次重算=重新解析 cmark，看折叠/切页时是否被剪枝
-        return Markdown(text)
-            .markdownTheme(.resound(pal))
-            .textSelection(.enabled)
-    }
-}
-
-extension MarkdownUI.Theme {
-    /// 贴合 Resound 调色板的 Markdown 主题：以 GitHub 主题为底（表格/列表/代码块渲染完备），
-    /// 仅覆盖文字/标题/链接/代码的配色与字号。
-    static func resound(_ pal: Palette) -> MarkdownUI.Theme {
-        MarkdownUI.Theme.gitHub
-            .text {
-                ForegroundColor(pal.text)
-                FontSize(13.5)
-            }
-            .strong { FontWeight(.semibold) }
-            .emphasis { FontStyle(.italic) }
-            .link { ForegroundColor(pal.accent) }
-            .code {
-                FontFamilyVariant(.monospaced)
-                FontSize(.em(0.9))
-                ForegroundColor(pal.accent)
-                BackgroundColor(pal.accentSoft)
-            }
-            .heading1 { c in c.label.markdownMargin(top: 16, bottom: 10)
-                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.5)); ForegroundColor(pal.accent) } }
-            .heading2 { c in c.label.markdownMargin(top: 16, bottom: 8)
-                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.28)); ForegroundColor(pal.accent) } }
-            .heading3 { c in c.label.markdownMargin(top: 14, bottom: 6)
-                .markdownTextStyle { FontWeight(.bold); FontSize(.em(1.12)); ForegroundColor(pal.accent) } }
-            .heading4 { c in c.label.markdownMargin(top: 12, bottom: 6)
-                .markdownTextStyle { FontWeight(.semibold); FontSize(.em(1.0)); ForegroundColor(pal.accent) } }
-            .paragraph { c in c.label.relativeLineSpacing(.em(0.45)).markdownMargin(top: 0, bottom: 12) }
-            .listItem { c in c.label.relativeLineSpacing(.em(0.45)).markdownMargin(top: .em(0.4)) }
-            .blockquote { c in
-                HStack(spacing: 0) {
-                    Rectangle().fill(pal.accent.opacity(0.5)).frame(width: 3)
-                    c.label.padding(.leading, 12).markdownTextStyle { ForegroundColor(pal.text2) }
-                }
-            }
+        MarkdownNative(text: text, pal: pal)   // 原生渲染（swift-markdown 解析 + 自绘），取代 MarkdownUI
     }
 }
 

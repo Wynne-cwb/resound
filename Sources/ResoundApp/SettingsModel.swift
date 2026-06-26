@@ -48,6 +48,13 @@ final class SettingsModel: ObservableObject {
     @Published var autoStartRec: Bool { didSet { setBool(oldValue, autoStartRec, "resound.toggle.autostart") } }
     /// 会议结束时自动停止录音（无需确认）；关则弹「停止录音？」一键弹窗。键与 RecordingController.autoStopKey 一致。
     @Published var autoStopRec: Bool { didSet { setBool(oldValue, autoStopRec, "resound.toggle.autostop") } }
+    /// 录音时显示可拖动的屏幕级小浮窗（提醒正在录音 + 停止按钮）。键与 RecBadgePanelController.recBadgeKey 一致。
+    @Published var recBadge: Bool {
+        didSet {
+            setBool(oldValue, recBadge, RecBadgePanelController.recBadgeKey)
+            NotificationCenter.default.post(name: RecBadgePanelController.toggleChanged, object: nil)   // 录音中切换即时显隐
+        }
+    }
 
     private static let defKey = "resound.defaultTemplate"
     let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}", "{documents}"]
@@ -60,6 +67,7 @@ final class SettingsModel: ObservableObject {
         autoDetect = d.object(forKey: "resound.toggle.autodetect") as? Bool ?? true
         autoStartRec = d.object(forKey: "resound.toggle.autostart") as? Bool ?? false   // 默认关：需用户显式开启自动录音
         autoStopRec = d.object(forKey: "resound.toggle.autostop") as? Bool ?? false     // 默认关：结束时弹窗确认，不静默停
+        recBadge = d.object(forKey: RecBadgePanelController.recBadgeKey) as? Bool ?? true   // 默认开
     }
 
     private func setBool(_ old: Bool, _ new: Bool, _ key: String) { UserDefaults.standard.set(new, forKey: key) }

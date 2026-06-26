@@ -145,7 +145,8 @@ struct SettingsView: View {
                 toggleRow("常驻菜单栏", "始终可从 macOS 菜单栏访问。", $vm.menuBarResident, last: false)
                 toggleRow("自动检测会议", "检测到 Google Meet 会议时提示录音；关闭后不再检测。", $vm.autoDetect, last: false)
                 toggleRow("自动开始录音", "检测到会议直接开始录音，无需确认；关则弹窗询问。", $vm.autoStartRec, last: false)
-                toggleRow("自动停止录音", "会议结束直接停止并转写；关则弹「停止录音？」一键确认。", $vm.autoStopRec, last: true)
+                toggleRow("自动停止录音", "会议结束直接停止并转写；关则弹「停止录音？」一键确认。", $vm.autoStopRec, last: false)
+                toggleRow("录音浮窗", "录音时显示一个可拖动的小窗，提醒你正在录音并提供停止按钮。", $vm.recBadge, last: true)
             }
             .background(pal.elev, in: RoundedRectangle(cornerRadius: 13, style: .continuous)).stroke(pal.border, corner: 13)
             .padding(.top, 18)

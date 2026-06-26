@@ -32,7 +32,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 
 ## 功能特性
 
-- **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路混音）；检测到 Meet 自动弹屏级提示，可设为**会议开始自动开录 / 结束自动停录**（或弹一键确认窗），全程无需手动。
+- **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路混音）；检测到 Meet 自动弹屏级提示，可设为**会议开始自动开录 / 结束自动停录**（或弹一键确认窗），全程无需手动。录音时屏幕上常驻一颗**可拖动的小浮窗**（脉冲红点 + 计时 + 停止按钮），悬浮在其它 App 之上，让你随时知道正在录音、一键即可停——即使主窗口已隐藏也看得到。可在**设置 › 通用 › 录音浮窗**里开关。
 - **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做人声响度归一，转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
 - **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。
 - **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；录音若有**关联文档**，会自动把文档全文当背景一起喂给模型（带字数上限），让纪要也吸收 PRD/议程/会议材料。**Templates 页**可增删改模板（占位符含 `{documents}`）、AI 协助生成 / 润色提示词、设默认。
@@ -110,7 +110,7 @@ scripts/build-sherpa-onnx.sh
 
 # 2. 配置密钥：在仓库根目录创建 .env（见下方「配置」表）
 
-# 3. 编译（首次会拉 WhisperKit / FluidAudio / MarkdownUI 等依赖）
+# 3. 编译（首次会拉 WhisperKit / FluidAudio / swift-markdown 等依赖）
 swift build
 ```
 
@@ -191,7 +191,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 ## 技术栈
 
 - **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
-- **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
+- **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown](https://github.com/apple/swift-markdown)（仅解析；渲染是自研原生 SwiftUI 渲染器） · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
 - **API**：任意 OpenAI 兼容服务——对话 / 向量 / 转写三种能力可分别指派给不同服务商
 
 ## 项目结构

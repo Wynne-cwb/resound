@@ -12,7 +12,7 @@ import ResoundCore
 ///
 /// 全部在主线程访问（视图 body + 主 runloop 定时器），单线程无需加锁。排查完把 `enabled` 置 false 即停。
 enum Perf {
-    static var enabled = false   // 排查完已关闭：置 true 即重新开启卡顿看门狗 + body 计数 → resound.log
+    static var enabled = false   // 排查完已关闭：置 true 即重新开启卡顿看门狗 + body 计数 + measure → resound.log
 
     private static var counts: [String: Int] = [:]
     private static var durMax: [String: Double] = [:]

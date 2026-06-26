@@ -39,6 +39,7 @@ struct ResoundApp: App {
                     chat.app = app
                     chat.loadHistory()
                     MeetingPanelController.shared.configure(recorder: recorder, app: app)
+                    RecBadgePanelController.shared.configure(recorder: recorder, app: app)
                     recorder.startWatching()
                     Perf.start()   // 性能埋点：卡顿看门狗 + body 重算计数 → resound.log
                 }

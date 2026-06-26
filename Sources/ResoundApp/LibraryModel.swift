@@ -92,7 +92,7 @@ final class LibraryModel: ObservableObject {
     /// 全量加载/增删后由 recordings.didSet 同步为权威值。
     @Published private(set) var recordingCount = 0
     @Published var selectedId: String?
-    @Published var lines: [Line] = []
+    @Published var lines: [Line] = [] { didSet { matchCountCache.removeAll() } }   // 内容变 → 失效查找计数缓存
     @Published var blocks: [Block] = []        // lines 按连续同人合并后的段落块（中间结构）
     @Published var flatLines: [FlatLine] = []  // 拍平后的逐句转录行（渲染用，单层 LazyVStack）
     @Published var speakers: [SpeakerStat] = []
@@ -137,7 +137,7 @@ final class LibraryModel: ObservableObject {
     private var speakerQueue: [RecordingSummary] = []  // 后台说话人识别串行队列（避免多条同时跑 Sortformer 抢 ANE）
     private var speakerWorking = false
     @Published var namingInProgress: String?   // 正在保存/注册声纹的说话人标签
-    @Published var summaryText: String?
+    @Published var summaryText: String? { didSet { matchCountCache.removeAll() } }
     @Published var summaryTemplateId: String?
     @Published var summarizingIds: Set<String> = []   // 正在生成摘要的录音 id（可并发多条，各自显示 loading）
     var summarizing: Bool { selectedId.map { summarizingIds.contains($0) } ?? false }
@@ -425,10 +425,19 @@ final class LibraryModel: ObservableObject {
     // MARK: 查找 / 替换（当前 Tab：转录或摘要）
 
     var findScopeLabel: String { tab == .transcript ? "逐句转录" : "会议摘要" }
+    /// findMatchCount 缓存：键 = "tab|query"，内容变更（lines/summaryText）时清空。
+    /// 避免在视图反复重算时每次都重拼全文 + 全文不敏感扫描（长转录这是卡顿放大器）。
+    private var matchCountCache: [String: Int] = [:]
     var findMatchCount: Int {
         guard !findQuery.isEmpty else { return 0 }
-        let hay = tab == .transcript ? lines.map { $0.text }.joined(separator: "\n") : (summaryText ?? "")
-        return Self.ciCount(hay, findQuery)
+        let key = "\(tab)|\(findQuery)"
+        if let c = matchCountCache[key] { return c }
+        return Perf.measure("findMatchCount") {
+            let hay = tab == .transcript ? lines.map { $0.text }.joined(separator: "\n") : (summaryText ?? "")
+            let c = Self.ciCount(hay, findQuery)
+            matchCountCache[key] = c
+            return c
+        }
     }
 
     func openFind() { if selected != nil { findOpen = true } }
@@ -446,7 +455,7 @@ final class LibraryModel: ObservableObject {
         guard !q.isEmpty, let rec = selected else { return }
         let r = replaceText
         if tab == .transcript {
-            guard let t = loadTranscript(rec.transcriptURL) else { return }
+            guard let t = Perf.measure("replace.loadTranscript", { loadTranscript(rec.transcriptURL) }) else { return }
             var n = 0
             let segs = t.segments.map { seg -> Transcript.Segment in
                 n += Self.ciCount(seg.text, q)
@@ -456,8 +465,10 @@ final class LibraryModel: ObservableObject {
             }
             guard n > 0 else { app?.toast("转录里没有匹配「\(q)」"); return }
             try? Transcript(language: t.language, segments: segs).jsonData().write(to: rec.transcriptURL)
-            lines = lines.map { var l = $0; l.text = l.text.replacingOccurrences(of: q, with: r, options: .caseInsensitive); return l }
-            blocks = groupBlocks(lines); flatLines = Self.flatten(blocks)
+            Perf.measure("replace.linesMap") {
+                lines = lines.map { var l = $0; l.text = l.text.replacingOccurrences(of: q, with: r, options: .caseInsensitive); return l }
+            }
+            Perf.measure("replace.regroup") { blocks = groupBlocks(lines); flatLines = Self.flatten(blocks) }
             app?.toast("已替换 \(n) 处（转录）· 正在同步检索…")
             scheduleReindex(rec)   // 更正后重建该条索引，Ask 才会用到正确文本
             autoPushVault("edit: 转录更正 \(rec.title)")

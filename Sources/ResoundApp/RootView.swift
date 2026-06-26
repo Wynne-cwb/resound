@@ -4,7 +4,6 @@ import ResoundCore
 struct RootView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var rec: RecordingController
-    @State private var mounted: Set<AppModel.Page> = [.ask]   // 访问过即常驻，切页不销毁
 
     var body: some View {
         let _ = Perf.body("RootView")
@@ -34,23 +33,17 @@ struct RootView: View {
         .ignoresSafeArea()
     }
 
-    // 埋点结论：卡顿主因是 MarkdownUI「构建+布局一篇文档」单次极慢（几百 ms~1s）。用 switch 切页会销毁旧页、
-    // 重建新页 → 切到 Ask 要重建整段对话所有 Markdown = 切换卡的根因。改用「懒挂载 + 常驻」ZStack：
-    // 访问过的页面不销毁，切页只切 opacity（不重建 Markdown）。配合瞬时折叠 + 摘要限宽（内容区变宽 Markdown
-    // 宽度不变 → 不重排），消除之前 keep-alive 在动画折叠下「多页 Markdown 逐帧重排」的副作用。
-    private var content: some View {
-        ZStack {
-            if mounted.contains(.ask) { ChatView().pageVisible(app.page == .ask) }
-            if mounted.contains(.library) { LibraryView().pageVisible(app.page == .library) }
-            if mounted.contains(.documents) { DocumentsView().pageVisible(app.page == .documents) }
-            if mounted.contains(.templates) { TemplatesView().pageVisible(app.page == .templates) }
-            if mounted.contains(.settings) { SettingsView().pageVisible(app.page == .settings) }
+    // 只渲染当前页（不再 keep-alive 常驻）。原 keep-alive 是为绕开 MarkdownUI「切页重建整篇 Markdown」的慢，
+    // 但它让隐藏页仍被布局，反而引入跨页卡顿等问题。现 Markdown 已换原生 + LazyVStack 虚拟化，切页重建只布局
+    // 可见块，足够快，故回归最简单的条件渲染：隐藏页根本不存在，无跨页干扰。
+    @ViewBuilder private var content: some View {
+        switch app.page {
+        case .ask:       ChatView()
+        case .library:   LibraryView()
+        case .documents: DocumentsView()
+        case .templates: TemplatesView()
+        case .settings:  SettingsView()
         }
-        // 当前页必须挂载。关键：关主窗口→菜单栏重开会**重建 RootView**，`mounted` @State 复位成 [.ask]，
-        // 但 app.page(App 级 @StateObject 不重建)可能仍是 .library——此时 page 没「变化」故 onChange 不触发，
-        // 若不在 onAppear 补挂载，当前页就不渲染→内容区全白。
-        .onAppear { mounted.insert(app.page) }
-        .onChange(of: app.page) { _, p in mounted.insert(p) }
     }
 
     /// 折叠按钮：圆形，圆心正好落在侧栏右边框上（跨边框浮动）。
@@ -70,12 +63,6 @@ struct RootView: View {
     }
 }
 
-extension View {
-    /// 常驻页面的显隐：隐藏时透明 + 不接收点击/键盘（含快捷键，避免隐藏页抢 ⌘F）+ 压底层。
-    @ViewBuilder func pageVisible(_ visible: Bool) -> some View {
-        self.opacity(visible ? 1 : 0).allowsHitTesting(visible).disabled(!visible).zIndex(visible ? 1 : 0)
-    }
-}
 
 // MARK: - 顶部标题栏（透明标题栏下自绘；左侧留出红黄绿交通灯空间）
 

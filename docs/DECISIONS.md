@@ -5,6 +5,39 @@
 
 ---
 
+## Markdown 渲染器原生化 + 去 keep-alive + 一组性能修复（用户实测「好很多了」）（2026-06-26）
+
+设计 [spec](superpowers/specs/2026-06-26-native-markdown-renderer-design.md)。用户反馈 Ask/转录/切页一系列卡顿，**全程先埋点（Perf.swift 卡顿看门狗+body 计数+measure）再改，数据驱动**——印证「性能优化先埋点别猜」原则：前几轮我猜的根因（替换字符串处理、reindex 阻塞主线程）都被数据否掉，真凶靠日志逐个揪出。
+
+**埋点定位到的真凶链**（按发现顺序）：
+1. 转录页替换/交互卡：`transcriptRow` 重渲 ~597 次/秒（157 行转录全列表重渲）——根因=行是 LibraryView 内联方法、读 vm.@Published，任何无关变更都全量重渲。`findMatchCount` 每次 body 重拼全文+不敏感扫描 4~9ms。→ **转录行抽成 `TranscriptLineRow: Equatable`**（值字段不变即剪枝）+ **findMatchCount 缓存**（lines/summaryText 变才失效）+ 查找跳转**去动画**（长转录里动画 scrollTo 会强制 LazyVStack 一次性实例化沿途所有行＝最早那 14s 冻结元凶之一）。
+2. 「先进 Documents 再回 Library 查找」必卡（用户给的 A/B 实锤：A 不进 Documents 顺、B 进了卡）：根因=keep-alive 的 `pageVisible` 用 opacity 0 常驻，**SwiftUI 对 opacity 0 视图仍布局**，Library 查找触发布局时反复重排隐藏 DocumentsView 那篇整文 MarkdownUI（多秒冻结，且开销不在任何 body=纯布局）。
+3. 即使加了「隐藏不布局」gate + Markdown 解析缓存，**切页仍 300~890ms**：残余是 **MarkdownUI 的布局**——它每块一棵嵌套 SwiftUI 视图树，整篇几百节点一次性布局。这是结构性瓶颈。
+
+**根治（用户拍板：原生自绘替换 MarkdownUI；嵌套列表硬需求；解析器选 swift-markdown）**：
+- 新增 [MarkdownNative.swift](../Sources/ResoundApp/MarkdownNative.swift)：`swift-markdown`（Apple 官方 cmark-gfm 包装，纯解析）解成 AST → 递归自绘原生 SwiftUI。**段落塌缩成单个 `Text(AttributedString)`**（MarkdownUI 每段几十个嵌套视图 → 1 个）；**顶层块装进 LazyVStack 虚拟化**（大文档只布局可见 ~15 块，不再一次性 100+）；Document 按原文缓存。覆盖标题 h1–h4/粗斜删/行内码/链接/**多级嵌套列表（逐层缩进 18pt + •◦▪）**/有序/任务列表 ☐☑/引用/代码块/**GFM 表格**，观感对齐原 resound 主题。`SummaryMarkdown` 内部换实现，7 处调用点零改；`Package.swift` 依赖 `gonzalezreal/swift-markdown-ui` → `apple/swift-markdown`。
+- **去掉 keep-alive**：渲染够快后，`RootView` 从「懒挂载+常驻 ZStack（opacity 切换）」回归「只渲染当前页」条件渲染；删 `pageVisible` 环境键/gate/`mounted`。隐藏页根本不存在 → 跨页布局干扰类问题（含上面 #2）从根上消失。代价：切页丢失视图本地 @State（滚动位置回顶），数据由 app 级 @StateObject 保活不丢——用户认可。
+- 实测：切页卡顿从 500~890ms（偶发 3~14s 冻结）→ 多数无卡顿条目（<100ms）、零星 100~312ms，长冻结消失。
+
+**踩坑**：①`swift-markdown` 的 `Text`/`Table`/`Link`/`Image` 节点名与 SwiftUI 冲突 → 一律 `Markdown.` 限定。②`plainText` 只在 `PlainTextConvertibleMarkup` 上，`any Markup` 要 `as?` 转。③节点 children 的 Element 类型（`Markup` 存在类型 vs `InlineMarkup`）不能直接喂泛型 `Sequence`，统一 `Array(node.children)`（[Markup]）。④keep-alive 的「切页重解析」曾是当初引入它的理由——现 Markdown 解析已缓存 + Ask 早已 LazyVStack，重解析成本没了，故能安全回退条件渲染。
+
+**另修：本场/文档提问追问不带上下文**。`answerInRecording`/`answerInDocument` 原检索用追问原文（「时间线呢」嵌入差→空命中→「没有相关内容」），历史只喂了综合层。修=检索前先 `condensedQuery`（有历史则复用 `QueryPlanner` 带历史改写成可独立检索的查询，只取其 query；无历史原样），与全局 Ask 一致。CLI/实测：「时间线呢」→检索「客户迁移 时间线」hits=6。
+
+## 录音浮窗（屏幕级可拖动指示器）落地（编译+打包+启动通过，待实机）（2026-06-26）
+
+**来源**：Claude Design handoff（`Resound.dc.html`）。原型里浮窗是 App 窗口内的绝对定位药丸（脉冲红点 + 计时 + 停止方钮，底部居中，可在窗口内拖拽），并在「设置 › 通用」给了 `recBadge`「录音浮窗」开关（默认开）。
+
+**关键设计决策——做成屏幕级浮动 NSPanel，而非窗口内覆盖层**。原型受限于单一 HTML 画布只能画在窗口内，但这个功能的本意是「录音时（人在 Meet/Chrome 里、Resound 主窗常被最小化/关闭，App 仅在菜单栏后台）也要持续可见并能一键停录」。所以唯一有用的原生形态是**跨 App、跨 Space、全屏可见**的浮动面板。仓库已有 [MeetingPanel.swift](../Sources/ResoundApp/MeetingPanel.swift) 同样的成熟范式（borderless + nonactivatingPanel + `.floating` + canJoinAllSpaces），直接同构复用，不另造轮子。
+
+**实现**（新增 [RecBadgePanel.swift](../Sources/ResoundApp/RecBadgePanel.swift)）：
+- `RecBadgePanelController` 单例，App 启动 `configure(recorder:app:)` 一次（在 [ResoundApp.swift](../Sources/ResoundApp/ResoundApp.swift) onAppear，紧跟 MeetingPanel）。订阅 `recorder.$phase` 显隐、`app.$isDark` 主题重建。
+- `RecBadgeCard`（SwiftUI）= 脉冲红点 + 计时 + 停止方钮，外形按原型（Capsule、pal.elev 底、borderStrong 描边、大阴影）。**计时靠 `@ObservedObject var rec` 自动刷新，浮窗 NSHostingView 只建一次不重建**（避免每秒重建丢动画/抖动）。停止钮调 `recorder.stopAndIngest()`。
+- 拖拽=`isMovableByWindowBackground=true`（药丸主体即拖拽区，停止按钮自吃点击不触发拖窗）；位置记忆=`setFrameAutosaveName`；首次默认主屏底部居中略高于 Dock。
+- 开关：键 `resound.toggle.recbadge`（`RecBadgePanelController.recBadgeKey`，默认开），SettingsModel 加 `@Published recBadge`，didSet 写 UserDefaults + 发 `RecBadgePanelController.toggleChanged` 通知 → 录音中切换即时显隐；SettingsView「通用」加 toggleRow。
+- 显示条件：`recorder.isRecording && badgeEnabled`（读 UserDefaults 取最新值，与 RecordingController 读 autoDetect 等开关同模式）。
+
+**零回归**：纯新增独立面板 + 一个开关，不碰录音/转写/检索任何既有路径；关掉开关行为同现状。
+
 ## Ask 统一检索架构 · 第一批地基（落地+CLI 全绿，待 App 重建）（2026-06-26）
 
 **背景**：Ask 原只有 qa/digest 两形状，擅长小窗口回顾/具体事实，但跨长时间主题回顾撞墙（digest 无上限塞全库摘要+主题盲；qa 仅 top-8 太浅），且缺人物/时间线/对比维度。设计见 [spec](superpowers/specs/2026-06-26-ask-scenarios-unified-retrieval-design.md)。
