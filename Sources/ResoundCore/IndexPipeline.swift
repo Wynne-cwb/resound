@@ -230,17 +230,24 @@ public struct IndexPipeline {
     public func search(query: String, indexPath: URL, topK: Int = 5, pool: Int = 40,
                        rerank: Bool = false, rerankModel: String? = nil,
                        rerankCandidates: Int = 15,
-                       dateRange: Index.DateRange? = nil,
-                       recordingId: String? = nil, docId: String? = nil) async throws -> [SearchHit] {
+                       filters: Index.Filters = .init()) async throws -> [SearchHit] {
         let index = try Index(path: indexPath, dim: config.embeddingDim)
         let qvec = try await EmbeddingClient(config: config).embedQuery(query)
-        let vHits = try index.vectorSearch(qvec, k: pool, dateRange: dateRange, recordingId: recordingId, docId: docId)
-        let fHits = try index.ftsSearch(query, k: pool, dateRange: dateRange, recordingId: recordingId, docId: docId)
+        let vHits = try index.vectorSearch(qvec, k: pool, filters: filters)
+        let fHits = try index.ftsSearch(query, k: pool, filters: filters)
         let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
         guard rerank else { return Array(fused.prefix(topK)) }
 
         let chat = ChatClient(config: config, modelOverride: rerankModel ?? config.rerankModel)
         return try await Reranker(chat: chat).rerank(query: query, candidates: fused, topK: topK)
+    }
+
+    /// 从 Plan 的过滤条件（时间/说话人/来源）构造检索过滤器。`source=.both` 不过滤来源。
+    private func filters(from plan: QueryPlanner.Plan, includeDate: Bool = true) -> Index.Filters {
+        Index.Filters(
+            dateRange: includeDate ? plan.dateRange : nil,
+            speakers: plan.speakers,
+            sourceKind: plan.source == .both ? nil : plan.source.rawValue)
     }
 
     // MARK: 摘要
@@ -286,28 +293,123 @@ public struct IndexPipeline {
         public let digestRecordings: [Index.RecordingRow]  // digest 模式涉及的录音
     }
 
+    // 检索宽度常量（随 shape 自适应；保守默认，实测再调）。
+    private enum W {
+        static let digestPool = 120           // digest 召回放大，目的=找全相关录音（非只挑 8 段）
+        static let digestCandidates = 60      // RRF 后保留更多候选进重排
+        static let digestChunkTopK = 40       // 重排后保留的片段（按录音聚合成主题子集）
+        static let maxDigestRecordings = 60   // 主题子集最多纳入多少条录音
+        static let excerptsPerRec = 2         // 每条录音附带的命中片段条数
+        static let longRangeDays = 40         // 超此天数=长跨度主题回顾；否则=小窗口概览（零回归走 summaries）
+        static let mapReduceRecCap = 12       // 录音数超此 / 字数超预算 → map-reduce
+        static let mapReduceCharBudget = 24000
+    }
+
     public func answer(question: String, indexPath: URL, topK: Int = 8,
                        usePlanner: Bool = true, answerModel: String? = nil,
                        history: [ChatTurn] = []) async throws -> AnswerResult {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         let plan: QueryPlanner.Plan = usePlanner
             ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel)).plan(question, history: history)
-            : .init(query: question, dateFrom: nil, dateTo: nil, mode: .qa)
+            : .init(query: question, dateFrom: nil, dateTo: nil)
 
-        // digest：取范围内录音的摘要合并回答（"汇总昨天的会议"）
-        if plan.mode == .digest, let range = plan.dateRange {
-            let recs = try Index(path: indexPath, dim: config.embeddingDim).recordingsInRange(range)
-            if !recs.isEmpty {
-                let text = try await digestAnswer(question: question, recs: recs, chat: chat, history: history)
-                return AnswerResult(text: text, plan: plan, hits: [], digestRecordings: recs)
+        // compare：两组材料各自检索 → 对比综合（⑧）。判不出两个集合则落 qa 兜底。
+        if plan.shape == .compare {
+            if let r = try await compareAnswer(question: question, plan: plan, indexPath: indexPath,
+                                               chat: chat, history: history) {
+                return r
             }
         }
 
-        // qa：（可带日期过滤的）碎片检索 + 综合
-        let hits = try await search(query: plan.query, indexPath: indexPath, topK: topK,
-                                    rerank: true, dateRange: plan.dateRange)
+        // digest / timeline：主题子集（录音摘要 + 命中片段）综合，量大走 map-reduce。
+        if plan.shape == .digest || plan.shape == .timeline {
+            if let r = try await digestAnswer(question: question, plan: plan, indexPath: indexPath,
+                                              chat: chat, history: history) {
+                return r
+            }
+            // 子集为空 → 落到 qa 兜底（放宽过滤），绝不空手挡死。
+        }
+
+        // qa（默认 / 各形状兜底）：带过滤的碎片检索 + 综合；过滤到空则自动放宽；recency 时近因加权。
+        let hits = try await qaSearchWithFallback(query: plan.query, plan: plan,
+                                                  indexPath: indexPath, topK: topK)
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return AnswerResult(text: text, plan: plan, hits: hits, digestRecordings: [])
+    }
+
+    /// qa 检索 + 安全兜底：带过滤检索为空时，按 speaker→time→source 顺序逐步放宽再试。绝不空手挡死。
+    /// recency=true 时多取候选并按"相关度×近因"重排，让最近的讨论优先（③现状）。
+    private func qaSearchWithFallback(query: String, plan: QueryPlanner.Plan,
+                                      indexPath: URL, topK: Int) async throws -> [SearchHit] {
+        let fetchK = plan.recency ? max(topK, 24) : topK   // 近因需更大候选池供重排
+        func fetch(_ f: Index.Filters) async throws -> [SearchHit] {
+            try await search(query: query, indexPath: indexPath, topK: fetchK, rerank: true, filters: f)
+        }
+        let f0 = filters(from: plan)
+        var hits = try await fetch(f0)
+        if hits.isEmpty && f0.isActive {
+            // 放宽①：去说话人　②：再去时间　③：彻底无过滤
+            if plan.speakers?.isEmpty == false {
+                var f1 = f0; f1.speakers = nil
+                hits = try await fetch(f1)
+            }
+            if hits.isEmpty {
+                var f2 = f0; f2.speakers = nil; f2.dateRange = nil
+                if f2.isActive { hits = try await fetch(f2) }
+            }
+            if hits.isEmpty { hits = try await fetch(Index.Filters()) }
+        }
+        return plan.recency ? applyRecency(hits, topK: topK) : hits
+    }
+
+    /// 近因加权重排：把 rerank 名次（相关度）与录音日期的时间衰减融合，取前 topK。
+    /// 文档无日期 → 中性权重，不被惩罚也不被偏好。半衰期 120 天。
+    private func applyRecency(_ hits: [SearchHit], topK: Int, now: Date = Date()) -> [SearchHit] {
+        guard hits.count > 1 else { return hits }
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = .current
+        let n = Double(hits.count)
+        let scored = hits.enumerated().map { (i, h) -> (SearchHit, Double) in
+            let rel = Double(hits.count - i) / n          // rerank 名次 → 相关度
+            var rec = 0.5
+            if let ds = h.recordingDate, let d = f.date(from: ds) {
+                let ageDays = max(0, now.timeIntervalSince(d) / 86400)
+                rec = pow(2.0, -ageDays / 120.0)
+            }
+            return (h, 0.6 * rel + 0.4 * rec)
+        }
+        return scored.sorted { $0.1 > $1.1 }.prefix(topK).map { $0.0 }
+    }
+
+    // MARK: compare 引擎（两组材料各自检索 → 对比综合）
+
+    private func compareAnswer(question: String, plan: QueryPlanner.Plan, indexPath: URL,
+                               chat: ChatClient, history: [ChatTurn]) async throws -> AnswerResult? {
+        guard let sets = plan.compareSets, sets.count == 2 else { return nil }
+        var allHits: [SearchHit] = []
+        var blocks: [String] = []
+        for set in sets {
+            let f = Index.Filters(dateRange: set.dateRange,
+                                  speakers: set.speakers ?? plan.speakers,
+                                  sourceKind: plan.source == .both ? nil : plan.source.rawValue)
+            let hits = try await search(query: plan.query, indexPath: indexPath, topK: 10, pool: 60,
+                                        rerank: true, rerankCandidates: 30, filters: f)
+            allHits += hits
+            let label = set.label + (set.dateRange.map { "（\($0.from)~\($0.to)）" } ?? "")
+            let ex = hits.prefix(8).map { "  - \(excerpt($0.text))" }.joined(separator: "\n")
+            blocks.append("## \(label)\n\(ex.isEmpty ? "（无命中）" : ex)")
+        }
+        guard !allHits.isEmpty else { return nil }
+        let system = """
+        你基于两组材料做对比回答：先分两栏分别概述各自要点，再用一段点明两者的差异/变化。\(todayAnchor())
+        - 只用提供的材料，不臆造；某组无命中就如实说明。
+        - 如有对话历史，用它理解指代并接着上文说。
+        \(zhWritingStyle)
+        """
+        let hist = renderHistory(history)
+        let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
+        let text = try await chat.complete(system: system,
+            user: "\(histBlock)用户问题：\(question)\n\n\(blocks.joined(separator: "\n\n"))", maxTokens: 3000)
+        return AnswerResult(text: text, plan: plan, hits: allHits, digestRecordings: [])
     }
 
     /// 「向本场提问」：检索严格限定在单条录音内 + 综合带引用。
@@ -317,7 +419,7 @@ public struct IndexPipeline {
                                   history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         let hits = try await search(query: question, indexPath: indexPath, topK: topK,
-                                    rerank: true, recordingId: recordingId)
+                                    rerank: true, filters: .init(recordingId: recordingId))
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)
     }
@@ -328,29 +430,134 @@ public struct IndexPipeline {
                                  history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         let hits = try await search(query: question, indexPath: indexPath, topK: topK,
-                                    rerank: true, docId: documentId)
+                                    rerank: true, filters: .init(docId: documentId))
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)
     }
 
-    private func digestAnswer(question: String, recs: [Index.RecordingRow], chat: ChatClient,
-                              history: [ChatTurn] = []) async throws -> String {
-        var src = ""
-        for r in recs {
+    // MARK: digest / timeline 引擎（主题子集 + 混合数据源 + map-reduce）
+
+    /// 返回 nil 表示子集为空（调用方落 qa 兜底）。
+    private func digestAnswer(question: String, plan: QueryPlanner.Plan, indexPath: URL,
+                              chat: ChatClient, history: [ChatTurn]) async throws -> AnswerResult? {
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        var recs: [Index.RecordingRow]
+        var hits: [SearchHit] = []
+
+        if let range = plan.dateRange {
+            recs = index.recordingsInRange(range)
+            // 短跨度（这周/这个月）= 纯概览，只喂摘要（零回归）；长跨度=主题回顾，附命中片段佐证。
+            if daySpan(range) > W.longRangeDays {
+                hits = try await search(query: plan.query, indexPath: indexPath,
+                                        topK: W.digestChunkTopK, pool: W.digestPool, rerank: true,
+                                        rerankCandidates: W.digestCandidates, filters: filters(from: plan))
+            }
+        } else {
+            // 无时间范围 → 主题检索定子集（②的主路径）
+            hits = try await search(query: plan.query, indexPath: indexPath,
+                                    topK: W.digestChunkTopK, pool: W.digestPool, rerank: true,
+                                    rerankCandidates: W.digestCandidates,
+                                    filters: filters(from: plan, includeDate: false))
+            recs = index.recordings(ids: orderedRecordingIds(hits, limit: W.maxDigestRecordings))
+        }
+        guard !recs.isEmpty else { return nil }
+        let text = try await synthesizeDigest(question: question, recs: recs, hits: hits,
+                                              chat: chat, history: history, timeline: plan.shape == .timeline)
+        return AnswerResult(text: text, plan: plan, hits: hits, digestRecordings: recs)
+    }
+
+    /// 从命中片段里按排序提取去重的录音 id（仅录音、跳过文档/空），保序、限量。
+    private func orderedRecordingIds(_ hits: [SearchHit], limit: Int) -> [String] {
+        var seen = Set<String>(); var out: [String] = []
+        for h in hits where h.sourceKind != "document" {
+            let id = h.recordingId
+            if id.isEmpty || seen.contains(id) { continue }
+            seen.insert(id); out.append(id)
+            if out.count >= limit { break }
+        }
+        return out
+    }
+
+    private func synthesizeDigest(question: String, recs: [Index.RecordingRow], hits: [SearchHit],
+                                  chat: ChatClient, history: [ChatTurn], timeline: Bool) async throws -> String {
+        let byRec = Dictionary(grouping: hits.filter { $0.sourceKind != "document" }, by: { $0.recordingId })
+        let docHits = hits.filter { $0.sourceKind == "document" }
+        func block(_ r: Index.RecordingRow) -> String {
             let date = String(r.recordedAt.prefix(10))
-            src += "## \(date) · \(r.title)（\(r.id)）\n\(r.summary ?? "（该条暂无摘要）")\n\n"
+            var s = "## \(date) · \(r.title)（\(r.id)）\n\(r.summary ?? "（该条暂无摘要）")\n"
+            if let hs = byRec[r.id], !hs.isEmpty {
+                let ex = hs.prefix(W.excerptsPerRec).map { "  - \(excerpt($0.text))" }.joined(separator: "\n")
+                s += "相关片段：\n\(ex)\n"
+            }
+            return s
+        }
+        var blocks = recs.map(block)
+        if !docHits.isEmpty {
+            let ex = docHits.prefix(6).map { "  - 〔\($0.docTitle ?? "文档")〕\(excerpt($0.text))" }.joined(separator: "\n")
+            blocks.append("## 相关文档片段\n\(ex)\n")
+        }
+        let total = blocks.reduce(0) { $0 + $1.count }
+        if recs.count <= W.mapReduceRecCap && total <= W.mapReduceCharBudget {
+            return try await digestLLM(question: question, source: blocks.joined(separator: "\n"),
+                                       chat: chat, history: history, timeline: timeline, partial: false)
+        }
+        // map：按字数分批各出局部要点；reduce：合并成终答。
+        var partials: [String] = []
+        for batch in batchByChars(blocks, budget: W.mapReduceCharBudget) {
+            partials.append(try await digestLLM(question: question, source: batch.joined(separator: "\n"),
+                                                chat: chat, history: [], timeline: timeline, partial: true))
+        }
+        let reduceSrc = partials.enumerated()
+            .map { "【部分 \($0.offset + 1)】\n\($0.element)" }.joined(separator: "\n\n")
+        return try await digestLLM(question: question, source: reduceSrc,
+                                   chat: chat, history: history, timeline: timeline, partial: false, reducing: true)
+    }
+
+    private func digestLLM(question: String, source: String, chat: ChatClient, history: [ChatTurn],
+                           timeline: Bool, partial: Bool, reducing: Bool = false) async throws -> String {
+        let organize = timeline
+            ? "按时间先后串成『谁在何时推动了什么 → 如何演变到现在』的叙事，标注关键日期节点"
+            : "按主题/时间组织，简洁清楚"
+        let role: String
+        if partial {
+            role = "下面是若干会议的摘要与片段中的一部分。只就这部分材料，整理出与用户问题相关的要点（带日期/会议标记），供后续合并。不要写开场白或最终结论。"
+        } else if reducing {
+            role = "下面是同一问题在多批材料上各自整理出的要点。把它们合并去重，\(organize)，形成完整回答。"
+        } else {
+            role = "你基于若干会议的摘要与相关片段回答用户的汇总类问题。\(organize)。"
         }
         let system = """
-        你基于若干场会议的摘要回答用户的汇总类问题。规则：
-        - 按时间/会议组织，简洁清楚，用中文。\(todayAnchor())
-        - 只用提供的摘要内容，不要臆造；某条没有摘要就注明"该条暂无摘要"。
+        \(role)
+        - 只用提供的材料，不要臆造；某条没有摘要就注明"该条暂无摘要"。\(todayAnchor())
         - 如有对话历史，用它理解指代并接着上文说。
         \(zhWritingStyle)
         """
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
         return try await chat.complete(system: system,
-            user: "\(histBlock)用户问题：\(question)\n\n相关会议摘要：\n\(src)", maxTokens: 3000)
+            user: "\(histBlock)用户问题：\(question)\n\n材料：\n\(source)", maxTokens: 3000)
+    }
+
+    /// 把片段正文压到 max 字以内（去换行），避免 digest 材料过度膨胀。
+    private func excerpt(_ t: String, _ max: Int = 240) -> String {
+        let s = t.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+        return s.count <= max ? s : String(s.prefix(max)) + "…"
+    }
+
+    private func batchByChars(_ blocks: [String], budget: Int) -> [[String]] {
+        var out: [[String]] = []; var cur: [String] = []; var n = 0
+        for b in blocks {
+            if !cur.isEmpty && n + b.count > budget { out.append(cur); cur = []; n = 0 }
+            cur.append(b); n += b.count
+        }
+        if !cur.isEmpty { out.append(cur) }
+        return out
+    }
+
+    private func daySpan(_ range: Index.DateRange) -> Int {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.timeZone = .current
+        guard let a = f.date(from: range.from), let b = f.date(from: range.to) else { return 0 }
+        return Int(b.timeIntervalSince(a) / 86400) + 1
     }
 
     // MARK: contextual 增强（带缓存 + 限并发）

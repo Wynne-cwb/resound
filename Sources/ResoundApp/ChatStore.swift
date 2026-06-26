@@ -19,6 +19,7 @@ struct StoredMsg: Codable, Identifiable {
     var isUser: Bool
     var text: String
     var timeRange: String?
+    var intent: String? = nil   // 意图 chip（旧数据缺省 nil）
     var isDigest = false
     var cites: [StoredCite] = []
     var sources: [StoredSource] = []

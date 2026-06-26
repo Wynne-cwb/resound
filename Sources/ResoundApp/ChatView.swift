@@ -19,9 +19,25 @@ final class ChatVM: ObservableObject {
         var revealed = 0
         var phase: Phase = .done
         var timeRange: String?
+        var intent: String?          // 意图 chip：汇总/时间线/对比 · 👤人 · 来源 · 最新优先
         var isDigest = false
         var cites: [Cite] = []
         var sources: [Source] = []
+    }
+
+    /// 把规划结果转成给用户看的意图说明（让人看见系统怎么理解了问题，也便于发现误判）。qa 无过滤时返回 nil（不打扰）。
+    static func intentChip(_ p: QueryPlanner.Plan) -> String? {
+        var parts: [String] = []
+        switch p.shape {
+        case .qa: break
+        case .digest: parts.append("汇总")
+        case .timeline: parts.append("时间线")
+        case .compare: parts.append("对比")
+        }
+        if let sp = p.speakers, !sp.isEmpty { parts.append("👤 " + sp.joined(separator: "/")) }
+        if p.source == .document { parts.append("📄 仅文档") } else if p.source == .recording { parts.append("🎙️ 仅录音") }
+        if p.recency { parts.append("最新优先") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     @Published var msgs: [Msg] = []
@@ -58,13 +74,14 @@ final class ChatVM: ObservableObject {
                 setPhase(aid, .thinking)
                 let r = try await IndexPipeline(config: cfg).answer(question: q, indexPath: defaultIndexPath(), topK: 8, history: history)
                 let range = Self.fmtRange(r.plan.dateFrom, r.plan.dateTo)
+                let intent = Self.intentChip(r.plan)
 
                 if !r.digestRecordings.isEmpty {
                     let sources = r.digestRecordings.map { Source(title: $0.title, date: Self.monthDay(String($0.recordedAt.prefix(10))), recId: $0.id) }
-                    patch(aid) { $0.full = r.text; $0.isDigest = true; $0.timeRange = range; $0.sources = sources }
+                    patch(aid) { $0.full = r.text; $0.isDigest = true; $0.timeRange = range; $0.intent = intent; $0.sources = sources }
                     startReveal(aid)
                 } else if r.hits.isEmpty {
-                    patch(aid) { $0.phase = (r.plan.dateRange != nil) ? .emptyTime : .empty; $0.timeRange = range }
+                    patch(aid) { $0.phase = (r.plan.dateRange != nil) ? .emptyTime : .empty; $0.timeRange = range; $0.intent = intent }
                 } else {
                     let cites = r.hits.prefix(6).map { h -> Cite in
                         if h.isDocument {
@@ -74,7 +91,7 @@ final class ChatVM: ObservableObject {
                         return Cite(speaker: h.personId ?? "未知", meeting: titles[h.recordingId] ?? h.recordingId,
                                     time: mmss(h.start), snippet: h.text, recId: h.recordingId, t: h.start)
                     }
-                    patch(aid) { $0.full = r.text; $0.timeRange = range; $0.cites = Array(cites) }
+                    patch(aid) { $0.full = r.text; $0.timeRange = range; $0.intent = intent; $0.cites = Array(cites) }
                     startReveal(aid)
                 }
             } catch {
@@ -112,6 +129,7 @@ final class ChatVM: ObservableObject {
             m.revealed = sm.text.count   // 历史消息直接全显，不做打字机
             m.phase = .done
             m.timeRange = sm.timeRange
+            m.intent = sm.intent
             m.isDigest = sm.isDigest
             m.cites = sm.cites.map { Cite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t, isDoc: $0.isDoc, docId: $0.docId, docTitle: $0.docTitle) }
             m.sources = sm.sources.map { Source(title: $0.title, date: $0.date, recId: $0.recId) }
@@ -169,11 +187,11 @@ final class ChatVM: ObservableObject {
         switch m.phase {
         case .searching, .thinking: return nil   // 进行中不存
         case .empty: text = "（未找到相关片段）"
-        case .emptyTime: text = "（这段时间没有录音）"
+        case .emptyTime: text = "（放宽筛选后仍无相关内容）"
         default: text = m.full
         }
         guard m.isUser || !text.isEmpty else { return nil }
-        return StoredMsg(isUser: m.isUser, text: text, timeRange: m.timeRange, isDigest: m.isDigest,
+        return StoredMsg(isUser: m.isUser, text: text, timeRange: m.timeRange, intent: m.intent, isDigest: m.isDigest,
                          cites: m.cites.map { StoredCite(speaker: $0.speaker, meeting: $0.meeting, time: $0.time, snippet: $0.snippet, recId: $0.recId, t: $0.t, isDoc: $0.isDoc, docId: $0.docId, docTitle: $0.docTitle) },
                          sources: m.sources.map { StoredSource(title: $0.title, date: $0.date, recId: $0.recId) })
     }
@@ -378,7 +396,8 @@ private struct MessageRow: View, Equatable {
     static func == (a: MessageRow, b: MessageRow) -> Bool {
         a.pal.isDark == b.pal.isDark && a.expanded == b.expanded &&   // 主题仅随 isDark 变，O(1) 判等
         a.msg.id == b.msg.id && a.msg.phase == b.msg.phase && a.msg.revealed == b.msg.revealed &&
-        a.msg.full == b.msg.full && a.msg.timeRange == b.msg.timeRange && a.msg.isDigest == b.msg.isDigest &&
+        a.msg.full == b.msg.full && a.msg.timeRange == b.msg.timeRange && a.msg.intent == b.msg.intent &&
+        a.msg.isDigest == b.msg.isDigest &&
         a.msg.cites.count == b.msg.cites.count && a.msg.sources.count == b.msg.sources.count
     }
 
@@ -397,13 +416,25 @@ private struct MessageRow: View, Equatable {
                 ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.accentSoft)
                     WaveMark(pal: pal, height: 11) }.frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 0) {
-                    if let tr = msg.timeRange, msg.phase != .searching, msg.phase != .thinking {
+                    if msg.phase != .searching, msg.phase != .thinking, msg.timeRange != nil || msg.intent != nil {
                         HStack(spacing: 6) {
-                            Image(systemName: "calendar").font(.system(size: 11, weight: .semibold))
-                            Text("时间范围 · \(tr)").font(.system(size: 12, weight: .semibold))
+                            if let tr = msg.timeRange {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "calendar").font(.system(size: 11, weight: .semibold))
+                                    Text("时间范围 · \(tr)").font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(pal.accent).padding(.horizontal, 11).padding(.vertical, 4)
+                                .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                            if let it = msg.intent {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "scope").font(.system(size: 11, weight: .semibold))
+                                    Text(it).font(.system(size: 12, weight: .semibold))
+                                }
+                                .foregroundStyle(pal.accent).padding(.horizontal, 11).padding(.vertical, 4)
+                                .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
                         }
-                        .foregroundStyle(pal.accent).padding(.horizontal, 11).padding(.vertical, 4)
-                        .background(pal.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .padding(.bottom, 11)
                     }
                     switch msg.phase {
@@ -418,7 +449,7 @@ private struct MessageRow: View, Equatable {
                             .background(pal.inset, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4])).foregroundStyle(pal.borderStrong))
                     case .emptyTime:
-                        Text("这段时间没有录音。换一个时间范围，或先把会议录下来 —— 转写后它就能在这里被汇总。")
+                        Text("放宽时间和筛选后，仍没找到相关内容。试试换个说法，或先把相关会议录下来 —— 转写后它就能在这里被检索。")
                             .font(.system(size: 13)).foregroundStyle(pal.text2).lineSpacing(3)
                             .padding(.horizontal, 16).padding(.vertical, 14)
                             .background(pal.inset, in: RoundedRectangle(cornerRadius: 11, style: .continuous))

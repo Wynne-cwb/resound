@@ -366,12 +366,17 @@ struct Ask: AsyncParsableCommand {
         let result = try await IndexPipeline(config: cfg).answer(
             question: query, indexPath: indexURL, topK: k, usePlanner: plan, answerModel: answerModel)
 
-        if let r = result.plan.dateRange {
-            print("🗓 时间范围：\(r.from) ~ \(r.to)　模式：\(result.plan.mode.rawValue)\n")
-        }
+        // 调试 chip：让用户看见路由器怎么理解了问题（形状 / 过滤 / 近因）。
+        let p = result.plan
+        var chips = ["🧭 \(p.shape.rawValue)"]
+        if let r = p.dateRange { chips.append("🗓 \(r.from)~\(r.to)") }
+        if let sp = p.speakers, !sp.isEmpty { chips.append("👤 \(sp.joined(separator: "/"))") }
+        if p.source != .both { chips.append("📂 \(p.source.rawValue)") }
+        if p.recency { chips.append("🆕 近因") }
+        print(chips.joined(separator: "　") + "\n")
         print(result.text)
 
-        if result.plan.mode == .digest, !result.digestRecordings.isEmpty {
+        if !result.digestRecordings.isEmpty {
             print("\n— 涉及录音 —")
             for r in result.digestRecordings {
                 print("· \(String(r.recordedAt.prefix(10))) \(r.title)（\(r.id)）\(r.summary == nil ? " ⚠️无摘要" : "")")

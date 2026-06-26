@@ -378,53 +378,81 @@ public final class Index {
     /// 时间范围（含端点，本地 yyyy-MM-dd）。
     public typealias DateRange = (from: String, to: String)
 
-    public func vectorSearch(_ queryVec: [Float], k: Int, dateRange: DateRange? = nil,
-                             recordingId: String? = nil, docId: String? = nil) throws -> [SearchHit] {
-        // vec0 的 KNN 不支持前置过滤：带日期/限定录音或文档时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
-        let filtered = dateRange != nil || recordingId != nil || docId != nil
-        let knnK = filtered ? max(k, 4000) : k
-        let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
-        let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
-        let docClause = docId == nil ? "" : "and c.doc_id = ?"
+    /// 过滤条件：可自由组合（都是 WHERE 的 AND）。speakers 命中 chunks.person_id；sourceKind 'recording'|'document'。
+    public struct Filters {
+        public var dateRange: DateRange?
+        public var speakers: [String]?
+        public var sourceKind: String?
+        public var recordingId: String?
+        public var docId: String?
+        public init(dateRange: DateRange? = nil, speakers: [String]? = nil, sourceKind: String? = nil,
+                    recordingId: String? = nil, docId: String? = nil) {
+            self.dateRange = dateRange; self.speakers = speakers; self.sourceKind = sourceKind
+            self.recordingId = recordingId; self.docId = docId
+        }
+        var isActive: Bool {
+            dateRange != nil || (speakers?.isEmpty == false) || sourceKind != nil
+                || recordingId != nil || docId != nil
+        }
+    }
+
+    /// 把 Filters 拼成 SQL where 片段（c 为 chunks 别名）+ 绑定闭包，向量/FTS 共用，避免重复。
+    private func filterClause(_ f: Filters) -> (sql: String, bind: (OpaquePointer?, inout Int32) -> Void) {
+        var parts: [String] = []
+        if f.dateRange != nil { parts.append("and c.recording_date between ? and ?") }
+        if let sp = f.speakers, !sp.isEmpty {
+            parts.append("and c.person_id in (\(Array(repeating: "?", count: sp.count).joined(separator: ",")))")
+        }
+        if f.sourceKind != nil { parts.append("and c.source_kind = ?") }
+        if f.recordingId != nil { parts.append("and c.recording_id = ?") }
+        if f.docId != nil { parts.append("and c.doc_id = ?") }
+        let sql = parts.joined(separator: " ")
+        let bind: (OpaquePointer?, inout Int32) -> Void = { st, bi in
+            if let r = f.dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
+            if let sp = f.speakers, !sp.isEmpty { for s in sp { bindText(st, bi, s); bi += 1 } }
+            if let sk = f.sourceKind { bindText(st, bi, sk); bi += 1 }
+            if let rid = f.recordingId { bindText(st, bi, rid); bi += 1 }
+            if let did = f.docId { bindText(st, bi, did); bi += 1 }
+        }
+        return (sql, bind)
+    }
+
+    public func vectorSearch(_ queryVec: [Float], k: Int, filters: Filters = Filters()) throws -> [SearchHit] {
+        // vec0 的 KNN 不支持前置过滤：带任何过滤时把候选放大，过滤后仍够用（个人 wiki 规模可接受）。
+        let knnK = filters.isActive ? max(k, 4000) : k
+        let (clause, bind) = filterClause(filters)
         let sql = """
         select c.id, c.text, c.recording_id, c.start, c.end, v.distance, c.person_id, c.recording_date,
                c.source_kind, c.doc_id, d.title
         from chunks_vec v join chunks c on c.id = v.rowid
         left join documents d on d.id = c.doc_id
-        where v.embedding match ? and k = \(knnK) \(dateClause) \(recClause) \(docClause) order by v.distance limit \(k)
+        where v.embedding match ? and k = \(knnK) \(clause) order by v.distance limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
         var bi: Int32 = 1
         bindText(st, bi, vectorJSON(normalize(queryVec))); bi += 1
-        if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
-        if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
-        if let did = docId { bindText(st, bi, did); bi += 1 }
+        bind(st, &bi)
         return readHits(st)
     }
 
-    public func ftsSearch(_ query: String, k: Int, dateRange: DateRange? = nil,
-                          recordingId: String? = nil, docId: String? = nil) throws -> [SearchHit] {
+    public func ftsSearch(_ query: String, k: Int, filters: Filters = Filters()) throws -> [SearchHit] {
         let phrase = "\"" + query.replacingOccurrences(of: "\"", with: "") + "\""
-        let dateClause = dateRange == nil ? "" : "and c.recording_date between ? and ?"
-        let recClause = recordingId == nil ? "" : "and c.recording_id = ?"
-        let docClause = docId == nil ? "" : "and c.doc_id = ?"
+        let (clause, bind) = filterClause(filters)
         let sql = """
         select c.id, c.text, c.recording_id, c.start, c.end, f.rank, c.person_id, c.recording_date,
                c.source_kind, c.doc_id, d.title
         from chunks_fts f join chunks c on c.id = f.rowid
         left join documents d on d.id = c.doc_id
-        where chunks_fts match ? \(dateClause) \(recClause) \(docClause) order by f.rank limit \(k)
+        where chunks_fts match ? \(clause) order by f.rank limit \(k)
         """
         var st: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { throw IndexError.sql(lastErr()) }
         defer { sqlite3_finalize(st) }
         var bi: Int32 = 1
         bindText(st, bi, phrase); bi += 1
-        if let r = dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
-        if let rid = recordingId { bindText(st, bi, rid); bi += 1 }
-        if let did = docId { bindText(st, bi, did); bi += 1 }
+        bind(st, &bi)
         return readHits(st)
     }
 
@@ -482,6 +510,26 @@ public final class Index {
         let summary = sqlite3_column_text(st, 0).map { String(cString: $0) }
         let tmpl = sqlite3_column_text(st, 1).map { String(cString: $0) }
         return (summary, tmpl)
+    }
+
+    /// 按 id 批量取录音行，保持传入 ids 的顺序（digest 主题子集用：先检索定子集再取摘要）。
+    public func recordings(ids: [String]) -> [RecordingRow] {
+        guard !ids.isEmpty else { return [] }
+        let ph = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        let sql = "select id, title, recorded_at, summary from recordings where id in (\(ph))"
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, sql, -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        for (i, id) in ids.enumerated() { bindText(st, Int32(i + 1), id) }
+        var byId: [String: RecordingRow] = [:]
+        while sqlite3_step(st) == SQLITE_ROW {
+            let id = String(cString: sqlite3_column_text(st, 0))
+            byId[id] = RecordingRow(
+                id: id, title: String(cString: sqlite3_column_text(st, 1)),
+                recordedAt: String(cString: sqlite3_column_text(st, 2)),
+                summary: sqlite3_column_text(st, 3).map { String(cString: $0) })
+        }
+        return ids.compactMap { byId[$0] }   // 保序 + 丢弃查不到的
     }
 
     /// 列出某日期范围内的录音（按时间正序），供"汇总昨天/上周"等 digest。
