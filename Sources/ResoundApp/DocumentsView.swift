@@ -10,6 +10,7 @@ struct DocumentsView: View {
     @EnvironmentObject var library: LibraryModel
     @EnvironmentObject var vm: DocumentsModel
     @Environment(\.palette) var pal
+    @State private var tagSuggestOpen: String?   // 哪篇文档的 tag 建议浮层打开
 
     var body: some View {
         let _ = Perf.body("DocumentsView")
@@ -108,16 +109,34 @@ struct DocumentsView: View {
 
     private func docRow(_ d: DocumentSummary) -> some View {
         let on = vm.selectedId == d.id
-        return Button { vm.select(d.id) } label: {
-            HStack(alignment: .top, spacing: 9) {
+        return HStack(alignment: .top, spacing: 9) {
                 Image(systemName: "doc.text").font(.system(size: 14, weight: .medium)).foregroundStyle(pal.doc).padding(.top, 1)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(d.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
-                    if !d.tags.isEmpty {
+                    if vm.recomputingTags.contains(d.id) {
+                        HStack(spacing: 4) {
+                            Spinner(size: 9, color: pal.accent)
+                            Text("推算 tag 中…").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.accent).lineLimit(1)
+                        }
+                        .padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule()).padding(.top, 6)
+                    } else if !d.tags.isEmpty {
                         HStack(spacing: 5) {
                             ForEach(d.tags.prefix(3), id: \.self) { tagPill($0) }
                         }
                         .padding(.top, 6)
+                    } else if let s = vm.pendingTagSuggestion(d.id) {
+                        Button { tagSuggestOpen = d.id } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "lightbulb.fill").font(.system(size: 9))
+                                Text("建议 tag：\(s.tags.map { $0.tag }.joined(separator: "、"))").font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                            }
+                            .foregroundStyle(pal.accent)
+                            .padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule())
+                        }
+                        .buttonStyle(.plain).hoverCursor().padding(.top, 6)
+                        .popover(isPresented: Binding(get: { tagSuggestOpen == d.id }, set: { if !$0 { tagSuggestOpen = nil } }), arrowEdge: .bottom) {
+                            tagSuggestPopover(d.id, s)
+                        }
                     }
                     HStack(spacing: 7) {
                         Text(monthDay(d.importedAt)).font(.system(size: 11.5)).foregroundStyle(pal.text2)
@@ -142,8 +161,46 @@ struct DocumentsView: View {
                 if on { RowIconButton(pal: pal, icon: "trash", danger: true) { vm.deleteDocId = d.id }.padding(6) }
             }
             .contentShape(Rectangle())
+            .onTapGesture { vm.select(d.id) }
+            .hoverCursor()
+            .contextMenu {
+                Button(vm.recomputingTags.contains(d.id) ? "推算中…" : "重新推算 tag") { vm.recomputeTagSuggestion(d.id) }
+                    .disabled(vm.recomputingTags.contains(d.id))
+                Button("编辑") { vm.openEdit(d.id) }
+                Button("删除", role: .destructive) { vm.deleteDocId = d.id }
+            }
+    }
+
+    /// 智能推算 tag 的确认浮层（点行内「建议 tag：…」角标弹出，整组接受）。
+    private func tagSuggestPopover(_ docId: String, _ s: TagSuggestionRecord) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 5) {
+                Image(systemName: "lightbulb.fill").font(.system(size: 11)).foregroundStyle(pal.accent)
+                Text("建议 tag").font(.system(size: 11)).foregroundStyle(pal.text2)
+            }
+            FlowLayout(spacing: 6) {
+                ForEach(s.tags, id: \.tag) { t in
+                    HStack(spacing: 3) {
+                        Text(t.tag).font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.doc)
+                        if t.isNew { Text("新").font(.system(size: 8.5, weight: .bold)).foregroundStyle(.white).padding(.horizontal, 3).padding(.vertical, 0.5).background(pal.accent, in: Capsule()) }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 3).background(pal.docSoft, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+            }
+            HStack(spacing: 8) {
+                Button { vm.acceptTagSuggestion(docId); tagSuggestOpen = nil } label: {
+                    Text("采纳").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).frame(height: 26).background(pal.accent, in: Capsule())
+                }.buttonStyle(.plain).hoverCursor()
+                Button { vm.dismissTagSuggestion(docId); tagSuggestOpen = nil } label: {
+                    Text("忽略").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.text2)
+                        .padding(.horizontal, 12).frame(height: 26).background(pal.inset, in: Capsule())
+                }.buttonStyle(.plain).hoverCursor()
+            }
         }
-        .buttonStyle(.plainHit).hoverCursor()
+        .padding(13)
+        .frame(width: 240, alignment: .leading)
+        .background(pal.elev)
     }
 
     private func tagPill(_ t: String) -> some View {

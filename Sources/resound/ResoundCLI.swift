@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
     )
 }
 
@@ -552,6 +552,79 @@ struct RetidyDoc: AsyncParsableCommand {
             docDir: docDir, indexPath: index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath())
         print("✅ 已重排版并重建索引：\(docDir.lastPathComponent)")
     }
+}
+
+/// resound suggest-folder <recDir> —— 调试：给一条录音推算文件夹建议（验证 prompt 质量）
+struct SuggestFolder: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "suggest-folder",
+        abstract: "调试：给一条录音推算文件夹建议（读 summary.md + 现有 library.json folders）")
+
+    @Argument(help: "录音目录（含 recording.yaml / summary.md）")
+    var recDir: String
+
+    @Option(name: .long, help: "vault 根目录（取现有文件夹列表，默认 VAULT_PATH）")
+    var vault: String?
+
+    @Option(name: .long, help: "分类模型（默认 correctModel）")
+    var model: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let dir = URL(fileURLWithPath: recDir)
+        let yaml = (try? String(contentsOf: dir.appendingPathComponent("recording.yaml"), encoding: .utf8)) ?? ""
+        let title = yaml.split(whereSeparator: \.isNewline)
+            .first { $0.hasPrefix("title:") }
+            .map { String($0.dropFirst("title:".count)).trimmingCharacters(in: .whitespaces) } ?? dir.lastPathComponent
+        let summary = (try? String(contentsOf: dir.appendingPathComponent("summary.md"), encoding: .utf8)) ?? ""
+        guard let vaultRoot = (vault ?? cfg.vaultPath).map({ URL(fileURLWithPath: $0) }) else {
+            print("⚠️ 无 vault 路径（--vault 或 VAULT_PATH）"); return
+        }
+        let folders = LibraryStore.load(vaultRoot: vaultRoot).folders
+        print("现有文件夹：\(folders.map { $0.name }.joined(separator: "、").ifEmpty("（无）"))")
+        let s = try await AutoClassifier(config: cfg, model: model).suggestFolder(
+            summary: summary, title: title, existingFolders: folders)
+        switch s {
+        case .some(let r) where r.existingId != nil:
+            print("✅ 归入现有：\(folders.first { $0.id == r.existingId }?.name ?? r.existingId!)")
+        case .some(let r) where r.newName != nil:
+            print("🆕 提议新建：\(r.newName!)")
+        default:
+            print("— 无建议（不打扰）")
+        }
+    }
+}
+
+/// resound suggest-tags <docDir> —— 调试：给一篇文档推算 tag 建议（验证 prompt 质量）
+struct SuggestTags: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "suggest-tags",
+        abstract: "调试：给一篇文档推算 tag 建议（读 content.md + 全库现有 tags）")
+
+    @Argument(help: "文档目录（含 document.yaml / content.md）")
+    var docDir: String
+
+    @Option(name: .long, help: "vault 根目录（取现有 tag 列表，默认 VAULT_PATH）")
+    var vault: String?
+
+    @Option(name: .long, help: "分类模型（默认 correctModel）")
+    var model: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let dir = URL(fileURLWithPath: docDir)
+        let title = parseDocumentManifest(dir)?.title ?? dir.lastPathComponent
+        let content = documentContent(dir) ?? ""
+        let vaultRoot = (vault ?? cfg.vaultPath).map { URL(fileURLWithPath: $0) } ?? dir.deletingLastPathComponent()
+        let existing = Array(Set(listDocuments(vaultRoot: vaultRoot).flatMap { $0.tags })).sorted()
+        print("现有 tag：\(existing.joined(separator: "、").ifEmpty("（无）"))")
+        let tags = try await AutoClassifier(config: cfg, model: model).suggestTags(
+            content: content, title: title, existingTags: existing)
+        if tags.isEmpty { print("— 无建议（不打扰）") }
+        else { print("✅ 建议 tag：\(tags.map { $0.isNew ? "\($0.tag)(新)" : $0.tag }.joined(separator: "、"))") }
+    }
+}
+
+private extension String {
+    func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self }
 }
 
 /// resound index --vault <path> —— 从 vault 重建检索索引

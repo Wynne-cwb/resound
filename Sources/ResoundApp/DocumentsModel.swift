@@ -48,6 +48,11 @@ final class DocumentsModel: ObservableObject {
     @Published var tagFilter: String?          // 标签筛选（nil = 全部）
     @Published var tab: DetailTab = .content
 
+    // 智能推算 tag 建议（派生存储，不进 vault；采纳才写 document.yaml）
+    @Published var tagSuggestions: [String: TagSuggestionRecord] = [:]
+    @Published var recomputingTags: Set<String> = []
+    private static let tagStore = SuggestionStore<TagSuggestionRecord>(fileName: "tag-suggestions.json")
+
     // 录音标题镜像（关联展示/选择器用）
     @Published private(set) var recordingTitles: [String: String] = [:]
     var allRecordings: [(id: String, title: String)] {
@@ -132,6 +137,7 @@ final class DocumentsModel: ObservableObject {
             await MainActor.run {
                 self.documents = docs
                 self.recordingTitles = titles
+                self.tagSuggestions = Self.tagStore.load()
                 self.loadError = nil
                 if let reselect { self.select(reselect); return }
                 if self.selectedId == nil || !docs.contains(where: { $0.id == self.selectedId }) {
@@ -286,6 +292,9 @@ final class DocumentsModel: ObservableObject {
             if let sum = loadDocumentSummary(dir: dir) { insertDocument(sum); select(sum.id) }
             importItems.removeAll { $0.id == itemId }
             if result.warnings.isEmpty { app?.toast("📄 已加入文档「\(manifest.title)」") }
+            if tags.isEmpty {   // 用户没填 tag → 智能推算
+                await computeTagSuggestion(docId: manifest.id, title: manifest.title, content: result.markdown, force: false)
+            }
         } catch {
             AppLog.error("文档导入失败「\(title)」", error)
             setImportStatus(itemId, .failed)
@@ -336,6 +345,9 @@ final class DocumentsModel: ObservableObject {
             if let sum = loadDocumentSummary(dir: dir) { insertDocument(sum); select(sum.id) }
             importItems.removeAll { $0.id == itemId }   // 成功即从进度条移除
             app?.toast("📄 已加入文档「\(manifest.title)」")
+            if tags.isEmpty {   // 用户没填 tag → 智能推算
+                await computeTagSuggestion(docId: manifest.id, title: manifest.title, content: text, force: false)
+            }
         } catch {
             AppLog.error("文档导入失败「\(title)」", error)
             setImportStatus(itemId, .failed)
@@ -362,6 +374,69 @@ final class DocumentsModel: ObservableObject {
     private func shortErr(_ error: Error) -> String {
         let s = (error as NSError).localizedDescription
         return s.count > 60 ? String(s.prefix(60)) + "…" : s
+    }
+
+    // MARK: 智能推算 tag
+
+    /// 导入后推算 tag 建议。force=false：已有 tag / 已忽略则跳过；force=true：详情页「重新推算」强制覆盖。
+    private func computeTagSuggestion(docId: String, title: String, content: String, force: Bool) async {
+        guard let cfg = cfg() else { return }
+        if !force {
+            if let d = documents.first(where: { $0.id == docId }), !d.tags.isEmpty { return }   // 已有 tag，不打扰
+            if tagSuggestions[docId]?.dismissed == true { return }                              // 已忽略，不复现
+        }
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let existing = allTags
+        do {
+            let tags = try await AutoClassifier(config: cfg).suggestTags(content: content, title: title, existingTags: existing)
+            if !tags.isEmpty {
+                tagSuggestions[docId] = TagSuggestionRecord(
+                    tags: tags.map { TagSuggestionItem(tag: $0.tag, isNew: $0.isNew) }, dismissed: false)
+            } else if force {
+                tagSuggestions[docId] = nil
+            }
+            Self.tagStore.save(tagSuggestions)
+        } catch {
+            AppLog.error("tag-suggest \(docId)", error)
+        }
+    }
+
+    /// 列表角标用：返回该文档当前应展示的待确认 tag 建议（pending 且文档仍无 tag）。
+    func pendingTagSuggestion(_ docId: String) -> TagSuggestionRecord? {
+        guard let r = tagSuggestions[docId], r.hasContent, !r.dismissed,
+              let d = documents.first(where: { $0.id == docId }), d.tags.isEmpty else { return nil }
+        return r
+    }
+
+    func acceptTagSuggestion(_ docId: String) {
+        guard let r = tagSuggestions[docId], r.hasContent,
+              let d = documents.first(where: { $0.id == docId }) else { return }
+        let tags = r.tags.map { $0.tag }
+        let dir = d.dir
+        tagSuggestions[docId] = nil; Self.tagStore.save(tagSuggestions)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            _ = try? DocumentStore(vaultRoot: dir.deletingLastPathComponent()).updateManifest(dir: dir, tags: tags)
+            await MainActor.run { self.reload(reselect: docId); self.app?.toast("已打 tag：\(tags.joined(separator: "、"))"); self.autoPushVault("doc: tag \(d.title)") }
+        }
+    }
+
+    func dismissTagSuggestion(_ docId: String) {
+        guard var r = tagSuggestions[docId] else { return }
+        r.dismissed = true; tagSuggestions[docId] = r; Self.tagStore.save(tagSuggestions)
+    }
+
+    /// 详情页「重新推算」：强制重跑（含已忽略），用当前正文。
+    func recomputeTagSuggestion(_ docId: String) {
+        guard let d = documents.first(where: { $0.id == docId }), !recomputingTags.contains(docId) else { return }
+        recomputingTags.insert(docId)
+        let dir = d.dir, title = d.title
+        Task {
+            let content = await Task.detached { documentContent(dir) ?? "" }.value
+            await computeTagSuggestion(docId: docId, title: title, content: content, force: true)
+            recomputingTags.remove(docId)
+            app?.toast(pendingTagSuggestion(docId) == nil ? "暂无 tag 建议" : "已更新 tag 建议")
+        }
     }
 
     // MARK: 编辑元数据 / 删除

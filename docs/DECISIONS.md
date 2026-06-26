@@ -1176,3 +1176,23 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 - **零回归**：首次索引全 miss（行为同前）；二次/改错字后只重嵌变化 chunk。embedding 文本含 context 前缀，context 变则 hash 变、自然重嵌，正确。
 - **验证**：纯 Foundation 单测确认 `vectorJSON↔parseVectorJSON` **bitwise 无损**（含极值/负数/科学计数）、坏数据/空串→nil。`swift build` 通过。缓存命中流与已在生产跑的 `enrichAll` 同构。
 - **未做完整 CLI 实测**：全量 `index` 首跑缓存空要真花 embedding token，没必要只为验证而预付全库；下一次真实 re-index（用户改错字）会自然首付该条→之后命中。
+
+## 智能推算文件夹 / Tag（2026-06-26）
+
+设计/计划见 specs + plans 同名文件。共识：①建议+确认（绝不擅改）②优先复用现有、必要时提新建③入库自动算+详情/右键重算④录音 1 文件夹、文档 1-2 tag⑤列表角标呈现⑥路径 2 独立分类器。
+
+**实现**：
+- Core `AutoClassifier`（[AutoClassifier.swift](../Sources/ResoundCore/AutoClassifier.swift)）：`suggestFolder(summary:title:existingFolders:)→FolderSuggestion?`、`suggestTags(content:title:existingTags:)→[TagSuggestion]`。纯函数无副作用；JSON 输出 + 大小写归一去重（提的新名命中现有 → 归并为选现有，不重复建）；无合适返回 nil/空（不硬凑）；默认 `correctModel`（flash），正文截断 16000 字。
+- 调试 CLI `suggest-folder`/`suggest-tags`（仿 ExtractDoc）：先无头把 prompt 调绿再接 UI。
+- App `SuggestionStore<Record>`（[SuggestionStore.swift](../Sources/ResoundApp/SuggestionStore.swift)）：App Support `folder-suggestions.json`/`tag-suggestions.json`，按 id 存 `{suggestion,state}`。**未确认绝不进 vault**；采纳才写 library.json（assign + 需要则建 LibraryFolder）/ document.yaml（updateManifest tags）。
+- 挂载：LibraryModel 在 worker 摘要生成后 `computeFolderSuggestion(force:false)`（仅 assign 为空）；DocumentsModel 两条 ingest 路径 indexDocument 后 `computeTagSuggestion`（仅 tags 空）。失败静默落 AppLog、不阻断入库。
+- UI：录音/文档列表行 pending 时显示赤陶橙「建议：…」角标 → 点开确认浮层（采纳/忽略，新建项标「新」）；右键菜单「重新推算」（force=true，含已忽略）。
+- **dismissed 不自动复现**，只手动重算可覆盖；只对「未归类/无 tag」的资产自动建议（已组织的不打扰）。
+
+**踩坑：文件夹 prompt 初版过保守**。初版强调「宁缺勿滥/只有都明显不合适才…」，导致一条通篇讲 AfterShip OS 的录音、库里明明有「AfterShip OS」文件夹，却返回「无建议」。改为「按序判断：明显吻合现有文件夹就**果断选**；都不沾边但主题清晰才提新建；只有模糊+无合适才不归类」后修正。教训：分类类 prompt 的「保守」和「果断复用现有」要分开表述，否则模型把两者混在一起一律退守 none。CLI 无头迭代正是为快速暴露这类问题。
+
+**实机验收修的 3 个问题（2026-06-26）**：
+1. **重算无角标**：`pendingFolderSuggestion` 初版要求 `assign==nil` 才显示 → 已归类录音重算看不到。改判据为「建议目标 ≠ 当前所在文件夹才显示」（已归入同一个就无需提示），重算已归类录音可建议「换文件夹」。
+2. **确认浮层被遮盖**：手写 overlay 在 LazyVStack 里被相邻行盖+被行边界裁剪 → 两处确认浮层改用原生 `.popover(arrowEdge:.bottom)`（独立窗口层）。
+3. **tag 偶发「暂无建议」**：推理模型 temp 0 仍有采样方差，~1/5 返回空。两道：prompt 把「返回空」压成「仅正文空白/乱码的极少数情况」+ `suggestTags` 空结果重试一次。CLI 连跑 5/5 稳定出建议。
+4. 补「推算中…」转圈药丸（`recomputingFolder`/`recomputingTags`）作即时反馈，同「识别说话人中…」。

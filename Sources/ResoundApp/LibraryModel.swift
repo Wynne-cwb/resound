@@ -154,6 +154,11 @@ final class LibraryModel: ObservableObject {
     struct FolderEditor: Identifiable { let id = UUID(); var folderId: String?; var name: String }
     static let unfiledKey = "_none"
 
+    // 智能推算文件夹建议（派生存储，不进 vault；采纳才写 library.json）
+    @Published var folderSuggestions: [String: FolderSuggestionRecord] = [:]
+    @Published var recomputingFolder: Set<String> = []
+    private static let folderStore = SuggestionStore<FolderSuggestionRecord>(fileName: "folder-suggestions.json")
+
     // 查找/替换（修正识别错误）
     @Published var findOpen = false
     @Published var findQuery = ""
@@ -240,6 +245,7 @@ final class LibraryModel: ObservableObject {
             await MainActor.run {
                 self.recordings = recs
                 self.folders = org.folders; self.assign = org.assign
+                self.folderSuggestions = Self.folderStore.load()
                 self.loadCollapsed()
                 self.knownPeople = known
                 self.loadError = recs.isEmpty ? "vault 里还没有录音" : nil
@@ -589,6 +595,76 @@ final class LibraryModel: ObservableObject {
         app?.toast(folderId == nil ? "已移出文件夹" : "已移到「\(folders.first { $0.id == folderId }?.name ?? "")」")
     }
 
+    // MARK: 智能推算文件夹
+
+    /// 摘要就绪后推算文件夹建议。force=false：已归类 / 已忽略则跳过（入库自动用）；force=true：详情页「重新推算」强制覆盖。
+    private func computeFolderSuggestion(_ rec: RecordingSummary, force: Bool) async {
+        guard let cfg = cfg() else { return }
+        if !force {
+            if assign[rec.id] != nil { return }                          // 已手动归类，不打扰
+            if folderSuggestions[rec.id]?.dismissed == true { return }   // 已忽略，不自动复现
+        }
+        let summary = (try? String(contentsOf: rec.dir.appendingPathComponent("summary.md"), encoding: .utf8)) ?? ""
+        guard !summary.isEmpty else { return }
+        let existing = folders
+        do {
+            let s = try await AutoClassifier(config: cfg).suggestFolder(summary: summary, title: rec.title, existingFolders: existing)
+            if let s, s.existingId != nil || s.newName != nil {
+                folderSuggestions[rec.id] = FolderSuggestionRecord(folderId: s.existingId, newName: s.newName, dismissed: false)
+            } else if force {
+                folderSuggestions[rec.id] = nil   // 重算得到「无建议」→ 清掉旧的
+            }
+            Self.folderStore.save(folderSuggestions)
+        } catch {
+            AppLog.error("folder-suggest \(rec.id)", error)
+        }
+    }
+
+    /// 列表角标用：返回该录音当前应展示的待确认建议。已归入「建议的同一个文件夹」→ 无需提示。
+    /// （自动建议只对未归类录音生成；重算可对已归类录音建议「换个文件夹」，此时仍显示。）
+    func pendingFolderSuggestion(_ recId: String) -> FolderSuggestionRecord? {
+        guard let r = folderSuggestions[recId], r.hasContent, !r.dismissed else { return nil }
+        if let fid = r.folderId, assign[recId] == fid { return nil }
+        return r
+    }
+    func folderSuggestionLabel(_ r: FolderSuggestionRecord) -> String {
+        if let id = r.folderId { return folders.first { $0.id == id }?.name ?? "" }
+        return r.newName ?? ""
+    }
+    func folderSuggestionIsNew(_ r: FolderSuggestionRecord) -> Bool { r.folderId == nil && r.newName != nil }
+
+    func acceptFolderSuggestion(_ recId: String) {
+        guard let r = folderSuggestions[recId], r.hasContent else { return }
+        var folderId = r.folderId
+        if folderId == nil, let name = r.newName {
+            if let existing = folders.first(where: { $0.name.lowercased() == name.lowercased() }) {
+                folderId = existing.id
+            } else {
+                let nf = LibraryFolder(id: "f\(Int(Date().timeIntervalSince1970 * 1000))", name: name)
+                folders.append(nf); folderId = nf.id
+            }
+        }
+        if let folderId { assign[recId] = folderId; saveOrg() }
+        folderSuggestions[recId] = nil; Self.folderStore.save(folderSuggestions)
+        app?.toast("已归入「\(folders.first { $0.id == folderId }?.name ?? "")」")
+    }
+
+    func dismissFolderSuggestion(_ recId: String) {
+        guard var r = folderSuggestions[recId] else { return }
+        r.dismissed = true; folderSuggestions[recId] = r; Self.folderStore.save(folderSuggestions)
+    }
+
+    /// 详情页「重新推算」：强制重跑（含已忽略的）。
+    func recomputeFolderSuggestion(_ recId: String) {
+        guard let rec = recordings.first(where: { $0.id == recId }), !recomputingFolder.contains(recId) else { return }
+        recomputingFolder.insert(recId)
+        Task {
+            await computeFolderSuggestion(rec, force: true)
+            recomputingFolder.remove(recId)
+            app?.toast(pendingFolderSuggestion(recId) == nil ? "暂无文件夹建议" : "已更新文件夹建议")
+        }
+    }
+
     /// 从问答引用跳转：选中录音、切到逐句转录、定位到时间点（页面切换由调用方设置）。
     func openCitation(recId: String, time: Double) {
         scrollToLine = nil
@@ -668,6 +744,7 @@ final class LibraryModel: ObservableObject {
                 let rec = speakerQueue.removeFirst()   // 队列直接存录音，不再每条全量扫盘取一条
                 _ = try? await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 _ = try? await IndexPipeline(config: cfg).summarizeRecording(recDir: rec.dir, indexPath: defaultIndexPath())
+                await computeFolderSuggestion(rec, force: false)   // 摘要就绪 → 智能推算文件夹（未归类才给）
                 identifyingIds.remove(rec.id)
                 markIdentified(rec.id)
                 autoPushVault("rec: 识别说话人+摘要 \(rec.title)")

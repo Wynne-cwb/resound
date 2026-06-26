@@ -9,6 +9,7 @@ struct LibraryView: View {
     @Environment(\.palette) var pal
     @State private var hoverId: String?
     @State private var hoverFolderId: String?
+    @State private var folderSuggestOpen: String?   // 哪条录音的文件夹建议浮层打开
     @State private var scrollRelatedToken = 0   // 摘要区「N 篇文档已纳入」提示 → 滚到上方「相关文档」卡
 
     var body: some View {
@@ -230,6 +231,26 @@ struct LibraryView: View {
                         .fixedSize().padding(.horizontal, 7).padding(.vertical, 2)
                         .background(pal.warnSoft, in: Capsule())
                 }
+                if vm.recomputingFolder.contains(r.id) {
+                    HStack(spacing: 4) {
+                        Spinner(size: 9, color: pal.accent)
+                        Text("推算文件夹中…").font(.system(size: 10, weight: .semibold)).foregroundStyle(pal.accent).lineLimit(1)
+                    }
+                    .fixedSize().padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule())
+                } else if let s = vm.pendingFolderSuggestion(r.id) {
+                    Button { folderSuggestOpen = r.id } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "lightbulb.fill").font(.system(size: 9))
+                            Text("建议：\(vm.folderSuggestionLabel(s))").font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                        }
+                        .foregroundStyle(pal.accent)
+                        .fixedSize().padding(.horizontal, 7).padding(.vertical, 2).background(pal.accentSoft, in: Capsule())
+                    }
+                    .buttonStyle(.plain).hoverCursor()
+                    .popover(isPresented: Binding(get: { folderSuggestOpen == r.id }, set: { if !$0 { folderSuggestOpen = nil } }), arrowEdge: .bottom) {
+                        folderSuggestPopover(r.id, s)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.top, 11).padding(.bottom, 12)
@@ -257,6 +278,8 @@ struct LibraryView: View {
             .onDrag { vm.dragRecId = r.id; return NSItemProvider(object: r.id as NSString) }
         .contextMenu {
             moveMenu(r)
+            Button(vm.recomputingFolder.contains(r.id) ? "推算中…" : "重新推算文件夹") { vm.recomputeFolderSuggestion(r.id) }
+                .disabled(vm.recomputingFolder.contains(r.id))
             Divider()
             Button("重命名") { vm.openRenameRec(r.id) }
             Button("删除", role: .destructive) { vm.deleteRecId = r.id }
@@ -289,6 +312,34 @@ struct LibraryView: View {
         .shadow(color: .black.opacity(0.22), radius: 14, y: 8)
         .offset(x: -6, y: 36)
         .onTapGesture { }   // 吞掉点击，避免落到行的选中
+    }
+
+    /// 智能推算文件夹的确认浮层（点行内「建议：X」角标弹出）。
+    private func folderSuggestPopover(_ recId: String, _ s: FolderSuggestionRecord) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 5) {
+                Image(systemName: "lightbulb.fill").font(.system(size: 11)).foregroundStyle(pal.accent)
+                Text("建议归入").font(.system(size: 11)).foregroundStyle(pal.text2)
+                Text(vm.folderSuggestionLabel(s)).font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                if vm.folderSuggestionIsNew(s) {
+                    Text("新").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
+                        .padding(.horizontal, 4).padding(.vertical, 1).background(pal.accent, in: Capsule())
+                }
+            }
+            HStack(spacing: 8) {
+                Button { vm.acceptFolderSuggestion(recId); folderSuggestOpen = nil } label: {
+                    Text(vm.folderSuggestionIsNew(s) ? "新建并归入" : "采纳").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white).padding(.horizontal, 12).frame(height: 26).background(pal.accent, in: Capsule())
+                }.buttonStyle(.plain).hoverCursor()
+                Button { vm.dismissFolderSuggestion(recId); folderSuggestOpen = nil } label: {
+                    Text("忽略").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(pal.text2).padding(.horizontal, 12).frame(height: 26).background(pal.inset, in: Capsule())
+                }.buttonStyle(.plain).hoverCursor()
+            }
+        }
+        .padding(13)
+        .frame(width: 230, alignment: .leading)
+        .background(pal.elev)
     }
 
     private func moveItem(name: String, icon: String, active: Bool, _ action: @escaping () -> Void) -> some View {
