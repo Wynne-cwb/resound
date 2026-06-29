@@ -9,15 +9,18 @@ public struct DocumentManifest {
     public var importedAt: String       // ISO8601，带时区
     public var tags: [String]
     public var links: [String]          // 关联，如 "recording:2026-06-18-1430-standup"
+    public var external: ExternalDocInfo?   // 外部 MCP 接入来源（nil=本地导入文档）
 
     public init(id: String, title: String, sourceFormat: String,
-                importedAt: String, tags: [String] = [], links: [String] = []) {
+                importedAt: String, tags: [String] = [], links: [String] = [],
+                external: ExternalDocInfo? = nil) {
         self.id = id
         self.title = title
         self.sourceFormat = sourceFormat
         self.importedAt = importedAt
         self.tags = tags
         self.links = links
+        self.external = external
     }
 
     /// 关联的录音 id（解析 "recording:<id>" 前缀）。
@@ -28,7 +31,7 @@ public struct DocumentManifest {
     public func yaml() -> String {
         let tagList = tags.map { yamlQuote($0) }.joined(separator: ", ")
         let linkList = links.map { yamlQuote($0) }.joined(separator: ", ")
-        return """
+        var s = """
         schema: resound.document/1
         id: \(yamlQuote(id))
         title: \(yamlQuote(title))
@@ -38,6 +41,16 @@ public struct DocumentManifest {
         links: [\(linkList)]
 
         """
+        if let e = external {
+            s += "external:\n"
+            if let v = e.sourceId { s += "  source_id: \(yamlQuote(v))\n" }
+            if let v = e.kind { s += "  kind: \(yamlQuote(v))\n" }
+            s += "  url: \(yamlQuote(e.url))\n"
+            s += "  form: \(yamlQuote(e.form))\n"
+            if let v = e.contentVersion { s += "  content_version: \(yamlQuote(v))\n" }
+            if let v = e.lastSync { s += "  last_sync: \(yamlQuote(v))\n" }
+        }
+        return s
     }
 }
 
@@ -63,7 +76,8 @@ public func parseDocumentManifest(_ dir: URL) -> DocumentManifest? {
         sourceFormat: m["source_format"] ?? "markdown",
         importedAt: m["imported_at"] ?? "",
         tags: parseYamlInlineList(m["tags"]),
-        links: parseYamlInlineList(m["links"]))
+        links: parseYamlInlineList(m["links"]),
+        external: parseExternalBlock(dir))
 }
 
 /// 解析行内 YAML 列表 `[a, "b c", d]`。
@@ -92,20 +106,27 @@ public struct DocumentSummary: Identifiable, Hashable {
     public let tags: [String]
     public let dir: URL
     public let linkedRecordingIds: [String]
+    public let external: ExternalDocInfo?   // 外部 MCP 接入来源（nil=本地导入文档）
 
     public init(id: String, title: String, sourceFormat: String, importedAt: String,
-                tags: [String], dir: URL, linkedRecordingIds: [String]) {
+                tags: [String], dir: URL, linkedRecordingIds: [String],
+                external: ExternalDocInfo? = nil) {
         self.id = id; self.title = title; self.sourceFormat = sourceFormat
         self.importedAt = importedAt; self.tags = tags; self.dir = dir
         self.linkedRecordingIds = linkedRecordingIds
+        self.external = external
     }
+
+    /// 是否为外部 MCP 来源文档（用于录音详情区分本地/外部行）。
+    public var isExternal: Bool { external != nil }
 }
 
 public func loadDocumentSummary(dir: URL) -> DocumentSummary? {
     guard let m = parseDocumentManifest(dir) else { return nil }
     return DocumentSummary(id: m.id, title: m.title, sourceFormat: m.sourceFormat,
                            importedAt: m.importedAt, tags: m.tags, dir: dir,
-                           linkedRecordingIds: m.linkedRecordingIds)
+                           linkedRecordingIds: m.linkedRecordingIds,
+                           external: m.external)
 }
 
 public func listDocuments(vaultRoot: URL) -> [DocumentSummary] {
@@ -166,7 +187,8 @@ public struct DocumentStore {
     public func importDocument(title rawTitle: String, text: String, sourceFormat: String,
                                tags: [String] = [], links: [String] = [],
                                date: Date = Date(),
-                               originalFileURL: URL? = nil) throws -> (manifest: DocumentManifest, dir: URL) {
+                               originalFileURL: URL? = nil,
+                               external: ExternalDocInfo? = nil) throws -> (manifest: DocumentManifest, dir: URL) {
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? firstLineTitle(text) : rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         let (id, dir) = uniqueIdAndDir(title: title, date: date)
@@ -174,7 +196,7 @@ public struct DocumentStore {
 
         let manifest = DocumentManifest(
             id: id, title: title, sourceFormat: sourceFormat,
-            importedAt: iso8601(date), tags: tags, links: links)
+            importedAt: iso8601(date), tags: tags, links: links, external: external)
         try manifest.yaml().data(using: .utf8)?.write(to: dir.appendingPathComponent("document.yaml"))
         let data = text.data(using: .utf8)
         try data?.write(to: dir.appendingPathComponent("content.md"))
@@ -208,7 +230,8 @@ public struct DocumentStore {
             sourceFormat: old.sourceFormat,
             importedAt: old.importedAt,
             tags: tags ?? old.tags,
-            links: links ?? old.links)
+            links: links ?? old.links,
+            external: old.external)
         try m.yaml().data(using: .utf8)?.write(to: dir.appendingPathComponent("document.yaml"))
         return m
     }

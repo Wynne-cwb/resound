@@ -9,6 +9,7 @@ struct OverlayHost: View {
     @EnvironmentObject var documents: DocumentsModel
     @EnvironmentObject var settings: SettingsModel
     @EnvironmentObject var chat: ChatVM
+    @EnvironmentObject var mcp: MCPModel
     @Environment(\.palette) var pal
 
     var body: some View {
@@ -29,6 +30,7 @@ struct OverlayHost: View {
             if documents.linkPicker != nil { DocLinkPickerModal() }
             docEditModal
             docDeleteModal
+            MCPModalsHost()
             toast
         }
         .animation(.easeOut(duration: 0.16), value: app.toastText)

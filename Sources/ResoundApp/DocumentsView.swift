@@ -293,11 +293,12 @@ struct DocumentsView: View {
                     ZStack { RoundedRectangle(cornerRadius: 9, style: .continuous).fill(pal.docSoft)
                         Image(systemName: "doc.text").font(.system(size: 15, weight: .medium)).foregroundStyle(pal.doc) }
                         .frame(width: 30, height: 30)
-                    Text(d.title).font(.system(size: 22, weight: .bold)).foregroundStyle(pal.text).lineLimit(1).textSelection(.enabled)
+                    Text(d.title).font(.system(size: 22, weight: .bold)).foregroundStyle(pal.text)
+                        .lineLimit(1).truncationMode(.tail).textSelection(.enabled)
                 }
-                Text(metaLine(d)).font(.system(size: 13)).foregroundStyle(pal.text2).padding(.top, 7)
+                Text(metaLine(d)).font(.system(size: 13)).foregroundStyle(pal.text2).lineLimit(1).padding(.top, 7)
             }
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)   // 占满剩余宽度，长标题在内部截断、不挤压右侧按钮
             HStack(spacing: 7) {
                 Button { vm.openEdit(d.id) } label: {
                     HStack(spacing: 6) { Image(systemName: "pencil").font(.system(size: 12, weight: .semibold)); Text("编辑").font(.system(size: 12.5, weight: .semibold)) }
@@ -313,6 +314,7 @@ struct DocumentsView: View {
                         .frame(width: 32, height: 32).background(pal.bg, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).stroke(pal.borderStrong, corner: 8)
                 }.buttonStyle(.plainHit).hoverCursor().help("删除文档")
             }
+            .fixedSize()   // 按钮组保持固定尺寸，绝不被长标题压缩/重叠
         }
     }
 

@@ -5,17 +5,18 @@ import ResoundCore
 struct SettingsView: View {
     @EnvironmentObject var vm: SettingsModel
     @EnvironmentObject var providers: ProvidersModel
+    @EnvironmentObject var mcp: MCPModel
     @Environment(\.palette) var pal
     @State private var tab: Tab = .ai
 
     enum Tab: String, CaseIterable, Identifiable {
-        case ai, storage, permissions, general, vocab
+        case ai, storage, permissions, general, vocab, sources, developer
         var id: String { rawValue }
         var label: String {
-            switch self { case .ai: return "AI 服务"; case .storage: return "存储与同步"; case .permissions: return "权限"; case .general: return "通用"; case .vocab: return "专有词表" }
+            switch self { case .ai: return "AI 服务"; case .storage: return "存储与同步"; case .permissions: return "权限"; case .general: return "通用"; case .vocab: return "专有词表"; case .sources: return "外部 MCP 接入"; case .developer: return "Resound MCP" }
         }
         var icon: String {
-            switch self { case .ai: return "sparkles"; case .storage: return "externaldrive"; case .permissions: return "lock.shield"; case .general: return "gearshape"; case .vocab: return "character.book.closed" }
+            switch self { case .ai: return "sparkles"; case .storage: return "externaldrive"; case .permissions: return "lock.shield"; case .general: return "gearshape"; case .vocab: return "character.book.closed"; case .sources: return "globe"; case .developer: return "chevron.left.forwardslash.chevron.right" }
         }
     }
 
@@ -59,6 +60,8 @@ struct SettingsView: View {
             railRow(.permissions, attn: vm.needsAttention)
             railRow(.general)
             railRow(.vocab)
+            railRow(.sources, attn: mcp.sourcesAttention)
+            railRow(.developer)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12).padding(.vertical, 14)
@@ -93,6 +96,8 @@ struct SettingsView: View {
                 case .permissions: permissionsContent
                 case .general: generalContent
                 case .vocab: VocabContent()
+                case .sources: MCPSourcesContent()
+                case .developer: MCPDeveloperContent()
                 }
             }
             .frame(maxWidth: 680, alignment: .leading)

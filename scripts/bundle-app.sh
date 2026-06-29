@@ -9,6 +9,8 @@ cd "$REPO"
 
 echo "▶︎ swift build -c $CONFIG --product ResoundApp"
 swift build -c "$CONFIG" --product ResoundApp
+echo "▶︎ swift build -c $CONFIG --product resound   (CLI，随包分发供 MCP 一键安装)"
+swift build -c "$CONFIG" --product resound
 BIN_DIR="$REPO/.build/$CONFIG"
 EXE="$BIN_DIR/ResoundApp"
 [ -f "$EXE" ] || { echo "找不到可执行：$EXE"; exit 1; }
@@ -18,6 +20,14 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$EXE" "$APP/Contents/MacOS/Resound"
+# resound CLI 一并入包：MCP「Resound 知识库服务」一键安装会把它的绝对路径写进
+# Claude Code/Codex 配置（claude mcp add resound -- <此路径> mcp serve）。
+# ⚠️ 必须叫 resound-cli（不能叫 resound）：macOS 文件系统大小写不敏感，
+# `resound` 会与 App 主可执行 `Resound` 视为同名 → 覆盖掉 App。
+if [ -f "$BIN_DIR/resound" ]; then
+    cp "$BIN_DIR/resound" "$APP/Contents/MacOS/resound-cli"
+    echo "  📦 已随包分发 resound CLI（resound-cli）"
+fi
 
 # SwiftPM 资源 bundle(如 ResoundCore 的 TSCharacters)放 Resources，Bundle.module 经 Bundle.main.resourceURL 能找到
 for b in "$BIN_DIR"/*.bundle; do
@@ -43,6 +53,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>NSMicrophoneUsageDescription</key><string>Resound 需要麦克风来录制你的语音。</string>
     <key>NSAppleEventsUsageDescription</key><string>Resound 需要控制 Google Chrome 来检测 Google Meet。</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>com.wynne.resound.oauth</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>resound</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

@@ -11,6 +11,7 @@ struct ResoundApp: App {
     @StateObject private var settings = SettingsModel()
     @StateObject private var chat = ChatVM()
     @StateObject private var providers = ProvidersModel()
+    @StateObject private var mcp = MCPModel()
 
     var body: some Scene {
         WindowGroup("Resound", id: "main") {
@@ -22,8 +23,10 @@ struct ResoundApp: App {
                 .environmentObject(settings)
                 .environmentObject(chat)
                 .environmentObject(providers)
+                .environmentObject(mcp)
                 .frame(minWidth: 940, minHeight: 620)
                 .preferredColorScheme(app.isDark ? .dark : .light)
+                .onOpenURL { url in mcp.handleCallback(url) }   // resound://oauth/callback → 完成 OAuth
                 .onAppear {
                     recorder.app = app
                     recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
@@ -37,6 +40,9 @@ struct ResoundApp: App {
                     app.refreshVaultReady()      // 录音库是否已设（引导门禁的另一半）
                     app.showOnboarding = providers.needsOnboarding || !app.vaultReady
                     settings.load()          // 预载模板等，侧栏 Templates 计数即时正确
+                    mcp.app = app
+                    mcp.documents = documents   // 外部文档入库后刷新文档列表 + 录音「相关文档」
+                    mcp.load()               // 来源注册表 + 助手检测 + resound CLI 路径
                     chat.app = app
                     chat.loadHistory()
                     MeetingPanelController.shared.configure(recorder: recorder, app: app)

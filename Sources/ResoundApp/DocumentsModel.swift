@@ -114,6 +114,17 @@ final class DocumentsModel: ObservableObject {
         didInitialLoad = true
         loadDocChats()
         reload()
+        purgeOrphanDocs()
+    }
+
+    /// 启动兜底：清掉索引里已不在 vault 的文档残留（防全局检索引用已删/旧 id 的幽灵文档）。
+    private func purgeOrphanDocs() {
+        guard let vault = vaultURL() else { return }
+        let dd = dim()
+        Task.detached(priority: .utility) {
+            let ids = listDocuments(vaultRoot: vault).map { $0.id }
+            try? Index(path: defaultIndexPath(), dim: dd).purgeOrphanDocuments(validDocIds: ids)
+        }
     }
     /// 启动时轻量统计文档数（侧栏角标即时正确）。
     func prefetchCount() {
@@ -124,6 +135,17 @@ final class DocumentsModel: ObservableObject {
         }
     }
     func refresh() { reload() }
+
+    /// 可等待的刷新：调用方需要"刷新完成"这个时点（如外部文档入库后立刻让录音页相关文档出现）。
+    func refreshAndWait() async {
+        guard let vault = vaultURL() else { return }
+        let docs = await Task.detached(priority: .userInitiated) { listDocuments(vaultRoot: vault) }.value
+        let recs = await Task.detached(priority: .userInitiated) { listRecordings(vaultRoot: vault) }.value
+        self.documents = docs
+        self.recordingTitles = Dictionary(recs.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        self.loadError = nil
+        if let sel = selectedId, docs.contains(where: { $0.id == sel }) { refreshDetail() }
+    }
 
     private func reload(reselect: String? = nil) {
         guard let vault = vaultURL() else {
@@ -481,6 +503,15 @@ final class DocumentsModel: ObservableObject {
     }
 
     // MARK: 关联录音（双向；事实源 document.yaml，索引镜像 doc_links）
+
+    /// 从录音详情移除某篇文档与本场录音的关联（外部文档行的「移除关联」用；文档本身保留在文档库）。
+    func removeRecordingLink(docId: String, recId: String) {
+        guard let d = documents.first(where: { $0.id == docId }) else { return }
+        var ids = d.linkedRecordingIds; ids.removeAll { $0 == recId }
+        applyDocLinks(docId: docId, dir: d.dir, recIds: ids)
+        app?.reloadLibrary()        // 录音页「相关文档」即时去掉该行
+        app?.toast("已移除关联")
+    }
 
     /// 文档详情里「关联录音」行内移除（即时落盘，作用于当前选中文档）。
     func removeLink(_ recId: String) {

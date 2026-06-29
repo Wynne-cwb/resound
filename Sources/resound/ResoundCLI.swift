@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
 }
 
@@ -684,6 +684,130 @@ struct Search: AsyncParsableCommand {
             print("\n[\(i + 1)] \(h.recordingId) @\(ts)\(who)")
             print("    \(h.text.prefix(160))")
         }
+    }
+}
+
+/// resound mcp —— 把会议知识库作为 MCP 服务器提供给 coding agent（模块 B）
+struct Mcp: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mcp",
+        abstract: "Resound 作为 MCP 服务器（stdio）：供 Claude Code / Codex 检索你的会议与文档",
+        subcommands: [McpServe.self, McpSelftest.self, McpSources.self, McpFetch.self, McpSync.self])
+}
+
+/// resound mcp sources —— 列出已配置的外部知识源（模块 A 调试）
+struct McpSources: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "sources",
+        abstract: "列出外部 MCP 接入来源（内置 + 自定义）及连接状态")
+
+    func run() async throws {
+        let sources = MCPSourceStore.load()
+        if sources.isEmpty { print("（无来源）"); return }
+        for s in sources {
+            let badge = s.builtin ? "内置" : "自定义"
+            let host = s.hostPatterns.joined(separator: ", ")
+            print("· [\(s.status.rawValue)] \(s.name)（\(badge)，\(s.transport.rawValue)）")
+            print("    id=\(s.id)  kind=\(s.kind.rawValue)  auth=\(s.auth.rawValue)")
+            if let u = s.url { print("    url=\(u)") }
+            if !host.isEmpty { print("    hosts=\(host)") }
+        }
+    }
+}
+
+/// resound mcp fetch <url> —— 粘贴链接路由调试：识别来源→取回正文/降级，打印四路结果
+struct McpFetch: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "fetch",
+        abstract: "对一个外部 URL 走 URL 路由（识别来源→取正文/降级），打印结果")
+
+    @Argument(help: "外部文档 URL")
+    var url: String
+
+    @Option(name: .long, help: "Bearer token（无头测试用，绕过 Keychain/OAuth）")
+    var token: String?
+
+    @Option(name: .long, help: "若取回成功，入库并关联到该录音 id")
+    var link: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let res = await ExternalLinkResolver.resolve(url: url) { src in
+            if let token { return token }
+            return await MCPOAuth.validAccessToken(sourceId: src.id, clientId: src.clientId)
+        }
+        switch res {
+        case .imported(let doc, let src):
+            print("✅ 已取回（来源：\(src.name)）  标题：\(doc.title)  正文 \(doc.markdown.count) 字")
+            print("---\n\(doc.markdown.prefix(500))\(doc.markdown.count > 500 ? "…" : "")\n---")
+            if let rec = link, let vault = cfg.vaultPath {
+                let id = try await MCPIngest.ingestImported(doc, source: src, url: url, recordingId: rec,
+                    vaultRoot: URL(fileURLWithPath: vault), indexPath: defaultIndexPath(), config: cfg) { print($0) }
+                print("📄 已入库并索引：\(id)，关联录音 \(rec)")
+            }
+        case .unconnected(let src):
+            print("🔌 链接来自「\(src.name)」，但未连接——去设置里连接后才能取正文（否则只能仅链接保存）")
+        case .unknown:
+            print("❓ 无法识别来源/不支持/不可达——可作为「仅链接」保存")
+        case .noPermission(let src):
+            print("🔒 已连「\(src.name)」但取不到这条（多半无权限）——可仅链接保存或重试")
+        }
+    }
+}
+
+/// resound mcp sync <docDir> —— 重新同步一篇已索引外部文档（重取正文→重建索引）
+struct McpSync: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "sync",
+        abstract: "重新同步一篇外部文档目录（重取正文 + 重建索引）")
+
+    @Argument(help: "文档目录（含 document.yaml）")
+    var docDir: String
+
+    @Option(name: .long, help: "Bearer token（无头测试用）")
+    var token: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        guard let vault = cfg.vaultPath else { print("未配置 vault"); return }
+        let ok = try await MCPIngest.resync(
+            docDir: URL(fileURLWithPath: docDir), vaultRoot: URL(fileURLWithPath: vault),
+            indexPath: defaultIndexPath(), config: cfg,
+            bearer: { src in
+                if let token { return token }
+                return await MCPOAuth.validAccessToken(sourceId: src.id, clientId: src.clientId)
+            }) { print($0) }
+        print(ok ? "完成" : "跳过（非已索引外部文档 / 来源未连接）")
+    }
+}
+
+/// resound mcp serve —— stdio MCP 服务器主循环（被 coding agent 作为子进程拉起）
+struct McpServe: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "serve",
+        abstract: "启动 stdio MCP 服务器（阻塞运行；通常由编码助手拉起，不手动跑）")
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        try await MCPServerRunner(config: cfg, indexPath: indexURL).run()
+    }
+}
+
+/// resound mcp selftest —— 无头自检：直接调四个工具逻辑打印结果（不起真实传输）
+struct McpSelftest: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "selftest",
+        abstract: "无头自检：对四个工具各调一次并打印（验证检索/取文/内容策略）")
+
+    @Argument(help: "检索用的测试问题")
+    var query: String = "本季度的规划"
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        print(await MCPServerRunner(config: cfg, indexPath: indexURL).runSelftest(query: query))
     }
 }
 

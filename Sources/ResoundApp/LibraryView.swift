@@ -6,6 +6,7 @@ struct LibraryView: View {
     @EnvironmentObject var vm: LibraryModel
     @EnvironmentObject var rec: RecordingController
     @EnvironmentObject var documents: DocumentsModel
+    @EnvironmentObject var mcp: MCPModel
     @Environment(\.palette) var pal
     @State private var hoverId: String?
     @State private var hoverFolderId: String?
@@ -461,31 +462,86 @@ struct LibraryView: View {
         }
     }
 
-    /// 录音详情「相关文档」区：反查关联到本场的文档，可点开、可「管理」（从录音侧选文档/导入）。
+    /// 录音详情「相关文档」区：反查关联到本场的文档（本地 + 外部 MCP），可点开、同步、关联链接、管理。
     private func relatedDocsCard(_ sel: RecordingSummary) -> some View {
-        let docs = documents.relatedDocuments(forRecording: sel.id)
+        let all = documents.relatedDocuments(forRecording: sel.id)
+        let localDocs = all.filter { !$0.isExternal }
+        let extDocs = all.filter { $0.isExternal }
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "doc.text").font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.doc)
-                Text("相关文档 · \(docs.count)").font(.system(size: 13, weight: .bold)).foregroundStyle(pal.text)
+                Text("相关文档 · \(all.count)").font(.system(size: 13, weight: .bold)).foregroundStyle(pal.text)
                 Spacer()
+                Button { mcp.openLink(recId: sel.id, recTitle: sel.title) } label: {
+                    HStack(spacing: 5) { Image(systemName: "link").font(.system(size: 11, weight: .semibold)); Text("关联链接").font(.system(size: 12, weight: .semibold)) }
+                        .foregroundStyle(pal.text).padding(.horizontal, 11).frame(height: 28)
+                        .background(pal.bg, in: RoundedRectangle(cornerRadius: 7, style: .continuous)).stroke(pal.borderStrong, corner: 7)
+                }.buttonStyle(.plainHit).hoverCursor()
                 Button { documents.openLinkFromRec(sel.id) } label: {
-                    HStack(spacing: 5) { Image(systemName: "plus").font(.system(size: 11, weight: .bold)); Text("管理").font(.system(size: 12, weight: .semibold)) }
+                    Text("管理").font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(pal.text).padding(.horizontal, 11).frame(height: 28)
                         .background(pal.bg, in: RoundedRectangle(cornerRadius: 7, style: .continuous)).stroke(pal.borderStrong, corner: 7)
                 }.buttonStyle(.plainHit).hoverCursor()
             }
             .padding(.horizontal, 15).padding(.vertical, 12)
             Rectangle().fill(pal.border).frame(height: 1)
-            if docs.isEmpty {
-                Text("没有关联到这场会议的文档。点「管理」把会前材料、纪要或 PRD 关联进来，它们会一起参与问答。")
+            if all.isEmpty {
+                Text("还没有关联文档。点「关联链接」粘贴 Notion / Jira / Figma 等外部文档的网址，或点「管理」关联已导入的文档 —— 它们都会一起参与问答。")
                     .font(.system(size: 12.5)).foregroundStyle(pal.text3).lineSpacing(2)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 15).padding(.vertical, 14)
             } else {
-                ForEach(docs) { d in relatedDocRow(d) }
+                ForEach(localDocs) { d in relatedDocRow(d) }
+                ForEach(extDocs) { d in externalDocRow(d, recId: sel.id) }
             }
         }
         .card(pal, corner: 13)
+    }
+
+    /// 外部 MCP 来源文档行（form 角标 + 同步/打开/移除）。
+    private func externalDocRow(_ d: DocumentSummary, recId: String) -> some View {
+        let ext = d.external
+        let imported = ext?.form != "link"
+        let kind = ext?.kind.flatMap { MCPSourceKind(rawValue: $0) }
+        return HStack(spacing: 12) {
+            SourceIcon(kind: kind, size: 30)
+            Button {
+                if imported { documents.select(d.id); app.page = .documents }
+                else if let u = ext?.url { mcp.openExternal(u) }
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Text(d.title).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)
+                        Text(imported ? "已导入" : "仅链接").font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(imported ? pal.doc : pal.text3)
+                            .padding(.horizontal, 7).padding(.vertical, 1).background(imported ? pal.docSoft : pal.inset, in: RoundedRectangle(cornerRadius: 5))
+                    }
+                    HStack(spacing: 6) {
+                        Text(ext?.kind.flatMap { MCPSourceKind(rawValue: $0) }.map(sourceDisplayName) ?? "外部来源").font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                        if imported { Text("· 已取回").font(.system(size: 11)).foregroundStyle(pal.ok) }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plainHit).hoverCursor()
+            HStack(spacing: 1) {
+                if imported {
+                    if mcp.isSyncing(d.dir) {
+                        Spinner(size: 13, color: pal.accent).frame(width: 28, height: 28)
+                    } else {
+                        Button { mcp.syncExternalDoc(dir: d.dir) } label: { Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 13)).foregroundStyle(pal.text2).frame(width: 28, height: 28) }.buttonStyle(.plainHit).hoverCursor().help("重新取回并同步")
+                    }
+                }
+                if let u = ext?.url {
+                    Button { mcp.openExternal(u) } label: { Image(systemName: "arrow.up.right.square").font(.system(size: 13)).foregroundStyle(pal.text2).frame(width: 28, height: 28) }.buttonStyle(.plainHit).hoverCursor()
+                }
+                Button { documents.removeRecordingLink(docId: d.id, recId: recId) } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(pal.text3).frame(width: 28, height: 28) }.buttonStyle(.plainHit).hoverCursor()
+            }
+        }
+        .padding(.horizontal, 15).padding(.vertical, 11)
+        .overlay(alignment: .top) { Rectangle().fill(pal.border).frame(height: 1) }
+    }
+
+    private func sourceDisplayName(_ k: MCPSourceKind) -> String {
+        switch k { case .notion: return "Notion"; case .atlassian: return "Jira / Confluence"; case .google: return "Google Workspace"; case .figma: return "Figma"; case .custom: return "自定义来源" }
     }
 
     private func relatedDocRow(_ d: DocumentSummary) -> some View {

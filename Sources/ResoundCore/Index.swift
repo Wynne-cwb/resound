@@ -294,6 +294,22 @@ public final class Index {
         try exec("delete from documents where id='\(safe)'")
     }
 
+    /// 清理「已不在 vault 里」的文档残留（chunks/documents/doc_links）。删文档若没走到索引清理、
+    /// 或旧 id（如取回时标题变更导致 id 改变）留下的孤儿，会污染全局检索——启动时跑一次兜底。
+    public func purgeOrphanDocuments(validDocIds: [String]) throws {
+        let valid = Set(validDocIds)
+        var ids = Set<String>()
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select distinct doc_id from chunks where source_kind='document' and doc_id is not null", -1, &st, nil)
+        while sqlite3_step(st) == SQLITE_ROW { if let c = sqlite3_column_text(st, 0) { ids.insert(String(cString: c)) } }
+        sqlite3_finalize(st)
+        var st2: OpaquePointer?
+        sqlite3_prepare_v2(db, "select id from documents", -1, &st2, nil)
+        while sqlite3_step(st2) == SQLITE_ROW { if let c = sqlite3_column_text(st2, 0) { ids.insert(String(cString: c)) } }
+        sqlite3_finalize(st2)
+        for id in ids where !valid.contains(id) { try deleteDocument(id: id) }
+    }
+
     public func insertChunk(recordingId: String?, idx: Int, text: String, context: String?,
                             start: Double, end: Double, personId: String?,
                             recordingDate: String?, embedding: [Float],
