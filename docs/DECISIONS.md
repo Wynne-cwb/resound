@@ -5,6 +5,70 @@
 
 ---
 
+## 说话人名字自动进偏置词表（2026-07-02）
+
+需求：会议里常念到与会者名字，把说话人真名纳入转录偏置词表能让 whisper 把人名拼对。**落地**：新增 [Glossary.swift](../Sources/ResoundCore/Glossary.swift) `syncSpeakerNames(vaultRoot:names:)`——把名字写进 glossary.txt 的自动管理小节「# --- 说话人（自动加入，转录偏置用）---」，纯偏置词（不加变体纠正，避免误替换）、去重（用户手写过或本节已有则跳过）、忽略匿名「说话人N」。`renameSpeakerInRecording` 在命名任一路径（记不记声纹都算）+ enroll 早退之前调用，并顺带回填索引里已注册的其他人名；新增可选 `vaultRoot` 参数（App 传 config.vaultPath，缺省从 rec.dir 上溯 4 级 + resound.yaml 存在性守卫）。新增 CLI `sync-speaker-names` 一次性回填 + 无头验证。**验证**：对真 vault 回填 27 个说话人、Christine 已在词表正确去重、二次跑幂等无新增。名字进 glossary.txt（vault 事实源）后，所有转录路径经现成 `Glossary.load` 自动偏置，零额外改动。README 双语已同步。
+
+---
+
+## 🚨 卡死整机 + 抢救丢失会议：三事故定位、修复、成功恢复（2026-07-02）
+
+用户结束一场 2.5h 会后**整机卡死、硬盘狂写、内存耗尽**。取证定位出三个相扣的问题，全部修复，丢失的会**已成功抢救入库**。
+
+**事故1：AEC 把麦克风变成 7 声道 48kHz 怪异格式（回退 AEC）**。本会日早些时加的 `setVoiceProcessingEnabled(true)`（VPIO）在本机把 inputNode 输入变成 **7 声道 48kHz Float32**（`afinfo` 实证：7 ch discrete）→ 2.5h mic.caf **11.2GB**（=7×48000×4×8969s）。**更正一处误判**：曾据"混音救出来是静音"断言 AEC 让麦克风静音——错。逐声道查源文件：**7 声道全是健康人声**（RMS 0.05、峰值满档、66% 非零），音频一直都在。仍回退 AEC：7 声道 48k 录制中就 11GB（磁盘 96% 满时危险）+ VPIO 格式脆弱，而回声本就该由**分轨分别转录去重**（[TranscriptMerge](../Sources/ResoundCore/TranscriptMerge.swift)）解决，不该动采集。已从 [MeetingRecorder.swift](../Sources/ResoundCore/MeetingRecorder.swift) `startMic` 移除。⚠️ 采集路径无法离线验证，重建后仍建议先短录确认 mic 有声。
+
+**事故2：StreamingMix 对离散多声道下混吐静音（真凶，已修）**。"救出来是静音"的真因：`AVAudioConverter` 把 **7 声道 discrete 布局 → mono** 时**没有下混系数、直接产出全零**（离散布局无 downmix matrix，已知坑）。这才是静音来源，不是 AEC。**对策**：[AudioMix.swift](../Sources/ResoundCore/AudioMix.swift) `StreamResampler16k` 改为**自己手动平均各声道成单声道**（`monoInFormat`），只让转换器做 rate（单声道→单声道无布局问题），对任意声道数都稳。**验证**：修复后对 7 声道源混音 RMS=0.041（修前 0.000）。
+
+**事故3：finishCapture 整读大文件 OOM 卡死整机（已修）**。`resampleAudioFile(micURL)` 把整条 mic（11GB）读进 `[Float]`（我的分轨版更糟：`insert(contentsOf:at:0)` 整段复制 + 写 3 文件 + 转 2 轨各再整读）→ 交换区冲到 24.8GB、压缩内存 3.1M 页 → 卡死。旧单轨 `mixTo16k` 本就有此雷，分轨放大它。**对策**：新增 `StreamingMix.mixTo16k`——两路**按需读小块→手动下混单声道→重采样 16k→前导静音对齐（不用 array insert）→混音→边写三文件**，只持几个 16384 帧缓冲。`alignAndMix` 改调它；新增离线抢救 CLI `recover-meeting`。**验证**：真 11GB 文件跑，**峰值 RSS 498MB**（旧版会 20+GB），8969s 处理完不崩。
+
+**✅ 抢救成功**：取 7 声道之一（内容一致）→ `transcribe` 入库 `2026-07-02-2003-group1-讨论-round-2`（1530 段、内容连贯、AI 校对 124 段、已进索引 32 chunks）。
+
+**次要决定**：麦克风"录制时就降 16k"曾实现（治原生大文件）但**同批回退**——它走未验证的实时 tap 转换器，采集路径无法离线测，宁可保持与已知能用的原生写盘一致；大文件由结束时流式混音兜底。in-tap 降采样列为"需真机短录验证"的后续增强。
+
+**教训**：①**碰采集路径（AEC/VPIO/格式/tap）风险极高且难离线验证，改完必须真机短录验证**；②**任何"整读音频进数组"都是长录音下的定时炸弹**，一律流式；③**下结论前先验证源数据**——差点因 mixer 的下混 bug 误判"会议丢失"而放弃一场真实录音，逐声道一查才发现音频完好。
+
+---
+
+## 说话人归属三档改进：重叠投票 + 词级句级平滑 + 声纹重验（2026-07-02）
+
+**触发**：用户反馈"一个片段常包含多人说话 → 整段标错说话人"。先做 5 路深度调研（[research spec](../superpowers/specs/2026-07-02-speaker-attribution-research.md)），结论：**全行业无一例外用「词级×diar轮次重叠时长最大」归属,Resound 却用「段中点」——被公认最弱**。按用户定的 1→3→2 顺序落地：
+
+- **第一档：段中点 → 重叠时长投票**（[SpeakerDiarize.swift](../Sources/ResoundCore/SpeakerDiarize.swift) `overlapRep`）。段与每个 diar 轮次算交集、按合并簇累加秒数取最多者，取代 `diarAt(中点)`。不切段、无碎片、不需词级时间戳。**验证**：ggbond 1-on-1 重识别仍干净 2 人无回归，8/276 段(2%)相对中点被纠到说得更多的人。⚠️**只加在 diar 优先路径**；多人会(≥4簇)走的逐窗回退法 `identifySpeakers` 无细粒度轮次,天生受益有限（Sortformer ≤4 人天花板）。
+- **第三档：CAM++ 段级声纹重验**（[SpeakerNaming.swift](../Sources/ResoundCore/SpeakerNaming.swift) `reassignBySpeakerprint`，arXiv:2406.03155）。归属后对每个「连续同说话人 run」重提声纹作**第二票**,仅当 run≥2s、cos≥0.6、margin≥0.10 且命中的注册名≠当前 才改判。**两条路径都接**（逐窗法尤其需要）。刻意保守（防重蹈 2026-06-24"乱翻更误导"覆辙）：**RMA(9人相似嗓音)上改判 0 段**——门太严,对极难多人会帮助小,但零回归。阈值可调。
+- **第二档：词级时间戳 + 句级众数平滑 + 按句重组**（新增 [SpeakerAttribution.swift](../Sources/ResoundCore/SpeakerAttribution.swift)）。重开在线 `word` 粒度（[OnlineTranscriber.swift](../Sources/ResoundCore/OnlineTranscriber.swift) 请求 word + 解析顶层 words 双指针分配进段）；词级重叠归属→**句级众数平滑**（换人点落句中→整句按词众数归一,众数≥半数才覆写,中英句末标点,窗上限50词,找不到句边界保守不改）→按说话人变化重组 spans（切点落句/词边界）。**补上了 2026-06-24 回退时缺的核心护栏**（当时在 diar 边界硬切+deflicker，缺句级投票）。**验证**：合成数据 selftest——句中错词被众数拉回、跨两人的段在句边界切成两段（临时命令已删）。仅加在 diar 优先路径；无词转录自动退回第一档。
+- **诚实结论**：三档对 **≤3 人会（1-on-1/小会,走 diar 路径）** 是实打实改进；对 **RMA 类多人会（≥4人,逐窗回退）** 改善有限——根因是 Sortformer ≤4 人上限 + 逐窗法无细粒度轮次,这道天花板本轮未破（要破需换支持更多人的 diar 模型或重做逐窗法）。
+- **待实机验收**（阻塞同 dual-track：需 App 重建 + 真实录音；第二档还需新录音带词级时间戳才走得到）：①1-on-1 重识别说话人更准、跨人段被正确切分归属；②声纹重验日志出现高置信改判且无误翻；③旧无词转录零回归。
+
+---
+
+## 会议录音质量三连修：AEC + 分窗归一 + 分轨转录（2026-07-02）
+
+**触发**：RMA design review 录音（混合会：人在现场 + 线上双链路）转录极差。**实测诊断**（autocorrelation + 分段 RMS）：①前 240s 响度只有后段 1/25（-28dB，峰值 0.04 vs 0.8）→ whisper 对近静音幻觉（「文文文文…」循环、30s 不断句大块）；②`MeetingRecorder.mixTo16k` 把 mic+sys 逐样本相加、无 AEC 无对齐、混完删分轨（不可逆）→ 同一声音双链路重影。**旧归一化盲区确认**：全局 peak 0.83 → gain≈1.08 ≈ 没救——「治整条小声、治不了前小后大」。
+
+**修复（用户拍板顺序 2→3→1 = 止血→缓解→根治）**：
+1. **AEC**（[MeetingRecorder.swift](../Sources/ResoundCore/MeetingRecorder.swift)）：`inputNode.setVoiceProcessingEnabled(true)`，必须在读格式/installTap **之前**（会改 inputNode 输出格式）；失败降级不阻断。只治「本机外放→本机麦克风」，治不了网络级重复（→修复3）。
+2. **分窗自适应归一**（[AudioNormalizer.swift](../Sources/ResoundCore/AudioNormalizer.swift)）：全局 peak 单增益 → 5s 窗独立测峰/算增益（target 0.9 / cap 18dB / 噪声底 0.004 以下不提），`setVolumeRamp` 平滑；**不对称 ramp**——降增益提前到上一窗末尾完成（防大声窗开头挂高增益削波，实测从 50 个削波样本→0），升增益放窗首。RMA 实测前 240s RMS 0.0037→0.031（8×，正好触 cap）。调试 CLI `normalize-audio`。**注意：归一只作用转录上传副本，vault audio.m4a 播放仍小声（未根治采集侧）**。
+3. **分轨保留+分开转录**（spec [2026-07-02-meeting-dual-track-design.md](../superpowers/specs/2026-07-02-meeting-dual-track-design.md)）：`MeetingRecorder` 记录两轨 mach host time 起点→后起轨补零对齐（顺带修了旧混音起点错位 bug）→`Capture{mixed,mic,sys}`；ingest 存 `track-mic.m4a`/`track-system.m4a` 进录音目录（事实源）、两轨各自 VAD→归一→转录→[TranscriptMerge](../Sources/ResoundCore/TranscriptMerge.swift) 按时间合并+去重（时间重叠>50% 且 bigram Jaccard≥0.4 → 丢 mic 保 sys）；Segment 加可选 `track` 字段（ZhConverter/Glossary/Corrector/VADGate/LibraryModel replace 全部透传，防洗掉）。下游（diarization/索引/摘要）零改——合并转录与混音同轴。失败重试路径 v1 仍只保混音。
+- **RMA 录音抢救**：分轨已删无法根治，用新归一重转录整条→前 4 分钟从全乱码变基本可读（残留两三段重影窗仍花，是分轨才能治的部分）→ 回填 transcript.json（旧版备份 /tmp + vault git 历史可回溯）→ 重建索引 + speaker-identify（4 人→9 人+1 匿名，多人会逐窗法）+ 重生成摘要（从乱码摘要变成结构化可用纪要）。
+- **验证**：normalize-audio 前后 RMS/峰值/削波数字化对比；重转录端到端对比；编译全绿。**分轨录音待实机验收**（下一场会议：录音目录出现 track-*.m4a、transcript 段带 track、重影不再重复；纯手动录音零回归）。
+
+---
+
+## 富文本两档复制：绕开 SwiftUI 跨块选择限制（2026-07-01）
+
+**现象/根因**：用户反馈自绘 Markdown 只能选中单行、无法跨多行选中复制会议结论。根因=SwiftUI `.textSelection(.enabled)` 的选择范围**被限定在单个 `Text` 视图内**，无法跨多个 `Text` 选择；而 [MarkdownNative.swift](../Sources/ResoundApp/MarkdownNative.swift) 每个块（段/列表项/表格单元格/代码块）都是独立 `Text`。这是 SwiftUI 多年未解限制，纯 SwiftUI 无法跨块连选。
+
+**评估的三条路**：①AppKit NSTextView 承载全文（体验最佳但要重写渲染成 NSAttributedString + NSTextTable，放弃 LazyVStack 虚拟化，改动最大）；②散文合并进单个 Text（保 SwiftUI/性能，但仍无法跨表格/代码块边界）；③加显式复制按钮。**用户选③**，且要**两档**：复制带样式文本 + 复制原始 Markdown。
+
+**落地**：
+- 新增 [MarkdownAttributed.swift](../Sources/ResoundApp/MarkdownAttributed.swift)：`MarkdownAttributed.make(_:)` 走 swift-markdown AST 生成带真实 `NSFont`/`NSParagraphStyle` 的 `NSAttributedString`（标题/粗斜删/行内码/链接/多级列表/引用/代码块/表格→管道分隔）；`RichCopy.styled` 写 **RTF**（`.documentType: .rtf`）+ 纯文本兜底到 `NSPasteboard`，`RichCopy.plain` 写原始源码。**颜色刻意中性**（正文不设前景色，交目标应用默认文字色）→ 跨浅/深色文档粘贴都可读。
+- [LibraryView.swift](../Sources/ResoundApp/LibraryView.swift) `SummaryMarkdown` body 包成 `VStack{ MarkdownNative; MarkdownCopyBar }`——因是全 App 富文本唯一入口，**5 处调用点（会议摘要卡/录音问答/文档正文/文档问答/全局问答）一次生效**。`MarkdownCopyBar` 两个 ghost 按钮 + 「已复制」1.5s 反馈（本地 @State，不破坏 `SummaryMarkdown` 的 Equatable 剪枝）。
+- **为何不用 `NSAttributedString(markdown:)`**：Foundation 的 markdown 解析只存 `presentationIntent` 语义属性、不解析成真实字体，写 RTF 会丢粗体/标题视觉 → 必须手搓 AST→NSAttributedString 才能让样式随 RTF 存活。
+
+编译+打包通过、App 已重启。**验收点**：①摘要/文档/问答底部出现两按钮；②「复制文本」粘到 Notion/Word/飞书保留标题粗体列表；③「复制 Markdown」粘出的是原始 `#`/`-`/`|` 源码；④点击后按钮短暂变「已复制」。
+
+---
+
 ## MCP 双向接入：架构讨论定型（未写代码，待 Claude design 出稿）（2026-06-26）
 
 需求=两个独立模块：**A 接入 MCP（消费方）**把 Notion/Jira/Google 等外部文档拉进来与录音绑定、喂检索/生成；**B 提供 MCP（生产方）**把会议知识库暴露给 Claude Code/Codex。各自一份 spec，**先 A 后 B**（A 是主菜也喂养 B；B 几乎是现成 CLI 包一层）。本条只记**讨论拍板的选型**，mockup 后再落正式 spec。

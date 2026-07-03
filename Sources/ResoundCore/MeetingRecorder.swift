@@ -19,9 +19,18 @@ public enum MeetingRecorderError: Error, CustomStringConvertible {
     }
 }
 
-/// 会议录音：ScreenCaptureKit 抓系统音频（=会议对方声音）+ 麦克风（=你），停止后重采样到 16k 混音成一个文件。
+/// 会议录音：ScreenCaptureKit 抓系统音频（=会议对方声音）+ 麦克风（=你），停止后重采样到 16k、
+/// 按两轨真实起点对齐补零 → 混音（audio.m4a 播放用）+ **保留对齐后的分轨**（分开转录用，见 dual-track spec）。
 /// macOS 14：系统音频用 SCStream（13+），麦克风用 AVAudioEngine（15 才支持 SCStream 直接抓麦）。
 public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+
+    /// 停止录音的产物：混音 + 对齐后的两条分轨（16k mono wav 临时文件，入库后由调用方清理）。
+    public struct Capture {
+        public let mixed: URL       // 对齐后混音（audio.m4a 的来源，播放/说话人识别时间轴锚点）
+        public let mic: URL?        // 麦克风轨（本地侧），已对齐到与 mixed 同一时间轴；空轨为 nil
+        public let sys: URL?        // 系统音频轨（线上侧），同上
+    }
+
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var sysInput: AVAssetWriterInput?
@@ -33,6 +42,10 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
 
     private var sysURL: URL!
     private var micURL: URL!
+    // 两轨真实起点（mach host clock 秒）：SCStream 先启动、麦克风后启动，起点差要用补零对齐，
+    // 否则混音错位 + 分轨转录的时间戳不在同一轴上。
+    private var sysStartHost: Double?
+    private var micStartHost: Double?
 
     public override init() { super.init() }
 
@@ -53,8 +66,8 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
         try startMic(log: log)
     }
 
-    /// 停止捕获并混音，返回 16k 单声道 wav 文件 URL。
-    public func finishCapture(log: (String) -> Void = { print($0) }) async throws -> URL {
+    /// 停止捕获并对齐混音，返回混音 + 分轨（16k 单声道 wav）。
+    public func finishCapture(log: (String) -> Void = { print($0) }) async throws -> Capture {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         micFile = nil
@@ -62,11 +75,11 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
         sysInput?.markAsFinished()
         if let writer { await writer.finishWriting() }
         log("⏹  录音结束，混音中…")
-        return try mixTo16k(log: log)
+        return try alignAndMix(log: log)
     }
 
-    /// 录到按 Enter 或 maxSeconds，返回混好的 16k 单声道 wav 文件 URL（CLI 用）。
-    public func record(maxSeconds: Double?, log: (String) -> Void = { print($0) }) async throws -> URL {
+    /// 录到按 Enter 或 maxSeconds，返回混音 + 分轨（CLI 用）。
+    public func record(maxSeconds: Double?, log: (String) -> Void = { print($0) }) async throws -> Capture {
         try await startCapture(log: log)
         log("🔴 会议录音中（麦克风 + 对方音）…  按 Enter 停止" +
             (maxSeconds.map { String(format: "（或 %.0fs 自动停止）", $0) } ?? ""))
@@ -121,7 +134,9 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
               let writer, let sysInput else { return }
         if !sessionStarted {
             guard writer.startWriting() else { return }
-            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: pts)
+            sysStartHost = CMTimeGetSeconds(pts)   // SCStream PTS 在 host clock 上，与 AVAudioTime.hostTime 同轴
             sessionStarted = true
         }
         if sysInput.isReadyForMoreMediaData { sysInput.append(sampleBuffer) }
@@ -134,48 +149,37 @@ public final class MeetingRecorder: NSObject, SCStreamOutput, SCStreamDelegate, 
     // MARK: 麦克风（AVAudioEngine → AVAudioFile）
 
     private func startMic(log: (String) -> Void) throws {
+        // ⚠️ 不要在这里开 `setVoiceProcessingEnabled(true)`（AEC/VPIO）——2026-07-02 实测它会把输入格式
+        // 变成怪异大格式（2.5h→11GB）且**麦克风输出纯静音**（两条录音佐证），静默毁掉整场会议录音。
+        // 回声（线上声被麦克风二次收）改由「分轨分别转录」在文本层去重解决（见 TranscriptMerge），不动采集。
         let input = engine.inputNode
         let fmt = input.outputFormat(forBus: 0)
         do {
-            let f = try AVAudioFile(forWriting: micURL, settings: fmt.settings)
-            self.micFile = f
+            self.micFile = try AVAudioFile(forWriting: micURL, settings: fmt.settings)
         } catch { throw MeetingRecorderError.startFailed("麦克风文件创建失败：\(error.localizedDescription)") }
-        input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buf, _ in
-            try? self?.micFile?.write(from: buf)
+        input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buf, when in
+            guard let self else { return }
+            if self.micStartHost == nil, when.isHostTimeValid {
+                self.micStartHost = AVAudioTime.seconds(forHostTime: when.hostTime)
+            }
+            try? self.micFile?.write(from: buf)   // 原生格式写盘（与验证过能用的老行为一致）；降采样在结束时流式做
         }
         do { try engine.start() }
         catch { throw MeetingRecorderError.startFailed("AVAudioEngine 启动失败：\(error.localizedDescription)") }
         log("  🎙  麦克风捕获已启动")
     }
 
-    // MARK: 混音（两路各自重采样到 16k 单声道 → 相加 → 写 wav）
+    // MARK: 对齐 + 混音（流式：边读边重采样到 16k、按起点对齐、混音写出，绝不整读进内存）
 
-    private func mixTo16k(log: (String) -> Void) throws -> URL {
-        let mic = (try? AudioConverter().resampleAudioFile(micURL)) ?? []
-        let sys = (try? AudioConverter().resampleAudioFile(sysURL)) ?? []
-        let n = max(mic.count, sys.count)
-        guard n > 0 else { throw MeetingRecorderError.startFailed("两路录音都为空（检查麦克风/屏幕录制权限）") }
-        var mixed = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            let a = i < mic.count ? mic[i] : 0
-            let b = i < sys.count ? sys[i] : 0
-            mixed[i] = max(-1, min(1, a * 0.8 + b * 0.8))   // 轻微抬高再硬限幅，防混音后过小
-        }
-        let outURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("resound-meeting-\(UUID().uuidString).wav")
-        let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
-        let outFile = try AVAudioFile(forWriting: outURL, settings: fmt.settings)
-        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n))!
-        buf.frameLength = AVAudioFrameCount(n)
-        mixed.withUnsafeBufferPointer { src in
-            buf.floatChannelData![0].update(from: src.baseAddress!, count: n)
-        }
-        try outFile.write(from: buf)
-        log(String(format: "  ✅ 混音完成：%.0fs（麦克风 %.0fs + 系统 %.0fs）",
-                   Double(n)/16000, Double(mic.count)/16000, Double(sys.count)/16000))
+    private func alignAndMix(log: (String) -> Void) throws -> Capture {
+        // 流式混音（见 StreamingMix）——修复旧版把整条 mic（曾达 11GB）读进 [Float] 撑爆内存卡死整机的雷。
+        let uid = UUID().uuidString
+        let r = try StreamingMix.mixTo16k(mic: micURL, sys: sysURL,
+                                          micStartHost: micStartHost, sysStartHost: sysStartHost,
+                                          uid: uid, log: log)
         try? FileManager.default.removeItem(at: micURL)
         try? FileManager.default.removeItem(at: sysURL)
-        return outURL
+        return Capture(mixed: r.mixed, mic: r.mic, sys: r.sys)
     }
 
     private func waitForStop(maxSeconds: Double?) async {

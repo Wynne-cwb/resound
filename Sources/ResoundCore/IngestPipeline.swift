@@ -14,6 +14,7 @@ public struct IngestPipeline {
 
     public func ingest(
         audioPath: URL,
+        tracks: (mic: URL, sys: URL)? = nil,   // 会议分轨（已与 audioPath 混音同轴）：给了就分开转录再合并
         title: String?,
         source: String,
         tags: [String],
@@ -55,34 +56,37 @@ public struct IngestPipeline {
 
         var result: TranscribeResult
         let tTranscribe = Date()
-        if let cfg = try? Config.load(), cfg.transcribeOnline {
-            log("☁️ 在线转录中（\(cfg.transcribeModel) @ \(cfg.transcribeBaseURL)）…")
-            var upload = audioOut
-            var temps: [URL] = []
-            var vadSpans: [VADGate.Span] = []
-            // 转录前 VAD 门控：剪掉长静音/纯噪声段再上传，从根上减少 whisper 在非语音上的幻觉
-            //（「谢谢观看」之类套话/重复）+ 长静音致的时间戳漂移。没多少可剪就退回原文件，零风险。
-            if let r = try? await VADGate.voicedM4A(of: audioOut, log: log) {
-                upload = r.url; temps.append(r.url); vadSpans = r.spans
-            }
-            // 转录前对上传音频做响度归一（在剪辑后的音频上做；仅转录输入，存储/播放的 audio.m4a 不变），
-            // 改善大会议室小声场景；已经够响则自动跳过、用原文件，不增加上传体积。
-            if let norm = try? await AudioNormalizer.normalizedM4A(of: upload) {
-                upload = norm; temps.append(norm); log("   🔊 已响度归一（仅上传转录用）")
-            }
-            defer { for u in temps { try? FileManager.default.removeItem(at: u) } }
-            result = try await OnlineTranscriber(config: cfg, language: language, prompt: glossary.promptString)
-                .transcribe(audio: upload)
-            // 剪辑过 → 段落/词时间戳从压缩轴映射回原始轴（与原音频、说话人分割对齐）
-            if !vadSpans.isEmpty {
-                result = TranscribeResult(transcript: VADGate.remap(result.transcript, spans: vadSpans),
-                                          modelName: result.modelName)
+        if let tracks {
+            // 分轨转录（dual-track spec）：麦克风轨/系统轨各自 VAD→归一→转录（小声轨不再被大声轨掩盖、
+            // 双链路重影不再互相污染），再按时间戳合并 + 去重。分轨存进录音目录（事实源，可重转录）。
+            let micStored = dir.appendingPathComponent("track-mic.m4a")
+            let sysStored = dir.appendingPathComponent("track-system.m4a")
+            _ = try await M4AExporter().exportM4A(from: tracks.mic, to: micStored)
+            _ = try await M4AExporter().exportM4A(from: tracks.sys, to: sysStored)
+            log("   ✓ 分轨已保留：track-mic.m4a / track-system.m4a")
+            log("🎙 转录麦克风轨…")
+            let micR = try? await transcribeAudio(tracks.mic, glossary: glossary, model: model,
+                                                  language: language, maxFallback: maxFallback, log: log)
+            log("🖥 转录系统音频轨…")
+            let sysR = try? await transcribeAudio(tracks.sys, glossary: glossary, model: model,
+                                                  language: language, maxFallback: maxFallback, log: log)
+            switch (micR, sysR) {
+            case let (m?, s?):
+                let lang = s.transcript.segments.count >= m.transcript.segments.count
+                    ? s.transcript.language : m.transcript.language
+                result = TranscribeResult(
+                    transcript: TranscriptMerge.merge(mic: m.transcript, sys: s.transcript, language: lang, log: log),
+                    modelName: s.modelName)
+            case let (m?, nil): log("   ⚠️ 系统轨转录失败，仅用麦克风轨"); result = m
+            case let (nil, s?): log("   ⚠️ 麦克风轨转录失败，仅用系统轨"); result = s
+            case (nil, nil):
+                log("   ⚠️ 两条分轨转录都失败，回退混音转录")
+                result = try await transcribeAudio(audioOut, glossary: glossary, model: model,
+                                                   language: language, maxFallback: maxFallback, log: log)
             }
         } else {
-            log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
-            result = try await Transcriber(model: model, language: language,
-                                           prompt: glossary.promptString, maxFallback: maxFallback)
-                .transcribe(audio: audioOut)
+            result = try await transcribeAudio(audioOut, glossary: glossary, model: model,
+                                               language: language, maxFallback: maxFallback, log: log)
         }
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language) · ⏱ 转录 \(el(tTranscribe))")
 
@@ -136,6 +140,44 @@ public struct IngestPipeline {
         }
 
         return Output(recordingDir: dir, id: id)
+    }
+
+    /// 单个音频的完整转录链路：在线（VAD 门控 → 分窗响度归一 → whisper → 时间戳映射回原轴）或本地 WhisperKit。
+    /// ingest 的混音路径与分轨路径共用。
+    private func transcribeAudio(
+        _ audio: URL, glossary: Glossary, model: String, language: String?,
+        maxFallback: Int, log: (String) -> Void
+    ) async throws -> TranscribeResult {
+        if let cfg = try? Config.load(), cfg.transcribeOnline {
+            log("☁️ 在线转录中（\(cfg.transcribeModel) @ \(cfg.transcribeBaseURL)）…")
+            var upload = audio
+            var temps: [URL] = []
+            var vadSpans: [VADGate.Span] = []
+            // 转录前 VAD 门控：剪掉长静音/纯噪声段再上传，从根上减少 whisper 在非语音上的幻觉
+            //（「谢谢观看」之类套话/重复）+ 长静音致的时间戳漂移。没多少可剪就退回原文件，零风险。
+            if let r = try? await VADGate.voicedM4A(of: audio, log: log) {
+                upload = r.url; temps.append(r.url); vadSpans = r.spans
+            }
+            // 转录前对上传音频做分窗响度归一（在剪辑后的音频上做；仅转录输入，存储/播放的 audio.m4a 不变），
+            // 治整条小声 + 前小后大两类场景；整条够响则自动跳过、用原文件，不增加上传体积。
+            if let norm = try? await AudioNormalizer.normalizedM4A(of: upload) {
+                upload = norm; temps.append(norm); log("   🔊 已响度归一（仅上传转录用）")
+            }
+            defer { for u in temps { try? FileManager.default.removeItem(at: u) } }
+            var result = try await OnlineTranscriber(config: cfg, language: language, prompt: glossary.promptString)
+                .transcribe(audio: upload)
+            // 剪辑过 → 段落/词时间戳从压缩轴映射回原始轴（与原音频、说话人分割对齐）
+            if !vadSpans.isEmpty {
+                result = TranscribeResult(transcript: VADGate.remap(result.transcript, spans: vadSpans),
+                                          modelName: result.modelName)
+            }
+            return result
+        } else {
+            log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
+            return try await Transcriber(model: model, language: language,
+                                         prompt: glossary.promptString, maxFallback: maxFallback)
+                .transcribe(audio: audio)
+        }
     }
 
     /// 对 vault 内已有 transcript.json 重新做 繁→简归一 + 别名纠正并改写（免重新转录）。

@@ -32,7 +32,8 @@ public final class ZhConverter {
             Transcript.Segment(
                 id: seg.id, start: seg.start, end: seg.end,
                 text: convert(seg.text),
-                words: seg.words.map { Transcript.Word(w: convert($0.w), start: $0.start, end: $0.end) })
+                words: seg.words.map { Transcript.Word(w: convert($0.w), start: $0.start, end: $0.end) },
+                track: seg.track)
         }
         return Transcript(language: t.language, segments: segs)
     }

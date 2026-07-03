@@ -118,7 +118,7 @@ public enum VADGate {
                 let ws = mapToOriginal(w.start, spans: spans)
                 return Transcript.Word(w: w.w, start: ws, end: ws + max(0, w.end - w.start))
             }
-            return Transcript.Segment(id: s.id, start: ns, end: ne, text: s.text, words: words)
+            return Transcript.Segment(id: s.id, start: ns, end: ne, text: s.text, words: words, track: s.track)
         }
         return Transcript(language: t.language, segments: segs)
     }

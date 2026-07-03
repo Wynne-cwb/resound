@@ -467,7 +467,8 @@ final class LibraryModel: ObservableObject {
                 n += Self.ciCount(seg.text, q)
                 return Transcript.Segment(id: seg.id, start: seg.start, end: seg.end,
                     text: seg.text.replacingOccurrences(of: q, with: r, options: .caseInsensitive),
-                    words: seg.words.map { Transcript.Word(w: $0.w.replacingOccurrences(of: q, with: r, options: .caseInsensitive), start: $0.start, end: $0.end) })
+                    words: seg.words.map { Transcript.Word(w: $0.w.replacingOccurrences(of: q, with: r, options: .caseInsensitive), start: $0.start, end: $0.end) },
+                    track: seg.track)
             }
             guard n > 0 else { app?.toast("转录里没有匹配「\(q)」"); return }
             try? Transcript(language: t.language, segments: segs).jsonData().write(to: rec.transcriptURL)
@@ -817,9 +818,10 @@ final class LibraryModel: ObservableObject {
         Task {
             defer { namingInProgress = nil }
             do {
+                let vroot = cfg()?.vaultPath.map { URL(fileURLWithPath: $0) }
                 let msg = try await renameSpeakerInRecording(
                     rec: rec, oldLabel: label, newName: name, enroll: remember,
-                    speakerModel: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                    speakerModel: model, indexPath: defaultIndexPath(), embeddingDim: d, vaultRoot: vroot)
                 refreshDetail()
                 knownPeople = ((try? Index(path: defaultIndexPath(), dim: d))?.loadSpeakerRefs().map { $0.name } ?? []).sorted()
                 buildRoster()

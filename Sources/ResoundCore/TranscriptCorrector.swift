@@ -53,7 +53,7 @@ public struct TranscriptCorrector {
             guard let map = maps[bi] else { continue }
             for seg in batches[bi] {
                 guard let nt = map[seg.id], nt != seg.text, let idx = idxById[seg.id] else { continue }
-                corrected[idx] = Transcript.Segment(id: seg.id, start: seg.start, end: seg.end, text: nt, words: seg.words)
+                corrected[idx] = Transcript.Segment(id: seg.id, start: seg.start, end: seg.end, text: nt, words: seg.words, track: seg.track)
                 changed += 1
             }
         }

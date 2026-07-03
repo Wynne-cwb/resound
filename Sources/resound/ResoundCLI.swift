@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
 }
 
@@ -438,6 +438,33 @@ struct Summarize: AsyncParsableCommand {
             }
         }
         print("✅ 摘要完成")
+    }
+}
+
+/// resound normalize-audio <file> —— 对音频跑分窗自适应响度归一，输出归一后 m4a 路径（无头调试）
+struct NormalizeAudio: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "normalize-audio",
+        abstract: "分窗自适应响度归一（调试用；与转录前归一同一实现，输出临时 m4a 路径）")
+
+    @Argument(help: "音频文件路径")
+    var file: String
+
+    @Option(name: .long, help: "输出文件路径（默认打印临时文件路径）")
+    var out: String?
+
+    func run() async throws {
+        guard let url = try await AudioNormalizer.normalizedM4A(of: URL(fileURLWithPath: file)) else {
+            print("✅ 整条已够响，无需归一（转录会直接用原文件）")
+            return
+        }
+        if let out {
+            let dst = URL(fileURLWithPath: out)
+            try? FileManager.default.removeItem(at: dst)
+            try FileManager.default.moveItem(at: url, to: dst)
+            print("✅ 已归一 → \(out)")
+        } else {
+            print("✅ 已归一 → \(url.path)")
+        }
     }
 }
 
@@ -939,11 +966,74 @@ struct RecordMeeting: AsyncParsableCommand {
     var push = false
 
     func run() async throws {
-        let audioURL = try await MeetingRecorder().record(maxSeconds: maxSeconds)
+        let cap = try await MeetingRecorder().record(maxSeconds: maxSeconds)
+        let tracks: (mic: URL, sys: URL)? = { if let m = cap.mic, let s = cap.sys { return (m, s) }; return nil }()
         let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
-            .ingest(audioPath: audioURL, title: title, source: source, tags: tags,
+            .ingest(audioPath: cap.mixed, tracks: tracks, title: title, source: source, tags: tags,
                     model: model, language: language, hints: hint, push: push)
+        for u in [cap.mixed, cap.mic, cap.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
         print("✅ 完成：\(out.id)")
+    }
+}
+
+/// resound sync-speaker-names —— 把已注册说话人名字回填进 vault 的 glossary.txt 偏置词表
+struct SyncSpeakerNames: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "sync-speaker-names",
+        abstract: "把索引里已注册的说话人名字加入 glossary.txt 偏置词表（去重）；命名说话人时也会自动加入")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let names = (try? Index(path: indexURL, dim: cfg.embeddingDim))?.loadSpeakerRefs().map { $0.name } ?? []
+        guard !names.isEmpty else { print("索引里没有已注册说话人"); return }
+        let added = Glossary.syncSpeakerNames(vaultRoot: URL(fileURLWithPath: vault), names: names)
+        print(added.isEmpty ? "✅ 词表已包含全部 \(names.count) 个说话人，无需新增"
+                            : "✅ 已加入 \(added.count) 个说话人到词表偏置：\(added.joined(separator: "、"))")
+    }
+}
+
+/// resound recover-meeting —— 从残留的 mic/sys 临时轨流式混音抢救一场卡死未落盘的会议
+struct RecoverMeeting: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "recover-meeting",
+        abstract: "从残留 mic/sys 临时文件流式混音（内存安全）→（可选）转录入库，抢救卡死丢失的会议")
+
+    @Option(name: .long, help: "麦克风轨文件（如 T/resound-mic-*.caf）")
+    var mic: String
+
+    @Option(name: .long, help: "系统音频轨文件（如 T/resound-sys-*.m4a）")
+    var sys: String
+
+    @Option(name: .long, help: "vault 根目录；给了就转录入库，不给只输出混音 wav 路径（先验证不爆内存）")
+    var vault: String?
+
+    @Option(name: .long, help: "标题")
+    var title: String?
+
+    @Option(name: .long, help: "语言代码（中英混杂建议 zh）")
+    var language: String?
+
+    func run() async throws {
+        let micURL = URL(fileURLWithPath: mic), sysURL = URL(fileURLWithPath: sys)
+        print("🔀 流式混音抢救中（边读边重采样，不整读进内存）…")
+        // 卡死录音的起点已随进程丢失 → 不加前导静音（两轨录制起点本就近同时），按 0 对齐。
+        let r = try StreamingMix.mixTo16k(mic: micURL, sys: sysURL, micStartHost: nil, sysStartHost: nil) { print($0) }
+        print("🎧 混音输出：\(r.mixed.path)")
+        guard let vault else {
+            print("（未给 --vault，仅验证混音；要入库请加 --vault）")
+            return
+        }
+        let tracks: (mic: URL, sys: URL)? = { if let m = r.mic, let s = r.sys { return (m, s) }; return nil }()
+        let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
+            .ingest(audioPath: r.mixed, tracks: tracks, title: title, source: "meeting", tags: [],
+                    model: "large-v3", language: language, hints: [], push: false)
+        for u in [r.mixed, r.mic, r.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+        print("✅ 抢救完成并入库：\(out.id)")
     }
 }
 

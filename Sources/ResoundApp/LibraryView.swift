@@ -1290,7 +1290,46 @@ struct SummaryMarkdown: View, Equatable {
     }
 
     var body: some View {
-        MarkdownNative(text: text, pal: pal)   // 原生渲染（swift-markdown 解析 + 自绘），取代 MarkdownUI
+        VStack(alignment: .leading, spacing: 10) {
+            MarkdownNative(text: text, pal: pal)   // 原生渲染（swift-markdown 解析 + 自绘），取代 MarkdownUI
+            MarkdownCopyBar(markdown: text, pal: pal)   // 底部两档复制：带样式文本 / 原始 Markdown
+        }
+    }
+}
+
+// 富文本底部复制条：SwiftUI 的 textSelection 无法跨块选择，故给两个显式复制入口。
+// 「复制文本」写 RTF（粘到 Notion/Word 保留样式），「复制 Markdown」写原始源码。
+private struct MarkdownCopyBar: View {
+    let markdown: String
+    let pal: Palette
+    @State private var copied: Kind? = nil
+    private enum Kind { case styled, md }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Spacer(minLength: 0)
+            button(.styled, icon: "doc.richtext", tip: "复制带样式的文本（粘到 Notion/Word 保留格式）")
+            button(.md, icon: "chevron.left.forwardslash.chevron.right", tip: "复制原始 Markdown 源码")
+        }
+    }
+
+    private func button(_ kind: Kind, icon: String, tip: String) -> some View {
+        let done = copied == kind
+        return Button {
+            switch kind {
+            case .styled: RichCopy.styled(markdown)
+            case .md:     RichCopy.plain(markdown)
+            }
+            copied = kind
+            Task { try? await Task.sleep(nanoseconds: 1_500_000_000); if copied == kind { copied = nil } }
+        } label: {
+            Image(systemName: done ? "checkmark" : icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(done ? pal.ok : pal.text3)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plainHit).hoverCursor().help(tip)
     }
 }
 

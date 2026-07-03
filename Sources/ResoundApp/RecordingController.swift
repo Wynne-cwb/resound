@@ -134,10 +134,10 @@ final class RecordingController: ObservableObject {
         procStep = 0
         let title = meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            // ① 先把录音收尾（混音落盘）。这一步失败=没有音频可救，只能报错。
-            let url: URL
+            // ① 先把录音收尾（对齐混音+分轨落盘）。这一步失败=没有音频可救，只能报错。
+            let cap: MeetingRecorder.Capture
             do {
-                url = try await rec.finishCapture { _ in }
+                cap = try await rec.finishCapture { _ in }
             } catch {
                 await MainActor.run {
                     AppLog.error("录音收尾(混音)失败", error)
@@ -152,16 +152,18 @@ final class RecordingController: ObservableObject {
                 guard let vault = cfg.vaultPath, !vault.isEmpty else {
                     await MainActor.run {
                         AppLog.log("⚠️ 录音转写中止：未设置 VAULT_PATH（音频已保留待重试）")
-                        self.library?.recordFailedRecording(url: url, title: title,
+                        self.library?.recordFailedRecording(url: cap.mixed, title: title,
                             error: "未设置录音库路径（去 设置 配置 vault 后，可在录音库顶部重试）")
                         self.app?.toast("未设置录音库路径，录音已保留：配置后可在录音库顶部重试")
                         self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                     }
                     return
                 }
+                // 分轨齐全 → 分开转录合并（dual-track spec）；缺轨 → 回退混音单转录
+                let tracks: (mic: URL, sys: URL)? = { if let m = cap.mic, let s = cap.sys { return (m, s) }; return nil }()
                 let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
-                    .ingest(audioPath: url, title: (title?.isEmpty == false) ? title : nil, source: "meeting", tags: [],
-                            model: "large-v3", language: "zh", hints: [], push: false)
+                    .ingest(audioPath: cap.mixed, tracks: tracks, title: (title?.isEmpty == false) ? title : nil,
+                            source: "meeting", tags: [], model: "large-v3", language: "zh", hints: [], push: false)
                 let pipeline = IndexPipeline(config: cfg)
                 await MainActor.run { self.procStep = 1 }
                 // labelSpeakers:false——说话人交给后台 worker 的 diarization（会覆盖 chunk 说话人），此处不重复标注
@@ -169,7 +171,9 @@ final class RecordingController: ObservableObject {
                 if cfg.vaultAutoPush {   // 开了自动推送：把文本派生物同步到 vault 远端（音频已 gitignore）
                     _ = try? Git(repo: URL(fileURLWithPath: vault)).syncTextOnly(message: "rec: 会议录音 \(out.id)")
                 }
-                try? FileManager.default.removeItem(at: url)   // 入库成功，清掉临时混音
+                for u in [cap.mixed, cap.mic, cap.sys].compactMap({ $0 }) {
+                    try? FileManager.default.removeItem(at: u)   // 入库成功，清掉临时混音+分轨
+                }
                 // 转写+入库完成即收尾；说话人识别(慢)+摘要交后台串行 worker，录音库里该条显示「识别说话人中…」
                 let sum = loadRecordingSummary(dir: out.recordingDir)
                 await MainActor.run {
@@ -183,10 +187,12 @@ final class RecordingController: ObservableObject {
                 await MainActor.run {
                     AppLog.error("录音转写入库失败（音频已保留待重试）", error)
                     if let lib = self.library {
-                        lib.recordFailedRecording(url: url, title: title, error: String(describing: error))
+                        // v1：失败重试只保混音（分轨临时文件顺手清掉，避免堆积）——见 dual-track spec「失败重试路径」
+                        for u in [cap.mic, cap.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+                        lib.recordFailedRecording(url: cap.mixed, title: title, error: String(describing: error))
                         self.app?.toast("转写失败，录音已保留：可在录音库顶部重试或在 Finder 取回")
                     } else {
-                        AppLog.log("⚠️ library 未挂载，录音临时文件：\(url.path)")
+                        AppLog.log("⚠️ library 未挂载，录音临时文件：\(cap.mixed.path)")
                         self.app?.toast("转写失败：\(error)")
                     }
                     self.phase = .idle; self.recorder = nil; self.meetingTitle = nil

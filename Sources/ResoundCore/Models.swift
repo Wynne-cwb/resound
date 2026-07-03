@@ -18,13 +18,17 @@ public struct Transcript: Codable {
         public let end: Double
         public let text: String
         public let words: [Word]
+        /// 分轨录音时段落来自哪条轨："mic"（本地麦克风）/ "system"（线上系统音频）。
+        /// 混音转录/旧数据为 nil。留作说话人归属先验 + 调试。
+        public let track: String?
 
-        public init(id: Int, start: Double, end: Double, text: String, words: [Word]) {
+        public init(id: Int, start: Double, end: Double, text: String, words: [Word], track: String? = nil) {
             self.id = id
             self.start = start
             self.end = end
             self.text = text
             self.words = words
+            self.track = track
         }
     }
 

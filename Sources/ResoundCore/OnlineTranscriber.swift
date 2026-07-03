@@ -31,6 +31,7 @@ public struct OnlineTranscriber {
             ("model", model),
             ("response_format", "verbose_json"),
             ("timestamp_granularities[]", "segment"),
+            ("timestamp_granularities[]", "word"),   // 词级时间戳：供说话人词级归属 + 句级平滑（第二档）
         ]
         if let language, !language.isEmpty { fields.append(("language", language)) }
         if let prompt, !prompt.isEmpty { fields.append(("prompt", prompt)) }
@@ -56,15 +57,29 @@ public struct OnlineTranscriber {
         }
 
         let decoded = try JSONDecoder().decode(VerboseResp.self, from: data)
+        // 顶层 words（词级时间戳，OpenAI verbose_json 格式）——按 start 排序供分配。
+        let allWords = (decoded.words ?? [])
+            .map { Transcript.Word(w: $0.word, start: $0.start, end: $0.end) }
+            .sorted { $0.start < $1.start }
+        // 用双指针把词分配进它所属的段（词 start 落在 [seg.start, seg.end] 内）。词按序、段按序 → O(n+m)。
+        func wordsIn(_ s: Double, _ e: Double, cursor: inout Int) -> [Transcript.Word] {
+            var out: [Transcript.Word] = []
+            while cursor < allWords.count && allWords[cursor].start < s { cursor += 1 }  // 跳过落在段前的
+            var k = cursor
+            while k < allWords.count && allWords[k].start <= e + 0.001 { out.append(allWords[k]); k += 1 }
+            return out
+        }
         var segments: [Transcript.Segment] = []
         if let segs = decoded.segments, !segs.isEmpty {
+            var cursor = 0
             for (i, s) in segs.enumerated() {
                 let t = s.text.trimmingCharacters(in: .whitespaces)
                 guard !t.isEmpty else { continue }
-                segments.append(Transcript.Segment(id: i, start: s.start, end: s.end, text: t, words: []))
+                let words = wordsIn(s.start, s.end, cursor: &cursor)
+                segments.append(Transcript.Segment(id: i, start: s.start, end: s.end, text: t, words: words))
             }
         } else if let text = decoded.text, !text.isEmpty {
-            segments = [Transcript.Segment(id: 0, start: 0, end: decoded.duration ?? 0, text: text, words: [])]
+            segments = [Transcript.Segment(id: 0, start: 0, end: decoded.duration ?? 0, text: text, words: allWords)]
         }
         return TranscribeResult(
             transcript: Transcript(language: decoded.language ?? language ?? "unknown", segments: segments),
@@ -76,7 +91,9 @@ public struct OnlineTranscriber {
         let duration: Double?
         let text: String?
         let segments: [Seg]?
+        let words: [Wrd]?
         struct Seg: Codable { let start: Double; let end: Double; let text: String }
+        struct Wrd: Codable { let word: String; let start: Double; let end: Double }
     }
 }
 

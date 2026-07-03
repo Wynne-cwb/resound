@@ -49,6 +49,36 @@ public struct Glossary {
         terms.isEmpty ? nil : terms.joined(separator: ", ")
     }
 
+    /// 把说话人真名同步进 vault/glossary.txt 的「自动管理」小节（纯偏置词，不加变体纠正）——
+    /// 会议里常念到人名，进偏置词表可让转录把人名拼对。去重（用户手写过或本节已有则跳过）、
+    /// 忽略空名与匿名「说话人N」。返回新加入的名字（便于日志）。
+    @discardableResult
+    public static func syncSpeakerNames(vaultRoot: URL, names: [String]) -> [String] {
+        let clean = names
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("说话人") }
+        guard !clean.isEmpty else { return [] }
+        let f = vaultRoot.appendingPathComponent("glossary.txt")
+        var text = (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        // 已出现过的词（规范词或裸词，任意行）视为已存在
+        let existing = Set(text.split(whereSeparator: \.isNewline).compactMap { raw -> String? in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { return nil }
+            if let eq = line.firstIndex(of: "=") { return String(line[..<eq]).trimmingCharacters(in: .whitespaces) }
+            return line
+        })
+        // 去重 + 本批内去重，保持顺序
+        var seen = Set<String>(), toAdd: [String] = []
+        for n in clean where !existing.contains(n) && !seen.contains(n) { seen.insert(n); toAdd.append(n) }
+        guard !toAdd.isEmpty else { return [] }
+        let marker = "# --- 说话人（自动加入，转录偏置用）---"
+        if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
+        if !text.contains(marker) { text += "\n" + marker + "\n" }
+        text += toAdd.joined(separator: "\n") + "\n"
+        try? text.write(to: f, atomically: true, encoding: .utf8)
+        return toAdd
+    }
+
     /// 别名纠正：把转录里的变体替换成规范词，返回纠正后 Transcript 和替换处数（仅按段文本计）。
     public func apply(to transcript: Transcript) -> (transcript: Transcript, replacements: Int) {
         guard !corrections.isEmpty else { return (transcript, 0) }
@@ -73,7 +103,8 @@ public struct Glossary {
                 text: fix(seg.text, counting: true),
                 words: seg.words.map {
                     Transcript.Word(w: fix($0.w, counting: false), start: $0.start, end: $0.end)
-                }
+                },
+                track: seg.track
             )
         }
         return (Transcript(language: transcript.language, segments: segs), count)

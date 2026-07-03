@@ -166,17 +166,42 @@ public func identifySpeakersByDiarization(
     let named = Set(spkName.values.filter { !$0.hasPrefix("说话人") }).sorted()
     log("🗣 diar 识别：\(mergedSegs.count) 簇 → 认出 \(named.count) 人（\(named.joined(separator: "/"))）+ \(anon) 匿名")
 
-    // 7) ASR 段 → 所在 diar 轮次（原始簇）→ 合并簇 → 名字
-    func diarAt(_ time: Double) -> String? {
-        if let hit = diar.first(where: { $0.start <= time && time <= $0.end }) { return hit.spk }
-        return diar.min(by: { abs(($0.start + $0.end) / 2 - time) < abs(($1.start + $1.end) / 2 - time) })?.spk
+    // 7) ASR 段 → 与各 diar 轮次的**重叠时长投票** → 合并簇 → 名字
+    //    行业标准（WhisperX assign_word_speakers / NeMo / pyannote 官方 recipe 一致）：
+    //    段与每个轮次算时间交集、按合并后说话人累加秒数、取重叠最多者。取代旧的「段中点落哪个轮次」——
+    //    中点只采样一个时刻，段跨多人时约错一半、且对 diar 边界亚秒级抖动零容忍。详见
+    //    superpowers/specs/2026-07-02-speaker-attribution-research.md。
+    func overlapRep(_ s: Double, _ e: Double) -> String? {
+        var acc: [String: Double] = [:]   // 合并簇 rep → 累计重叠秒数
+        for d in diar {
+            let ov = min(e, d.end) - max(s, d.start)
+            if ov > 0 { acc[mergedOf[d.spk] ?? d.spk, default: 0] += ov }
+        }
+        if let best = acc.max(by: { $0.value < $1.value })?.key { return best }
+        // 区间整个落在 diar 静音间隙（零重叠）→ 回退最近轮次（按中点距离），映射到合并簇
+        let mid = (s + e) / 2
+        return diar.min(by: { abs(($0.start + $0.end) / 2 - mid) < abs(($1.start + $1.end) / 2 - mid) })
+            .flatMap { mergedOf[$0.spk] }
     }
-    var raw: [SpeakerSeg] = []
-    for seg in t.segments {
-        let nm = diarAt((seg.start + seg.end) / 2).flatMap { mergedOf[$0] }.flatMap { spkName[$0] } ?? "?"
-        raw.append(SpeakerSeg(start: seg.start, end: seg.end, speaker: nm))
+    func segSpeaker(_ s: Double, _ e: Double) -> String? { overlapRep(s, e).flatMap { spkName[$0] } }
+
+    // 第二档优先：转录带词级时间戳 → 词级重叠归属 + 句级众数平滑 + 按句重组 spans（切点落句/词边界）。
+    // 无词（旧转录/本地兜底）→ 退回第一档：整段按重叠时长投票。
+    let hasWords = t.segments.contains { !$0.words.isEmpty }
+    let raw: [SpeakerSeg]
+    if hasWords {
+        raw = SpeakerAttribution.attribute(
+            segments: t.segments,
+            wordSpeaker: { segSpeaker($0, $1) },
+            wholeSegmentSpeaker: { segSpeaker($0, $1) },
+            log: log)
+    } else {
+        raw = t.segments.map { SpeakerSeg(start: $0.start, end: $0.end, speaker: segSpeaker($0.start, $0.end) ?? "?") }
     }
-    let out = smoothSpeakerSegs(raw)
+    // 第三档：CAM++ 段级声纹重验（复用已提的 embedder/matcher/VAD），改判后再平滑一遍。
+    let reassigned = reassignBySpeakerprint(smoothSpeakerSegs(raw), samples: samples,
+                                            embedder: embedder, matcher: matcher, voiced: voiced, log: log)
+    let out = smoothSpeakerSegs(reassigned)
     guard !dryRun else { return out }   // 评测：只算不落盘，别覆盖用户标注
     let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
     try enc.encode(out).write(to: rec.dir.appendingPathComponent("diarization.json"))

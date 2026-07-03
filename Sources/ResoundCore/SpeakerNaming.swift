@@ -113,6 +113,67 @@ public func smoothSpeakerSegs(_ input: [SpeakerSeg], ephemeralMax: Double = 7) -
     return segs
 }
 
+/// 第三档：CAM++ 段级声纹**重验/重指派**（arXiv:2406.03155 思想；见
+/// superpowers/specs/2026-07-02-speaker-attribution-research.md）。
+///
+/// diar/逐窗归属之外的**第二票**：对每个「连续同说话人 run」用其（去静音后的）音频重提 CAM++ 声纹、
+/// 与注册库比对，**仅当**该 run 足够长(≥minDur)、声纹**高置信**（score≥minScore 且 margin≥minMargin）
+/// 命中一个**已注册**的人、且与当前标签不同时，才改判。段太短/声纹不置信/命中同名 → 保持不动（保守）。
+/// 目的：修正 diar 边界不准治不了的「整段人认错」——尤其相似嗓音误配、真名被塞进匿名簇、多人会逐窗法误标。
+/// 不依赖 diar 边界准确度。无注册库或改判 0 处则原样返回（零回归）。
+///
+/// - Parameter voiced: silero VAD 语音区间（有则提声纹前去静音，更干净）；空则按原区间切片。
+public func reassignBySpeakerprint(
+    _ segs: [SpeakerSeg],
+    samples: [Float],
+    embedder: SpeakerEmbedder,
+    matcher: SpeakerMatcher,
+    voiced: [(start: Double, end: Double)] = [],
+    minDur: Double = 2.0,
+    minScore: Float = 0.6,
+    minMargin: Float = 0.10,
+    maxDur: Double = 15,
+    log: (String) -> Void = { _ in }
+) -> [SpeakerSeg] {
+    guard !matcher.refs.isEmpty, segs.count >= 1 else { return segs }
+
+    // 取 [s,e] 内、且落在 VAD 语音区间里的样本（拼接，上限 maxDur）；无 VAD 则原样切。
+    func voicedSlice(_ s: Double, _ e: Double) -> [Float] {
+        guard !voiced.isEmpty else { return slice(samples, start: s, end: min(e, s + maxDur)) }
+        var out: [Float] = []
+        for v in voiced where v.end > s && v.start < e {
+            let a = max(s, v.start), b = min(e, v.end)
+            if b - a > 0.1 { out.append(contentsOf: slice(samples, start: a, end: b)) }
+            if Double(out.count) / 16000.0 >= maxDur { break }
+        }
+        return out.isEmpty ? slice(samples, start: s, end: min(e, s + maxDur)) : out
+    }
+
+    // 合并连续同说话人 run（run 越长声纹越可靠）
+    var runs: [(lo: Int, hi: Int, spk: String, start: Double, end: Double)] = []
+    var i = 0
+    while i < segs.count {
+        var j = i
+        while j + 1 < segs.count && segs[j + 1].speaker == segs[i].speaker { j += 1 }
+        runs.append((i, j, segs[i].speaker, segs[i].start, segs[j].end)); i = j + 1
+    }
+
+    var out = segs
+    var changed = 0
+    for r in runs where (r.end - r.start) >= minDur {
+        let sl = voicedSlice(r.start, r.end)
+        guard sl.count >= 16000, let e = embedder.embed(sl) else { continue }   // ≥1s 语音才提
+        let m = matcher.match(e)
+        guard let name = m.name, m.score >= minScore, m.margin >= minMargin, name != r.spk else { continue }
+        for k in r.lo...r.hi { out[k] = SpeakerSeg(start: out[k].start, end: out[k].end, speaker: name) }
+        changed += 1
+        log(String(format: "   🔎 声纹重验：%.0f–%.0fs「%@」→「%@」(cos=%.2f margin=%.2f)",
+                   r.start, r.end, r.spk, name, m.score, m.margin))
+    }
+    if changed > 0 { log("   🔎 声纹重验改判 \(changed) 段") }
+    return out
+}
+
 /// 识别一条录音的说话人——**优先用已注册声纹逐窗直接匹配**（实验证明近乎完美：
 /// Wynne+GGBond 1-on-1，190 窗 → Wynne 120 / GGBond 67，仅 1 窗未过门），
 /// 没匹中的窗（声纹库里没有的人）再彼此在线聚类成匿名「说话人N」。
@@ -165,8 +226,11 @@ public func identifySpeakers(_ rec: RecordingSummary, model: String,
             })
         raw.append(SpeakerSeg(start: seg.start, end: seg.end, speaker: wi.flatMap { winLabel[$0] } ?? "?"))
     }
-    // 平滑掉转场边界的幽灵说话人（持久化进 diarization.json，让名册/摘要/检索口径一致）
-    let out = smoothSpeakerSegs(raw)
+    // 第三档：CAM++ 段级声纹重验（多人会/逐窗法尤其受益——粗粒度窗 + 中点归属最容易整段认错）。
+    //（此路径无 VAD 区间，reassign 内部按原区间切片。）改判后再平滑一遍。
+    let reassigned = reassignBySpeakerprint(smoothSpeakerSegs(raw), samples: samples,
+                                            embedder: embedder, matcher: matcher, log: log)
+    let out = smoothSpeakerSegs(reassigned)
     guard !dryRun else { return out }   // 评测：只算不落盘
     let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
     try enc.encode(out).write(to: rec.dir.appendingPathComponent("diarization.json"))
@@ -188,6 +252,7 @@ public func identifySpeakers(_ rec: RecordingSummary, model: String,
 public func renameSpeakerInRecording(rec: RecordingSummary, oldLabel: String, newName: String,
                                      enroll: Bool, speakerModel: String?,
                                      indexPath: URL?, embeddingDim: Int,
+                                     vaultRoot: URL? = nil,
                                      log: (String) -> Void = { print($0) }) async throws -> String {
     let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty else { return "空名字，跳过" }
@@ -209,6 +274,22 @@ public func renameSpeakerInRecording(rec: RecordingSummary, oldLabel: String, ne
                 try? idx.setChunkPerson(id: c.id, person: name)
             }
         }
+    }
+
+    // 2.5) 把真名同步进 glossary.txt 偏置词表（会议里常念到人名 → 偏置让转录拼对）。
+    //      在 enroll 早退之前做，保证任何命名路径（记不记声纹）都会加入；顺带回填已注册的其他人名。
+    let vroot: URL? = vaultRoot ?? {
+        let v = rec.dir.deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()   // <vault>/recordings/YYYY/MM/<id> → 上溯 4 级
+        return FileManager.default.fileExists(atPath: v.appendingPathComponent("resound.yaml").path) ? v : nil
+    }()
+    if let vroot {
+        var names = [name]
+        if let indexPath, let idx = try? Index(path: indexPath, dim: embeddingDim) {
+            names.append(contentsOf: idx.loadSpeakerRefs().map { $0.name })
+        }
+        let added = Glossary.syncSpeakerNames(vaultRoot: vroot, names: names)
+        if !added.isEmpty { log("  📝 说话人已加入词表偏置：\(added.joined(separator: "、"))") }
     }
 
     // 3) 声纹注册（可选）

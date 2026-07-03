@@ -76,7 +76,9 @@ resound-vault/
 │   └── 2026/06/
 │       └── 2026-06-18-1430-standup/  # 一次录音 = 一个文件夹，id 即文件夹名
 │           ├── recording.yaml        # 录音元数据清单（人可编辑）
-│           ├── audio.m4a             # 原始音频归档（事实源）
+│           ├── audio.m4a             # 原始音频归档（事实源，会议=对齐后混音）
+│           ├── track-mic.m4a         # 〔可选〕会议分轨：麦克风（本地侧），已对齐混音时间轴
+│           ├── track-system.m4a      # 〔可选〕会议分轨：系统音频（线上侧），同上
 │           ├── transcript.json       # 词级时间戳转录（昂贵可修正）
 │           ├── diarization.json      # 说话人时间分段（昂贵可修正）
 │           └── labels.json           # spk_N → person_id 映射（用户确认，最珍贵的事实）
@@ -176,6 +178,8 @@ provenance:
 
 - `words` 词级时间戳是**硬要求**——切块和 diarization 对齐都靠它。
 - 用户改错字时改 `text`（必要时连带 `words`），这是允许的"昂贵可修正"。
+- 段落可带**可选** `track` 字段（`"mic"` / `"system"`）：分轨录音时标记该段来自哪条轨（本地麦克风 / 线上系统音频），
+  留作说话人归属先验；混音转录/旧数据无此键。见 dual-track 设计（specs/2026-07-02-meeting-dual-track-design.md）。
 
 ### 3.5 `diarization.json`（说话人分段）
 
