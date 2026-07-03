@@ -5,6 +5,12 @@
 
 ---
 
+## 转录 prompt 超长 HTTP 500 修复：按 UTF-8 字节截断（2026-07-03）
+
+**现象**：最新录音「Group Round 3」一直在线转录失败——`HTTP 500: prompt length must be 896 characters or fewer, but provided prompt contains 915`。**根因**：aihubmix whisper `prompt` 字段（=词表偏置词 `promptString`）有上限，而**前一天「说话人名字自动进词表」把 27 个名字加进 glossary 后，promptString 顶破了上限**（我引入的回归）。**关键坑**：上限是按 **UTF-8 字节**算，不是字符——词表里的中文词（取而代之/抽共…）每字 3 字节，843 字符 = **915 字节**。**对策**：[OnlineTranscriber.swift](../Sources/ResoundCore/OnlineTranscriber.swift) `cappedPrompt` 在发请求前把 prompt 按**字节**截到 ≤880（留余量于 896），逐词累加、在 ", " 边界切不切碎词；glossary.txt 里用户手写词在前、自动说话人名在后，故超长时优先保手写词、先舍多余人名。**第一版按 `String.count`（字符）截错了**（843<880 不触发 → 仍发 915 字节被拒），改按 `utf8.count` 才对。**验证**：修后重转录「Group Round 3」成功（911 段），入库+索引。**教训**：字符 vs 字节的坑——面向字节上限的截断必须按字节量。
+
+---
+
 ## 说话人名字自动进偏置词表（2026-07-02）
 
 需求：会议里常念到与会者名字，把说话人真名纳入转录偏置词表能让 whisper 把人名拼对。**落地**：新增 [Glossary.swift](../Sources/ResoundCore/Glossary.swift) `syncSpeakerNames(vaultRoot:names:)`——把名字写进 glossary.txt 的自动管理小节「# --- 说话人（自动加入，转录偏置用）---」，纯偏置词（不加变体纠正，避免误替换）、去重（用户手写过或本节已有则跳过）、忽略匿名「说话人N」。`renameSpeakerInRecording` 在命名任一路径（记不记声纹都算）+ enroll 早退之前调用，并顺带回填索引里已注册的其他人名；新增可选 `vaultRoot` 参数（App 传 config.vaultPath，缺省从 rec.dir 上溯 4 级 + resound.yaml 存在性守卫）。新增 CLI `sync-speaker-names` 一次性回填 + 无头验证。**验证**：对真 vault 回填 27 个说话人、Christine 已在词表正确去重、二次跑幂等无新增。名字进 glossary.txt（vault 事实源）后，所有转录路径经现成 `Glossary.load` 自动偏置，零额外改动。README 双语已同步。
