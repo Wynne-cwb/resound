@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-07-03（**手动识别说话人后列表仍「待识别」修复**：`analyze()`/`reidentify()` 创建了 diarization.json 且刷新了详情，但漏调 `markIdentified` → 列表徽标不清（只有后台 worker 调了）。已补。详见 DECISIONS 同日条目。**待 commit**）
 > 最近更新：2026-07-03（**转录 prompt 超长 HTTP 500 修复**：说话人名字进词表把 aihubmix whisper 的 prompt 顶破 896 **字节**上限（中文 3 字节/字，843 字符=915 字节）→ 一直转录失败。[OnlineTranscriber](../Sources/ResoundCore/OnlineTranscriber.swift) `cappedPrompt` 按 UTF-8 字节截到 880、词边界切、优先保用户手写词。**第一版按字符数截错了、要按字节**。已修+重转录「Group Round 3」成功入库。详见 DECISIONS 2026-07-03。**待 commit**）
 > 上轮更新：2026-07-02（**说话人归属三档改进**：深度调研后确认全行业用「词级×轮次重叠时长最大」归属、我们却用段中点。按 1→3→2 落地：①段级重叠投票取代中点（ggbond 验证 2% 纠正无回归）②CAM++ 段级声纹重验做第二票（保守,RMA 上 0 改判无回归）③重开词级时间戳+句级众数平滑+按句重组（补上 2026-06-24 缺的护栏,合成 selftest 通过）。**编译全绿；诚实结论：≤3人会实打实改进,RMA 类≥4人会走逐窗回退法受益有限（Sortformer ≤4人天花板未破）**。待 App 重建+真实录音验收。详见 DECISIONS 2026-07-02「说话人归属三档改进」+ [research](../superpowers/specs/2026-07-02-speaker-attribution-research.md)。**待 commit**）
 > 上轮更新：2026-07-02（**会议录音质量三连修**：RMA 混合会录音转录极差 → 实测定位两根因（前 4 分钟 -28dB 近静音 + 双链路直接相加混音）。修复①麦克风 AEC ②归一化改分窗自适应增益（调试 CLI `normalize-audio`）③分轨保留+分开转录合并去重（spec [dual-track](../superpowers/specs/2026-07-02-meeting-dual-track-design.md)，Segment 加可选 track 字段）。RMA 录音已用新归一重转录回填+重跑说话人+重生成摘要（前 4 分钟救回）。**编译全绿；App 打包+重启被阻塞——用户当时正在录音，不能 killall**。录音结束后需：`killall Resound && ./scripts/bundle-app.sh release && open build/Resound.app`，再实机验收分轨（下场会议看 track-*.m4a/track 字段/重影去重）。详见 DECISIONS 2026-07-02 条目。**待 commit**）

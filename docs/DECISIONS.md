@@ -5,6 +5,12 @@
 
 ---
 
+## 手动识别说话人后列表仍「待识别」修复（2026-07-03）
+
+**现象**：一条录音详情里说话人+摘要都有了，列表却一直显示「待识别」徽标。**根因**：`identified` 标志 = 扫描时 diarization.json 是否存在（内存缓存，不每行重扫）。手动点「识别说话人」走 `LibraryModel.analyze()`（重新识别走 `reidentify()`）——它们创建了 diarization.json 且 `refreshDetail()`（所以详情显示说话人），但**只有后台 worker `runSpeakerWorker` 调了 `markIdentified`，手动两条路径漏了** → 列表内存标志仍 false。**对策**：`analyze()`/`reidentify()` 识别成功后补调 `markIdentified(rec.id)`。（重启 App 重扫也能清，但那是绕过；根治是补 markIdentified。）触发场景：CLI 恢复/导入的录音在 App 里手动识别时最易撞上。
+
+---
+
 ## 转录 prompt 超长 HTTP 500 修复：按 UTF-8 字节截断（2026-07-03）
 
 **现象**：最新录音「Group Round 3」一直在线转录失败——`HTTP 500: prompt length must be 896 characters or fewer, but provided prompt contains 915`。**根因**：aihubmix whisper `prompt` 字段（=词表偏置词 `promptString`）有上限，而**前一天「说话人名字自动进词表」把 27 个名字加进 glossary 后，promptString 顶破了上限**（我引入的回归）。**关键坑**：上限是按 **UTF-8 字节**算，不是字符——词表里的中文词（取而代之/抽共…）每字 3 字节，843 字符 = **915 字节**。**对策**：[OnlineTranscriber.swift](../Sources/ResoundCore/OnlineTranscriber.swift) `cappedPrompt` 在发请求前把 prompt 按**字节**截到 ≤880（留余量于 896），逐词累加、在 ", " 边界切不切碎词；glossary.txt 里用户手写词在前、自动说话人名在后，故超长时优先保手写词、先舍多余人名。**第一版按 `String.count`（字符）截错了**（843<880 不触发 → 仍发 915 字节被拒），改按 `utf8.count` 才对。**验证**：修后重转录「Group Round 3」成功（911 段），入库+索引。**教训**：字符 vs 字节的坑——面向字节上限的截断必须按字节量。

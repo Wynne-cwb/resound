@@ -700,6 +700,7 @@ final class LibraryModel: ObservableObject {
                 // 真 diarization 优先（干净轮次→簇级声纹+VAD→匹配真名）；多人会(≥4簇)自动回退逐窗法
                 let segs = try await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 refreshDetail()
+                markIdentified(rec.id)   // 手动识别也要清列表「待识别」徽标（否则详情有说话人、列表却仍待识别）
                 let named = Set(segs.map { $0.speaker }.filter { !$0.hasPrefix("说话人") && $0 != "?" }).count
                 app?.toast(named > 0 ? "已识别 · 自动认出 \(named) 人（命名匿名者后下次也能自动认出）"
                                      : "已识别说话人。命名后下次可自动认出。")
@@ -718,6 +719,7 @@ final class LibraryModel: ObservableObject {
             do {
                 let segs = try await reidentifySpeakers(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 refreshDetail(); buildRoster()
+                markIdentified(rec.id)   // 同 analyze：确保列表「待识别」徽标清除
                 let named = Set(segs.map { $0.speaker }.filter { !$0.hasPrefix("说话人") && $0 != "?" }).count
                 app?.toast("已重新识别 · \(speakers.count) 位（自动认出 \(named) 人）")
             } catch { app?.toast("重新识别失败：\(error)") }
