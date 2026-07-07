@@ -5,6 +5,18 @@
 
 ---
 
+## 录音日期解析成 2026-01-08：parseTitleDate 从 UUID 里抠出「1-8」（2026-07-07）
+
+**现象**：`2026-07-07 月度 1 on 1 会议 with GGBond` 刚录完，详情/列表日期却是 `2026-01-08`。**定位**：manifest `recorded_at: 2026-01-08T12:00:00`——**正午 12:00 是 `parseTitleDate` 的指纹**（`make()` 硬编码 hour=12），说明日期是标题解析来的。同一天另 3 条 1-1 录音 recorded_at 都是真实时刻（带秒、非正午）不受影响。区别：这条 id 是 `2026-07-07-1558-resound-meeting-1ac059e1-8c1e-…`（UUID 乱码 id = 「转写失败→重试→丢会议名」那条老 bug 的产物）。**根因链**：①这条会议入库某步失败→抢救进 failed-recordings 以 UUID 命名 ②重试入库时 title 为空→`defaultTitle` 取了 UUID 串当标题 ③`parseTitleDate` 正则4（裸 `MM-dd`，边界只挡 `[\d.]`）在 UUID `…9e**1-8**c1e…` 里抠出 `1-8`→当成 1月8日→`inferYear`→2026-01-08 ④用户后来手动重命名成带日期的正确标题，但**重命名不回填 recorded_at**，错值留存。实测确认：正则4 对该 UUID 命中 `["1-8"]`。**两处修复**：①**数据**：`resound redate --apply` 按当前正确标题重解析→改回 2026-07-07（只动这一条，同日其余跳过；索引同步）。②**代码加固**：[TitleDate.swift](../Sources/ResoundCore/TitleDate.swift) 正则4 边界 `(?<![\d.])…(?![\d.])` → `(?<![\w.-])…(?![\w.-])`，禁止裸 MM-dd 两侧接字母/数字/下划线/连字符/点。实测：UUID/`v3-2` 版本号不再误抠，合法 `6-10`/`6/10` 仍命中。**教训**：无年份的裸 `MM-dd` 是最松的模式，必须严守 token 边界；面对可能含噪声（UUID/hash/版本号）的标题，宽松正则会静默出错。会议名丢失的源头（重试丢 title）代码已修、两处调用都传了 title；加固后即便再撞 UUID 兜底标题，日期也只会退回文件时间而非离谱值。App 已重建重启。**待 commit**。
+
+---
+
+## Embedding 429 限流无重试 → Ask 直接失败（2026-07-07）
+
+**现象**：Ask 提问时「正在阅读相关片段…」阶段报错 `embedding HTTP 429: Model qwen3-embedding-8b rate limited by provider ... cluster_rate_limit_exceeded`，原始 JSON 直接甩给用户，重试仍失败。**根因**：[EmbeddingClient.swift](../Sources/ResoundCore/EmbeddingClient.swift) 的 `embed` 对任何非 200 一律立即 `throw`，**全链路零重试/退避**——服务商集群并发瞬时超限（429）本该退避几秒重试即可自愈，却被当成硬错误抛出。查询侧（Ask 的 `embedQuery`）和文档侧（`embedDocuments`/`embedAll`）都受影响。**对策**：`embed` 包一层重试循环（`maxAttempts=5`）——429 / 5xx / URLSession 网络错误可重试，真正的 400（参数错）/401（鉴权）立即失败；退避优先遵守响应头 `Retry-After`（秒），否则 1→2→4→8s 指数退避 + 抖动、上限 30s。**补充坑（同日第二个报错）**：aihubmix 临时路由不到模型时返回的不是 429/5xx，而是 **HTTP 400 + `no_available_channel`**（"The current model cannot be routed at the moment, please try again later" / `Aihubmix_api_error`）——本质瞬时可重试却伪装成 400。故重试条件特判：`code==400 && body 含 no_available_channel|cannot be routed` 也算 transient 重试，避免把临时容量不足当硬参数错误抛给用户。**教训**：网关的"稍后再试"类错误不一定用规范状态码，得按 body 关键字兜。**取舍**：只改 embedding（本次报错点）；ChatClient 同样无重试，是同类隐患但未在本次扩范围，留作后续。编译通过，待 App 重建后实机验证。
+
+---
+
 ## 手动识别说话人后列表仍「待识别」修复（2026-07-03）
 
 **现象**：一条录音详情里说话人+摘要都有了，列表却一直显示「待识别」徽标。**根因**：`identified` 标志 = 扫描时 diarization.json 是否存在（内存缓存，不每行重扫）。手动点「识别说话人」走 `LibraryModel.analyze()`（重新识别走 `reidentify()`）——它们创建了 diarization.json 且 `refreshDetail()`（所以详情显示说话人），但**只有后台 worker `runSpeakerWorker` 调了 `markIdentified`，手动两条路径漏了** → 列表内存标志仍 false。**对策**：`analyze()`/`reidentify()` 识别成功后补调 `markIdentified(rec.id)`。（重启 App 重扫也能清，但那是绕过；根治是补 markIdentified。）触发场景：CLI 恢复/导入的录音在 App 里手动识别时最易撞上。

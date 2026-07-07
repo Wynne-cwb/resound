@@ -46,7 +46,9 @@ public func parseTitleDate(_ title: String, now: Date = Date()) -> Date? {
     if let d = firstMatch(#"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"#, {
         inferYear(month: Int($0[1]) ?? 0, day: Int($0[2]) ?? 0)
     }) { return d }
-    if let d = firstMatch(#"(?<![\d.])(\d{1,2})[-/](\d{1,2})(?![\d.])"#, {
+    // 裸 MM-dd：两侧必须是「非字母数字/下划线/连字符/点」，否则会从 UUID（如 …9e1-8c1e… → 1-8）、
+    // 版本号（v3-2）等噪声里误抠出日期。这是最松的模式，边界守严一点。
+    if let d = firstMatch(#"(?<![\w.-])(\d{1,2})[-/](\d{1,2})(?![\w.-])"#, {
         inferYear(month: Int($0[1]) ?? 0, day: Int($0[2]) ?? 0)
     }) { return d }
     return nil
