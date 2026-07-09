@@ -5,6 +5,12 @@
 
 ---
 
+## 单录音提问纳入关联文档（2026-07-09）
+
+**现象/需求**：向「Project EU Region Kickoff」录音提问时，明明关联了文档「AfterShip 欧洲区域部署调研 - WIP」（document.yaml `links: ["recording:…"]`），回答却完全没吸收文档内容。**根因**：[IndexPipeline.answerInRecording](../Sources/ResoundCore/IndexPipeline.swift) 检索写死 `filters: .init(recordingId: recordingId)`——严格按 `recording_id` 等值过滤，而关联文档的 chunk 是 `recording_id=NULL`/`doc_id=文档id`/`source_kind=document`，被整体排除。P2「纪要纳入关联文档」只把文档喂给了**摘要**、没接 **Ask**；`answerInDocument` 又是反向只查单篇——两者中间没桥。**修复（检索层+UI 层，全链路）**：①[Index.Filters](../Sources/ResoundCore/Index.swift) 加 `linkedDocIds`，`filterClause` 在 recordingId 非空且 linkedDocIds 非空时把 scope 扩成 `and (c.recording_id=? or c.doc_id in (?,…))`（无关联时行为逐字节同以前，零回归）；②`answerInRecording` 用现成的 `Index.documentsLinked(toRecording:)` 反查关联文档 id 传入。③App 引用层：`RecCite`/`StoredRecCite` 加 `docId`/`docTitle`（旧数据缺省 nil 向后兼容），引用构建时文档命中走文档分支，[recCitesView](../Sources/ResoundApp/LibraryView.swift) 文档引用渲染成蓝色文档卡（doc.text 图标+标题+「关联文档」角标）、点击复用 `documents.openFromCite` 跳 Documents 页高亮（录音引用仍跳时间点）——否则文档命中会被硬套「说话人」且点击去 seek 无意义时间。**DB 验证**：该录音 27 chunk + 文档 29 chunk，旧过滤候选 27、新 OR 过滤 56（27+29），文档 chunk 正确纳入候选池。编译+打包+重启通过，README 双语已同步「单录音提问纳入关联文档」。**待实机验收**：向该录音问文档里才有的内容→回答吸收 + 出现蓝色文档引用可点跳转。**待 commit**。
+
+---
+
 ## 录音日期解析成 2026-01-08：parseTitleDate 从 UUID 里抠出「1-8」（2026-07-07）
 
 **现象**：`2026-07-07 月度 1 on 1 会议 with GGBond` 刚录完，详情/列表日期却是 `2026-01-08`。**定位**：manifest `recorded_at: 2026-01-08T12:00:00`——**正午 12:00 是 `parseTitleDate` 的指纹**（`make()` 硬编码 hour=12），说明日期是标题解析来的。同一天另 3 条 1-1 录音 recorded_at 都是真实时刻（带秒、非正午）不受影响。区别：这条 id 是 `2026-07-07-1558-resound-meeting-1ac059e1-8c1e-…`（UUID 乱码 id = 「转写失败→重试→丢会议名」那条老 bug 的产物）。**根因链**：①这条会议入库某步失败→抢救进 failed-recordings 以 UUID 命名 ②重试入库时 title 为空→`defaultTitle` 取了 UUID 串当标题 ③`parseTitleDate` 正则4（裸 `MM-dd`，边界只挡 `[\d.]`）在 UUID `…9e**1-8**c1e…` 里抠出 `1-8`→当成 1月8日→`inferYear`→2026-01-08 ④用户后来手动重命名成带日期的正确标题，但**重命名不回填 recorded_at**，错值留存。实测确认：正则4 对该 UUID 命中 `["1-8"]`。**两处修复**：①**数据**：`resound redate --apply` 按当前正确标题重解析→改回 2026-07-07（只动这一条，同日其余跳过；索引同步）。②**代码加固**：[TitleDate.swift](../Sources/ResoundCore/TitleDate.swift) 正则4 边界 `(?<![\d.])…(?![\d.])` → `(?<![\w.-])…(?![\w.-])`，禁止裸 MM-dd 两侧接字母/数字/下划线/连字符/点。实测：UUID/`v3-2` 版本号不再误抠，合法 `6-10`/`6/10` 仍命中。**教训**：无年份的裸 `MM-dd` 是最松的模式，必须严守 token 边界；面对可能含噪声（UUID/hash/版本号）的标题，宽松正则会静默出错。会议名丢失的源头（重试丢 title）代码已修、两处调用都传了 title；加固后即便再撞 UUID 兜底标题，日期也只会退回文件时间而非离谱值。App 已重建重启。**待 commit**。

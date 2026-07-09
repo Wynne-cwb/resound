@@ -9,6 +9,8 @@ struct StoredRecCite: Codable {
     var speaker: String
     var time: Double        // 片段起点秒（点击跳转/定位用）
     var snippet: String
+    var docId: String? = nil     // 旧数据缺省 nil（向后兼容）：非空 = 关联文档引用
+    var docTitle: String? = nil
 }
 struct StoredRecMsg: Codable, Identifiable {
     var id = UUID()

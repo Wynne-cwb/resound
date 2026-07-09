@@ -1043,14 +1043,29 @@ struct LibraryView: View {
             .buttonStyle(.plainHit).hoverCursor()
             if open {
                 ForEach(m.cites) { c in
-                    Button { vm.openRecCite(time: c.time) } label: {
+                    Button {
+                        if c.isDoc {
+                            if let id = c.docId { documents.openFromCite(docId: id, snippet: c.snippet); app.page = .documents }
+                        } else {
+                            vm.openRecCite(time: c.time)
+                        }
+                    } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 7) {
-                                Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
-                                Spacer(minLength: 8)
-                                Text(mmss(c.time)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
-                                    .padding(.horizontal, 6).padding(.vertical, 2)
-                                    .background(pal.inset, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                if c.isDoc {
+                                    Image(systemName: "doc.text").font(.system(size: 11, weight: .semibold)).foregroundStyle(pal.doc)
+                                    Text(c.docTitle ?? c.docId ?? "未命名文档").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.doc).lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    Text("关联文档").font(.system(size: 9.5, weight: .semibold)).tracking(0.4).foregroundStyle(pal.doc)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(pal.docSoft, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                } else {
+                                    Text(c.speaker).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.accent)
+                                    Spacer(minLength: 8)
+                                    Text(mmss(c.time)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text3)
+                                        .padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(pal.inset, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                }
                             }
                             Text("“\(c.snippet)”").font(.system(size: 12)).italic().foregroundStyle(pal.text2).lineSpacing(1).lineLimit(3)
                         }

@@ -420,8 +420,13 @@ public struct IndexPipeline {
         let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
         // 检索用「借历史改写成可独立检索」的查询（追问如"那么时间线呢"才能命中）；综合仍用原问 + 全量历史。
         let retrievalQuery = await condensedQuery(question, history: history)
+        // 单录音提问也纳入「关联文档」：scope = 本录音 chunk ∪ 关联文档 chunk（无关联时同以前，严格限本录音）。
+        let linkedDocIds = (try? Index(path: indexPath, dim: config.embeddingDim))
+            .map { $0.documentsLinked(toRecording: recordingId).map(\.id) } ?? []
         let hits = try await search(query: retrievalQuery, indexPath: indexPath, topK: topK,
-                                    rerank: true, filters: .init(recordingId: recordingId))
+                                    rerank: true,
+                                    filters: .init(recordingId: recordingId,
+                                                   linkedDocIds: linkedDocIds.isEmpty ? nil : linkedDocIds))
         let text = try await Synthesizer(chat: chat).answer(query: question, hits: hits, history: history)
         return (text, hits)
     }

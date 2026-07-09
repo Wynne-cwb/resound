@@ -24,8 +24,12 @@ final class LibraryModel: ObservableObject {
     struct RecCite: Identifiable, Equatable {
         let id = UUID()
         let speaker: String
-        let time: Double        // 片段起点秒
+        let time: Double        // 片段起点秒（文档引用忽略）
         let snippet: String
+        // 关联文档来源：docId 非空 = 文档引用（渲染成文档卡、点击跳 Documents），否则本录音片段。
+        var docId: String? = nil
+        var docTitle: String? = nil
+        var isDoc: Bool { docId != nil }
     }
 
     /// id 用转录段自身的稳定 id（transcript.json 的 segment id），不再每次载入用新 UUID——
@@ -897,7 +901,7 @@ final class LibraryModel: ObservableObject {
         recChats = recStore.load().mapValues { stored in
             stored.map { s in
                 RecAskMsg(id: s.id, isUser: s.isUser, full: s.text, revealed: s.text.count,
-                          phase: .done, cites: s.cites.map { RecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet) },
+                          phase: .done, cites: s.cites.map { RecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet, docId: $0.docId, docTitle: $0.docTitle) },
                           ts: s.ts)
             }
         }
@@ -906,7 +910,7 @@ final class LibraryModel: ObservableObject {
         let map = recChats.mapValues { msgs in
             msgs.filter { $0.isUser || $0.phase == .done }   // 进行中的不落盘
                 .map { StoredRecMsg(id: $0.id, isUser: $0.isUser, text: $0.full,
-                                    cites: $0.cites.map { StoredRecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet) }, ts: $0.ts) }
+                                    cites: $0.cites.map { StoredRecCite(speaker: $0.speaker, time: $0.time, snippet: $0.snippet, docId: $0.docId, docTitle: $0.docTitle) }, ts: $0.ts) }
         }
         recStore.save(map)
     }
@@ -965,8 +969,12 @@ final class LibraryModel: ObservableObject {
                     patchRec(rid, aid) { $0.phase = .empty; $0.revealed = 0 }
                     return
                 }
-                let cites = r.hits.prefix(4).map { h in
-                    RecCite(speaker: h.personId ?? speakerAt(h.start), time: h.start, snippet: h.text)
+                let cites = r.hits.prefix(4).map { h -> RecCite in
+                    if h.isDocument {
+                        return RecCite(speaker: "", time: 0, snippet: h.text,
+                                       docId: h.docId, docTitle: h.docTitle)
+                    }
+                    return RecCite(speaker: h.personId ?? speakerAt(h.start), time: h.start, snippet: h.text)
                 }
                 patchRec(rid, aid) { $0.full = r.text; $0.cites = Array(cites) }
                 startRecReveal(rid, aid)

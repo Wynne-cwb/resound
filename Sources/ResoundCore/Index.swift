@@ -426,10 +426,13 @@ public final class Index {
         public var sourceKind: String?
         public var recordingId: String?
         public var docId: String?
+        /// 与 recordingId 搭配：scope 扩成「本录音 OR 这些关联文档」（单录音提问纳入关联文档）。
+        /// 仅在 recordingId 非空时生效；为空/nil 时行为同以前（严格限本录音）。
+        public var linkedDocIds: [String]?
         public init(dateRange: DateRange? = nil, speakers: [String]? = nil, sourceKind: String? = nil,
-                    recordingId: String? = nil, docId: String? = nil) {
+                    recordingId: String? = nil, docId: String? = nil, linkedDocIds: [String]? = nil) {
             self.dateRange = dateRange; self.speakers = speakers; self.sourceKind = sourceKind
-            self.recordingId = recordingId; self.docId = docId
+            self.recordingId = recordingId; self.docId = docId; self.linkedDocIds = linkedDocIds
         }
         var isActive: Bool {
             dateRange != nil || (speakers?.isEmpty == false) || sourceKind != nil
@@ -445,14 +448,26 @@ public final class Index {
             parts.append("and c.person_id in (\(Array(repeating: "?", count: sp.count).joined(separator: ",")))")
         }
         if f.sourceKind != nil { parts.append("and c.source_kind = ?") }
-        if f.recordingId != nil { parts.append("and c.recording_id = ?") }
+        let linkedDocs = f.recordingId != nil ? (f.linkedDocIds ?? []) : []
+        if f.recordingId != nil {
+            if linkedDocs.isEmpty {
+                parts.append("and c.recording_id = ?")
+            } else {
+                // 「本录音 OR 关联文档」：文档 chunk 的 recording_id 为 NULL、doc_id 为文档 id。
+                let ph = Array(repeating: "?", count: linkedDocs.count).joined(separator: ",")
+                parts.append("and (c.recording_id = ? or c.doc_id in (\(ph)))")
+            }
+        }
         if f.docId != nil { parts.append("and c.doc_id = ?") }
         let sql = parts.joined(separator: " ")
         let bind: (OpaquePointer?, inout Int32) -> Void = { st, bi in
             if let r = f.dateRange { bindText(st, bi, r.from); bi += 1; bindText(st, bi, r.to); bi += 1 }
             if let sp = f.speakers, !sp.isEmpty { for s in sp { bindText(st, bi, s); bi += 1 } }
             if let sk = f.sourceKind { bindText(st, bi, sk); bi += 1 }
-            if let rid = f.recordingId { bindText(st, bi, rid); bi += 1 }
+            if let rid = f.recordingId {
+                bindText(st, bi, rid); bi += 1
+                for d in linkedDocs { bindText(st, bi, d); bi += 1 }
+            }
             if let did = f.docId { bindText(st, bi, did); bi += 1 }
         }
         return (sql, bind)
