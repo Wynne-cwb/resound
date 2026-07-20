@@ -29,13 +29,37 @@ public struct MCPToken: Codable, Sendable {
 public enum MCPTokenStore {
     private static let service = "com.resound.mcp.oauth"
 
+    /// 造一份「本机任意应用可无提示访问」的 SecAccess。
+    ///
+    /// 背景：login keychain 的 item 默认带 per-app ACL——只有 ACL 里「受信的那个二进制」能静默读，
+    /// 别的读就弹密码框。开发期 App 频繁重 build（哪怕签名 identity 稳定，早期 ad-hoc/裸 CLI 建的
+    /// item 里也会混进对不上现在 DR 的条目），叠加下面 save 每次重建 item 重置 ACL，就表现为**每次弹密码**。
+    /// 取舍：个人本机 App，牺牲 per-app 限制换体验——item 仍受 login keychain 加密 + 登录解锁保护，
+    /// 只是同机任意进程可读该 token（个人 Mac 风险低）。applicationList=nil 表示任意 app 且无提示。
+    private static func openAccess() -> SecAccess? {
+        var access: SecAccess?
+        var aclList: CFArray?
+        guard SecAccessCreate(service as CFString, nil, &access) == errSecSuccess,
+              let access,
+              SecAccessCopyACLList(access, &aclList) == errSecSuccess,
+              let acls = aclList as? [SecACL] else { return nil }
+        for acl in acls {
+            // applicationList = nil → 任意 app 可访问；promptSelector = 0 → 不要求密码
+            SecACLSetContents(acl, nil, service as CFString, SecKeychainPromptSelector(rawValue: 0))
+        }
+        return access
+    }
+
     public static func save(_ token: MCPToken, sourceId: String) {
         guard let data = try? JSONEncoder().encode(token) else { return }
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
                                 kSecAttrAccount as String: sourceId]
+        // 连带删掉旧 item 及其 per-app ACL，下面重建为开放 ACL——历史被 ad-hoc/CLI 污染的 item 借此自愈。
         SecItemDelete(q as CFDictionary)
-        var add = q; add[kSecValueData as String] = data
+        var add = q
+        add[kSecValueData as String] = data
+        if let access = openAccess() { add[kSecAttrAccess as String] = access }
         SecItemAdd(add as CFDictionary, nil)
     }
 

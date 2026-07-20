@@ -5,6 +5,12 @@
 
 ---
 
+## 录音合并功能（2026-07-09）
+
+**需求**：录音列表多选 2+ 条 → 合并成一条 → 按创建时间排时间轴 → 合并后重跑完整转录流程。**确认的决策**（问用户）：①原录音→**移到归档**（不删，可恢复）②音频→**按创建时间首尾相接**（不还原真实间隔、不插静音——相隔可能几天会产出巨量死区）③新标题→**flash 模型基于原标题建议**、弹窗可改。**实现**：Core 新增 [AudioMerge.swift](../Sources/ResoundCore/AudioMerge.swift)（`AVMutableComposition` 按序 `insertTimeRange` 拼接→AppleM4A 导出，镜像 VADGate 的成熟写法）+ [VaultBrowser.archiveRecording](../Sources/ResoundCore/VaultBrowser.swift)（移目录到 `<vault>/archive/recordings/<id>/`——在 `recordings/` 之外故不被 `findRecordings` 扫描/重索引，可手动恢复）。App [LibraryModel](../Sources/ResoundApp/LibraryModel.swift)：`selectionMode`/`mergeSelection`/`mergeSheet`/`merging` 状态 + `beginMerge`（按 recordedAt 升序排定顺序 + flash 建议标题）+ `confirmMerge`（拼音频→复用 `ingestOne` 走导入全流程转录/索引/后台说话人/摘要→**仅入库成功后**归档原录音+删索引+清本场对话）。[LibraryView](../Sources/ResoundApp/LibraryView.swift)：头部多选开关按钮、行内勾选框（多选模式改点击为勾选、隐藏 hover 操作/拖拽/右键菜单）、底部 `mergeBar`（已选 N + 合并/取消）。[Overlays](../Sources/ResoundApp/Overlays.swift) `mergeRecModal`（合并顺序列表 + 可编辑标题 + AI 建议中 spinner）。**关键取舍/护栏**：归档只在 ingest 成功后做（原文件合并期间需在场供 AVAsset 导出）；失败保留原录音+保留临时拼接文件供列表顶部重试（source=import）；成功才删临时文件。编译+打包+重启通过，README 双语同步。**待实机验收**：多选 2+ → 合并 → 看新录音转录/说话人/摘要齐全、原录音从列表消失且在 `<vault>/archive/` 里、AI 标题合理可改、失败时原录音不动可重试。**待 commit**。
+
+---
+
 ## 单录音提问纳入关联文档（2026-07-09）
 
 **现象/需求**：向「Project EU Region Kickoff」录音提问时，明明关联了文档「AfterShip 欧洲区域部署调研 - WIP」（document.yaml `links: ["recording:…"]`），回答却完全没吸收文档内容。**根因**：[IndexPipeline.answerInRecording](../Sources/ResoundCore/IndexPipeline.swift) 检索写死 `filters: .init(recordingId: recordingId)`——严格按 `recording_id` 等值过滤，而关联文档的 chunk 是 `recording_id=NULL`/`doc_id=文档id`/`source_kind=document`，被整体排除。P2「纪要纳入关联文档」只把文档喂给了**摘要**、没接 **Ask**；`answerInDocument` 又是反向只查单篇——两者中间没桥。**修复（检索层+UI 层，全链路）**：①[Index.Filters](../Sources/ResoundCore/Index.swift) 加 `linkedDocIds`，`filterClause` 在 recordingId 非空且 linkedDocIds 非空时把 scope 扩成 `and (c.recording_id=? or c.doc_id in (?,…))`（无关联时行为逐字节同以前，零回归）；②`answerInRecording` 用现成的 `Index.documentsLinked(toRecording:)` 反查关联文档 id 传入。③App 引用层：`RecCite`/`StoredRecCite` 加 `docId`/`docTitle`（旧数据缺省 nil 向后兼容），引用构建时文档命中走文档分支，[recCitesView](../Sources/ResoundApp/LibraryView.swift) 文档引用渲染成蓝色文档卡（doc.text 图标+标题+「关联文档」角标）、点击复用 `documents.openFromCite` 跳 Documents 页高亮（录音引用仍跳时间点）——否则文档命中会被硬套「说话人」且点击去 seek 无意义时间。**DB 验证**：该录音 27 chunk + 文档 29 chunk，旧过滤候选 27、新 OR 过滤 56（27+29），文档 chunk 正确纳入候选池。编译+打包+重启通过，README 双语已同步「单录音提问纳入关联文档」。**待实机验收**：向该录音问文档里才有的内容→回答吸收 + 出现蓝色文档引用可点跳转。**待 commit**。
@@ -1346,3 +1352,22 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 2. **确认浮层被遮盖**：手写 overlay 在 LazyVStack 里被相邻行盖+被行边界裁剪 → 两处确认浮层改用原生 `.popover(arrowEdge:.bottom)`（独立窗口层）。
 3. **tag 偶发「暂无建议」**：推理模型 temp 0 仍有采样方差，~1/5 返回空。两道：prompt 把「返回空」压成「仅正文空白/乱码的极少数情况」+ `suggestTags` 空结果重试一次。CLI 连跑 5/5 稳定出建议。
 4. 补「推算中…」转圈药丸（`recomputingFolder`/`recomputingTags`）作即时反馈，同「识别说话人中…」。
+
+## 踩坑：Notion(MCP) token 每次弹 Keychain 密码框（2026-07-20）
+
+**现象**：连了 Notion 后，App 每次读 token 都弹「输入 keychain 密码授权 Resound 访问」，很烦。
+
+**根因（三叠加，均非"密码难记"）**：
+- login keychain 的 generic-password item 默认带 **per-app ACL**——只有 ACL 里「受信的那个二进制」能静默读，签名对不上就弹框。
+- `MCPTokenStore.save` 原本每次 `SecItemDelete` + `SecItemAdd` **重建 item**；Notion access token ~1h 过期，每次 refresh 续期都重建 → ACL 被重置 → 之前点的 "Always Allow" 作废。
+- item 早期可能由 **ad-hoc 签名 / 裸 CLI（`.build/debug/resound`，未签名）** 创建，ACL 里混进对不上现在 DR（`Resound Dev` 稳定签名）的条目（dump 出来 `access: 5 entries`）。
+- **反直觉点**：App 其实早已用 `Resound Dev` 稳定签名（为 TCC 屏幕录制做的），DR 稳定，本该点一次 Always Allow 就静默——但上面 save 每次重建 item 把这份授权反复清掉。
+
+**方案（用户拍板方案 A：本机任意 app 可无提示读）**：给 token item 附一份「开放 ACL」，与签名彻底解耦（重 build / ad-hoc / 裸 CLI 都不弹）。
+- 新增 `MCPTokenStore.openAccess()`：`SecAccessCreate(descriptor, nil, &access)` 建默认 access，再 `SecAccessCopyACLList` 逐个 ACL 调 `SecACLSetContents(acl, nil, desc, promptSelector=0)`——**applicationList=nil = 任意 app、prompt=0 = 不要求密码**（注意 `SecAccessCopyACLList` 是 OSStatus + out 指针，不是直接返回数组；`SecAccessCreate` trustedlist 传 `nil` 避免 `[] as CFArray` 的类型歧义；这些是 macOS 10.10 deprecated 的 SecKeychain ACL API，仍是 file-based login keychain 控 prompt 的唯一途径，仅剩 deprecation warning）。
+- `save` 加 `add[kSecAttrAccess] = access`；**保留 delete+add**（不改 update）——这样旧的被污染 item 会被 delete 掉、重建为开放 ACL，**自愈历史污染**，用户零手动清理。
+- **安全取舍**：同机任意进程理论上可读该 Notion token——个人本机 wiki 风险低；item 仍受 login keychain 加密 + 登录解锁保护。
+
+**生效路径**：改动只在**新写入**时套开放 ACL，旧 item 不会自己变。让用户打开新打包 App → 设置›外部 MCP 把 Notion **断开重连一次**（走一次 save = delete 旧 item + add 开放 ACL）→ 之后重 build/重启/续 token 都不再弹。
+
+**验证**：编译通过、`bundle-app.sh` 打包 `Resound Dev` 签名完成。真机「重连后不再弹」待用户确认。README 双语无需改（"tokens live in the Keychain / 令牌存 Keychain" 仍成立，未新增/改动用户可见能力）。**待 commit。**
