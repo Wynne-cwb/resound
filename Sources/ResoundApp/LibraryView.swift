@@ -44,6 +44,11 @@ struct LibraryView: View {
                         Image(systemName: "square.and.arrow.down").font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(pal.text).frame(width: 30, height: 30).card(pal, corner: 8)
                     }.buttonStyle(.plainHit).hoverCursor().help("导入录音文件")
+                    Button { vm.toggleSelectionMode() } label: {
+                        Image(systemName: vm.selectionMode ? "checkmark.circle.fill" : "checkmark.circle").font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(vm.selectionMode ? pal.accent : pal.text)
+                            .frame(width: 30, height: 30).card(pal, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor().help(vm.selectionMode ? "退出多选" : "多选合并录音")
                 }
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(pal.text3)
@@ -89,6 +94,7 @@ struct LibraryView: View {
                 }
                 .padding(.horizontal, 10).padding(.bottom, 12)
             }
+            if vm.selectionMode { mergeBar }
         }
         .frame(width: 300)
         .background(pal.sidebar)
@@ -202,12 +208,45 @@ struct LibraryView: View {
         }.buttonStyle(.plainHit).hoverCursor().help(help)
     }
 
+    /// 多选模式底部操作条：显示已选数 + 合并/取消。
+    @ViewBuilder private var mergeBar: some View {
+        let n = vm.mergeSelection.count
+        VStack(spacing: 0) {
+            Rectangle().fill(pal.border).frame(height: 1)
+            HStack(spacing: 10) {
+                Button { vm.exitSelectionMode() } label: {
+                    Text("取消").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text2)
+                }.buttonStyle(.plainHit).hoverCursor()
+                Spacer()
+                Text("已选 \(n) 条").font(.system(size: 12)).foregroundStyle(pal.text2)
+                Button { vm.beginMerge() } label: {
+                    HStack(spacing: 5) {
+                        if vm.merging { Spinner(size: 10, color: .white) }
+                        else { Image(systemName: "arrow.triangle.merge").font(.system(size: 11, weight: .bold)) }
+                        Text("合并").font(.system(size: 12.5, weight: .semibold))
+                    }
+                    .foregroundStyle(.white).padding(.horizontal, 14).frame(height: 30)
+                    .background(n >= 2 && !vm.merging ? pal.accent : pal.text3, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }.buttonStyle(.plainHit).hoverCursor().disabled(n < 2 || vm.merging)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+        }
+        .background(pal.sidebar)
+    }
+
     private func recordingRow(_ r: RecordingSummary) -> some View {
-        let on = vm.selectedId == r.id
+        let picking = vm.selectionMode
+        let checked = vm.mergeSelection.contains(r.id)
+        let on = picking ? checked : (vm.selectedId == r.id)
         let identifying = vm.identifyingIds.contains(r.id)
         let summarizing = vm.summarizingIds.contains(r.id)
         let identified = r.identified   // 扫描时算好的内存标志，免每行每次重绘做 fileExists 系统调用
-        return VStack(alignment: .leading, spacing: 6) {
+        return HStack(spacing: 10) {
+            if picking {
+                Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17)).foregroundStyle(checked ? pal.accent : pal.text3)
+            }
+            VStack(alignment: .leading, spacing: 6) {
                 Text(r.title).font(.system(size: 12.5, weight: .regular)).foregroundStyle(pal.text).lineLimit(1)
                 HStack(spacing: 8) {
                     Text(shortDate(r.recordedAt)).font(.system(size: 11.5)).foregroundStyle(pal.text2)
@@ -254,12 +293,13 @@ struct LibraryView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
             .padding(.horizontal, 12).padding(.top, 11).padding(.bottom, 12)
             .background(on ? pal.accentSoft : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .stroke(on ? pal.accent : .clear, corner: 10)
             .opacity(vm.dragRecId == r.id ? 0.4 : 1)
             .overlay(alignment: .topTrailing) {
-                if hoverId == r.id && vm.moveMenuFor != r.id {
+                if !picking && hoverId == r.id && vm.moveMenuFor != r.id {
                     HStack(spacing: 2) {
                         iconBtn("folder") { vm.openMoveMenu(r.id) }
                         iconBtn("pencil") { vm.openRenameRec(r.id) }
@@ -269,21 +309,23 @@ struct LibraryView: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if vm.moveMenuFor == r.id { movePopover(r) }
+                if !picking && vm.moveMenuFor == r.id { movePopover(r) }
             }
             .contentShape(Rectangle())
             .background(WindowDragBlocker(clickable: true))   // 阻止「拖窗口」+ 整行小手指针（可点击）
-            .onTapGesture { vm.select(r.id) }
+            .onTapGesture { if picking { vm.toggleMergeSelect(r.id) } else { vm.select(r.id) } }
             .hoverCursor()
             .onHover { hoverId = $0 ? r.id : (hoverId == r.id ? nil : hoverId) }
-            .onDrag { vm.dragRecId = r.id; return NSItemProvider(object: r.id as NSString) }
+            .onDrag { if picking { return NSItemProvider() }; vm.dragRecId = r.id; return NSItemProvider(object: r.id as NSString) }
         .contextMenu {
-            moveMenu(r)
-            Button(vm.recomputingFolder.contains(r.id) ? "推算中…" : "重新推算文件夹") { vm.recomputeFolderSuggestion(r.id) }
-                .disabled(vm.recomputingFolder.contains(r.id))
-            Divider()
-            Button("重命名") { vm.openRenameRec(r.id) }
-            Button("删除", role: .destructive) { vm.deleteRecId = r.id }
+            if !picking {
+                moveMenu(r)
+                Button(vm.recomputingFolder.contains(r.id) ? "推算中…" : "重新推算文件夹") { vm.recomputeFolderSuggestion(r.id) }
+                    .disabled(vm.recomputingFolder.contains(r.id))
+                Divider()
+                Button("重命名") { vm.openRenameRec(r.id) }
+                Button("删除", role: .destructive) { vm.deleteRecId = r.id }
+            }
         }
     }
 

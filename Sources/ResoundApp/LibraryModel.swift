@@ -176,6 +176,18 @@ final class LibraryModel: ObservableObject {
     @Published var dragOverFolder: String?         // 拖拽悬停到的目标文件夹组
     private var pendingMoveRecId: String?          // 「新建文件夹…」创建后要落入的录音
 
+    // 多选合并
+    @Published var selectionMode = false           // 列表进入多选模式（勾选录音以合并）
+    @Published var mergeSelection: Set<String> = [] // 已勾选待合并的录音 id
+    @Published var mergeSheet: MergeState?          // 合并确认弹窗（标题可编辑）
+    @Published var merging = false                  // 合并进行中（音频拼接+转录）
+    struct MergeState {
+        var ids: [String]            // 参与合并的录音 id，已按 recordedAt 升序（=合并时间轴顺序）
+        var titles: [String]         // 与 ids 对应的原标题（弹窗里展示顺序）
+        var title: String            // 合并后新标题（预填 AI 建议，可改）
+        var suggesting: Bool         // flash 建议生成中
+    }
+
     // modals
     @Published var renameRec: RenameRecState?
     @Published var deleteRecId: String?
@@ -781,6 +793,101 @@ final class LibraryModel: ObservableObject {
         if selectedId == id { selectedId = nil }
         reload()
         app?.toast("录音已删除")
+    }
+
+    // MARK: 多选合并
+
+    func toggleSelectionMode() {
+        selectionMode.toggle()
+        if !selectionMode { mergeSelection.removeAll() }
+    }
+    func exitSelectionMode() { selectionMode = false; mergeSelection.removeAll() }
+    func toggleMergeSelect(_ id: String) {
+        if mergeSelection.contains(id) { mergeSelection.remove(id) } else { mergeSelection.insert(id) }
+    }
+
+    /// 打开合并弹窗：按 recordedAt 升序排定合并顺序，并用 flash 模型基于原标题建议一个新名（可改）。
+    func beginMerge() {
+        let picked = recordings.filter { mergeSelection.contains($0.id) }
+            .sorted { $0.recordedAt < $1.recordedAt }
+        guard picked.count >= 2 else { app?.toast("请至少选择 2 条录音"); return }
+        let ids = picked.map(\.id)
+        let titles = picked.map(\.title)
+        mergeSheet = MergeState(ids: ids, titles: titles, title: "", suggesting: true)
+        Task {
+            let suggested = await suggestMergedTitle(titles)
+            // 用户可能已在建议返回前手动改了标题 → 只在还空着时填入
+            if var s = mergeSheet, s.suggesting {
+                if s.title.isEmpty { s.title = suggested }
+                s.suggesting = false
+                mergeSheet = s
+            }
+        }
+    }
+
+    /// flash 模型：读几个原标题，给一个简洁的合并标题。失败/超时回退拼接原标题。
+    private func suggestMergedTitle(_ titles: [String]) async -> String {
+        let fallback = titles.joined(separator: " + ")
+        guard let cfg = try? Config.load() else { return fallback }
+        let chat = ChatClient(config: cfg, modelOverride: cfg.correctModel)
+        let list = titles.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        let sys = "你把多个会议录音标题合并成一个简洁、准确的新标题。只输出标题本身，不要解释、不要引号、不超过 30 字。"
+        let user = "这些录音将被合并成一条，请给合并后的标题：\n\(list)"
+        guard let out = try? await chat.complete(system: sys, user: user, maxTokens: 60, temperature: 0.3) else { return fallback }
+        let t = out.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+        return t.isEmpty ? fallback : t
+    }
+
+    /// 确认合并：拼接音频（按弹窗顺序）→ 走导入全流程（转录/索引/说话人/摘要）→ 成功后把原录音归档。
+    func confirmMerge() {
+        guard let st = mergeSheet, st.ids.count >= 2, !merging else { return }
+        let title = st.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { app?.toast("请填写合并后的标题"); return }
+        guard let vault = vaultURL() else { app?.toast("未设置录音库路径"); return }
+        let originals = st.ids.compactMap { id in recordings.first { $0.id == id } }
+        guard originals.count == st.ids.count else { app?.toast("部分录音已不存在，请重试"); return }
+
+        merging = true
+        mergeSheet = nil
+        stopPlayer()
+        app?.toast("正在合并音频…")
+        Task {
+            defer { merging = false }
+            do {
+                // 1. 拼接音频到临时文件
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("resound-merge-\(UUID().uuidString).m4a")
+                _ = try await AudioMerge().merge(originals.map(\.audioURL), to: tmp) { AppLog.log($0) }
+                // 2. 走导入全流程（转录→索引→后台说话人→摘要）；source=import 便于失败时原处重试
+                var item = ImportItem(url: tmp, name: title, status: .queued)
+                item.title = title
+                pendingImports.append(item)
+                await ingestOne(item)
+                // 3. 只在入库成功（占位已被移除、临时文件已消费）后归档原录音
+                let ok = !pendingImports.contains { $0.id == item.id }
+                if ok {
+                    let idx = try? Index(path: defaultIndexPath(), dim: dim())
+                    for r in originals {
+                        try? archiveRecording(r, vaultRoot: vault)
+                        try? idx?.deleteRecording(id: r.id)
+                        if recChats[r.id] != nil { recChats[r.id] = nil }
+                        if selectedId == r.id { selectedId = nil }
+                    }
+                    saveRecChats()
+                    try? FileManager.default.removeItem(at: tmp)   // 音频已拷进 vault，临时拼接文件可清
+                    autoPushVault("rec: 合并 \(originals.count) 条 → \(title)")
+                    exitSelectionMode()
+                    reload()
+                    app?.toast("已合并 \(originals.count) 条录音，原录音已归档")
+                } else {
+                    // 转录失败：ingestOne 已把该项标为 failed 留在列表顶部，临时文件保留供重试，原录音不动。
+                    app?.toast("合并转录失败，原录音保留未动（可在列表顶部重试）")
+                }
+            } catch {
+                AppLog.error("录音合并失败", error)
+                app?.toast("合并失败：\(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: 说话人命名

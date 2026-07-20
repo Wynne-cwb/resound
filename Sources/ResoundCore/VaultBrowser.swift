@@ -58,6 +58,18 @@ public func deleteRecording(_ rec: RecordingSummary) throws {
     try FileManager.default.removeItem(at: rec.dir)
 }
 
+/// 归档录音：把目录移到 `<vault>/archive/recordings/<id>/`（在 recordings/ 之外，故不被 `findRecordings` 扫描，
+/// 从列表消失但音频/转录完整保留、可手动恢复）。合并功能用它处置被合并的原录音。索引清理另调 Index.deleteRecording。
+public func archiveRecording(_ rec: RecordingSummary, vaultRoot: URL) throws {
+    let root = vaultRoot.appendingPathComponent("archive/recordings", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    var dst = root.appendingPathComponent(rec.id, isDirectory: true)
+    if FileManager.default.fileExists(atPath: dst.path) {   // 同名已归档过 → 加后缀避免覆盖
+        dst = root.appendingPathComponent("\(rec.id)-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+    }
+    try FileManager.default.moveItem(at: rec.dir, to: dst)
+}
+
 /// 改写 recording.yaml 的 recorded_at 行（redate 用；事实源在 vault）。
 public func setRecordingDate(_ rec: RecordingSummary, toISO iso: String) throws {
     let yamlURL = rec.dir.appendingPathComponent("recording.yaml")

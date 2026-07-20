@@ -17,6 +17,7 @@ struct OverlayHost: View {
             speakerModal
             renameRecModal
             deleteRecModal
+            mergeRecModal
             templateEditor
             templateDeleteModal
             vocabEditor
@@ -134,6 +135,51 @@ struct OverlayHost: View {
                 confirmCard(title: "删除录音？",
                             message: AttributedString(title) + AttributedString(" 及其转录文稿将从你的录音库中永久删除。此操作无法撤销。"),
                             confirm: "删除", onCancel: { library.deleteRecId = nil }, onConfirm: { library.confirmDeleteRec() })
+            }
+        }
+    }
+
+    // MARK: 录音合并
+
+    @ViewBuilder private var mergeRecModal: some View {
+        if let st = library.mergeSheet {
+            ModalScrim(pal: pal, onClose: { if !library.merging { library.mergeSheet = nil } }) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("合并 \(st.ids.count) 条录音").font(.system(size: 16, weight: .bold)).foregroundStyle(pal.text)
+                    Text("按创建时间首尾相接成一条新录音并重新完整转录；原来的 \(st.ids.count) 条会移到归档（可恢复）。")
+                        .font(.system(size: 12.5)).foregroundStyle(pal.text2).lineSpacing(2).padding(.top, 6)
+                    fieldLabel("合并顺序（按创建时间）").padding(.top, 16)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(st.titles.enumerated()), id: \.offset) { i, t in
+                            HStack(spacing: 9) {
+                                Text("\(i + 1)").font(.system(size: 11, weight: .bold, design: .monospaced)).foregroundStyle(pal.text3).frame(width: 15, alignment: .trailing)
+                                Text(t).font(.system(size: 12.5)).foregroundStyle(pal.text).lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12).background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.border, corner: 10).padding(.top, 7)
+                    fieldLabel("合并后标题").padding(.top, 16)
+                    ZStack(alignment: .trailing) {
+                        TextField("输入标题", text: Binding(get: { library.mergeSheet?.title ?? "" }, set: { library.mergeSheet?.title = $0 }))
+                            .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(pal.text)
+                            .padding(.horizontal, 13).frame(height: 40).background(pal.bg, in: RoundedRectangle(cornerRadius: 10, style: .continuous)).stroke(pal.borderStrong, corner: 10)
+                            .onSubmit { library.confirmMerge() }
+                        if st.suggesting {
+                            HStack(spacing: 5) {
+                                Spinner(size: 10, color: pal.accent)
+                                Text("AI 建议中…").font(.system(size: 11)).foregroundStyle(pal.text3)
+                            }.padding(.trailing, 12)
+                        }
+                    }.padding(.top, 7)
+                    HStack(spacing: 9) {
+                        Spacer()
+                        secondaryBtn("取消") { library.mergeSheet = nil }
+                        primaryBtn("合并") { library.confirmMerge() }
+                    }.padding(.top, 20)
+                }
+                .frame(width: 420)
             }
         }
     }
