@@ -19,6 +19,7 @@ struct CapabilityCard: View {
     @State private var apiKey = ""
     @State private var model = ""
     @State private var useLocal = false
+    @State private var useMoss = false
     @State private var keyVisible = false
     @State private var seeded = false
     @State private var openMenu: String? = nil   // 自定义下拉：nil / "provider" / "model" / "correct"
@@ -40,6 +41,9 @@ struct CapabilityCard: View {
         switch cap { case .chat: return "bubble.left.and.text.bubble.right"; case .embedding: return "point.3.connected.trianglepath.dotted"; case .transcribe: return "waveform" }
     }
     private var summary: String {
+        if cap == .transcribe && useMoss {
+            return providers.mossDeployed ? "MOSS 云端 · 转录+说话人一体（已部署）" : "MOSS 云端 · 待部署"
+        }
         if cap == .transcribe && useLocal { return "本地 Whisper · 离线内置" }
         if let p = providers.provider(cap) {
             let name = p.presetId.flatMap { pid in ProviderPreset.all.first { $0.id == pid }?.name } ?? "自定义"
@@ -102,7 +106,7 @@ struct CapabilityCard: View {
         case .running: pill(pal.text2, pal.inset) { Spinner(size: 10, color: pal.text2); Text("测试中") }
         case .ok:      pill(pal.ok, pal.ok.opacity(0.13)) { Image(systemName: "checkmark").font(.system(size: 9, weight: .black)); Text("已验证") }
         case .fail:    pill(pal.rec, pal.recSoft) { Image(systemName: "xmark").font(.system(size: 9, weight: .black)); Text("验证失败") }
-        case .idle:    if !model.isEmpty && !(cap == .transcribe && useLocal) { pill(pal.text3, pal.inset) { Text("未验证") } }
+        case .idle:    if !model.isEmpty && !(cap == .transcribe && (useLocal || useMoss)) { pill(pal.text3, pal.inset) { Text("未验证") } }
         }
     }
     @ViewBuilder private func pill<C: View>(_ fg: Color, _ bg: Color, @ViewBuilder _ content: () -> C) -> some View {
@@ -120,7 +124,9 @@ struct CapabilityCard: View {
 
             if cap == .transcribe { transcribeModeSwitch }
 
-            if cap == .transcribe && useLocal {
+            if cap == .transcribe && useMoss {
+                mossCard
+            } else if cap == .transcribe && useLocal {
                 localWhisperCard
             } else {
                 form
@@ -161,10 +167,112 @@ struct CapabilityCard: View {
 
     private var transcribeModeSwitch: some View {
         HStack(spacing: 4) {
-            segButton("在线服务", active: !useLocal) { useLocal = false; flush() }
-            segButton("本地 Whisper", active: useLocal) { useLocal = true; providers.useLocalTranscribe() }
+            segButton("MOSS 云端 ★", active: useMoss) { useMoss = true; useLocal = false; providers.useMossBackend() }
+            segButton("在线 Whisper", active: !useMoss && !useLocal) { useMoss = false; useLocal = false; providers.useWhisperBackend(); flush() }
+            segButton("本地 Whisper", active: !useMoss && useLocal) { useMoss = false; useLocal = true; providers.useLocalTranscribe() }
         }
         .padding(3).background(pal.inset, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    // MARK: MOSS 云端（推荐）：端到端「转录+说话人」联合模型，一键部署到用户自己的 Modal
+
+    private var mossCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 13) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(pal.accentSoft)
+                    Image(systemName: "person.wave.2").font(.system(size: 17)).foregroundStyle(pal.accent)
+                }.frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("MOSS-Transcribe-Diarize").font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundStyle(pal.text)
+                    Text("端到端「转录 + 说话人」联合模型：谁说了什么一次产出，说话人归属显著强于拼接式方案。部署到你自己的 Modal 账号（每月 $30 免费额度，日常用量约 $9/月，绑卡解锁后实际零成本）。")
+                        .font(.system(size: 11.5)).foregroundStyle(pal.text2).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14).background(pal.inset, in: RoundedRectangle(cornerRadius: 11, style: .continuous)).stroke(pal.border, corner: 11)
+
+            if providers.mossDeployed {
+                VStack(alignment: .leading, spacing: 6) {
+                    fieldLabel("服务端点")
+                    Text(providers.mossSubmitURL)
+                        .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(pal.text2)
+                        .lineLimit(1).truncationMode(.middle)
+                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(pal.inset, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                HStack(spacing: 8) {
+                    Button { providers.testMoss() } label: {
+                        HStack(spacing: 5) {
+                            if providers.mossProbe == .running { Spinner(size: 10, color: pal.text2) }
+                            Text("测试连接")
+                        }
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text)
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .stroke(pal.border, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor().disabled(providers.mossProbe == .running)
+                    Button { providers.deployMoss() } label: {
+                        Text("重新部署").font(.system(size: 12, weight: .semibold)).foregroundStyle(pal.text2)
+                            .padding(.horizontal, 12).frame(height: 30)
+                            .background(pal.elev, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .stroke(pal.border, corner: 8)
+                    }.buttonStyle(.plainHit).hoverCursor().disabled(providers.mossDeploying)
+                    Spacer()
+                    mossProbePill
+                }
+            } else if !providers.mossDeploying {
+                Button { providers.deployMoss() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "icloud.and.arrow.up").font(.system(size: 12, weight: .semibold))
+                        Text("一键部署到 Modal")
+                    }
+                    .font(.system(size: 12.5, weight: .bold)).foregroundStyle(.white)
+                    .padding(.horizontal, 14).frame(height: 32)
+                    .background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }.buttonStyle(.plainHit).hoverCursor()
+                Text("会打开浏览器登录/注册 Modal（免费），然后自动部署并验证，全程约 5 分钟。")
+                    .font(.system(size: 11)).foregroundStyle(pal.text3)
+            }
+
+            if providers.mossDeploying || !providers.mossDeployLog.isEmpty {
+                mossDeployLogView
+            }
+        }
+    }
+
+    @ViewBuilder private var mossProbePill: some View {
+        switch providers.mossProbe {
+        case .ok(let d):   pill(pal.ok, pal.ok.opacity(0.13)) { Image(systemName: "checkmark").font(.system(size: 9, weight: .black)); Text(d).lineLimit(1) }
+        case .fail(let d): pill(pal.rec, pal.recSoft) { Image(systemName: "xmark").font(.system(size: 9, weight: .black)); Text(d).lineLimit(1) }
+        default: EmptyView()
+        }
+    }
+
+    private var mossDeployLogView: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if providers.mossDeploying { Spinner(size: 10, color: pal.accent) }
+                Text(providers.mossDeploying ? "部署中…" : "部署日志")
+                    .font(.system(size: 11.5, weight: .semibold)).foregroundStyle(pal.text2)
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(providers.mossDeployLog.enumerated()), id: \.offset) { i, line in
+                            Text(line).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(pal.text2)
+                                .textSelection(.enabled).id(i)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                }
+                .frame(height: 120)
+                .background(pal.inset, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .onChange(of: providers.mossDeployLog.count) { _, n in
+                    if n > 0 { proxy.scrollTo(n - 1, anchor: .bottom) }
+                }
+            }
+        }
     }
     private func segButton(_ label: String, active: Bool, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -349,10 +457,15 @@ struct CapabilityCard: View {
             correctOn = providers.correctionEnabled
             correctModel = providers.correctionModel
         }
+        if cap == .transcribe {
+            // 已选 MOSS → MOSS 面板；首启引导（collapsible=false）里未配置任何转写 → 默认推荐 MOSS
+            useMoss = providers.transcribeBackendChoice == .moss
+                || (!collapsible && providers.transcribeBackendChoice == .local && !providers.mossDeployed)
+        }
         if let p = providers.provider(cap) {
             presetId = p.presetId; baseURL = p.baseURL; apiKey = p.apiKey; model = providers.model(cap); useLocal = false
         } else if cap == .transcribe {
-            useLocal = true
+            useLocal = !useMoss
             presetId = "openai"; baseURL = ProviderPreset.all.first { $0.id == "openai" }!.baseURL; model = "gpt-4o-transcribe"
         } else {
             useLocal = false

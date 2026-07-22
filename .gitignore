@@ -35,3 +35,11 @@ Vendor/sherpa-onnx/
 # Python bytecode
 __pycache__/
 *.pyc
+experiments/moss-eval/.venv/
+experiments/moss-eval/model/
+experiments/moss-eval/audio/
+experiments/moss-eval/out/
+experiments/moss-eval/REPORT.md
+experiments/moss-eval/hotwords.txt
+experiments/moss-eval/prompt*.txt
+experiments/moss-eval/.moss-api-key

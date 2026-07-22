@@ -33,7 +33,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 ## 功能特性
 
 - **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路捕获；两轨按真实起点对齐后混音存档，且**分轨同时保留**——各自独立转录再按时间合并去重，现场+线上混合会里同一句话走两条链路的「重影」不会污染转录）；检测到 Meet 自动弹屏级提示，可设为**会议开始自动开录 / 结束自动停录**（或弹一键确认窗），全程无需手动。录音时屏幕上常驻一颗**可拖动的小浮窗**（脉冲红点 + 计时 + 停止按钮），悬浮在其它 App 之上，让你随时知道正在录音、一键即可停——即使主窗口已隐藏也看得到。可在**设置 › 通用 › 录音浮窗**里开关。
-- **转录** — 默认走在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做**分窗自适应响度归一**（整条小声、前小后大都能救）。会议录音**两条分轨各自独立转录**再按时间戳合并去重——现场+线上混合会里同一句话走两条链路的「重影」不再互相污染。转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
+- **转录** — 三种后端：**MOSS 云端（推荐）**、在线 whisper、本地 WhisperKit。MOSS（[MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize)，Apache-2.0）是端到端「转录+说话人」联合模型——谁说了什么一次产出、说话人归属显著强于拼接式方案，设置里**一键部署到你自己的 Modal 账号**（免费额度内基本零成本），失败自动回退 whisper。whisper 路径默认在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做**分窗自适应响度归一**（整条小声、前小后大都能救）。会议录音**两条分轨各自独立转录**再按时间戳合并去重——现场+线上混合会里同一句话走两条链路的「重影」不再互相污染。转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
 - **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。**命名的人名会自动加入专有词表做转录偏置**（会议里常念到人名，偏置后拼写更准）。
 - **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；录音若有**关联文档**，会自动把文档全文当背景一起喂给模型（带字数上限），让纪要也吸收 PRD/议程/会议材料。**Templates 页**可增删改模板（占位符含 `{documents}`）、AI 协助生成 / 润色提示词、设默认。
 - **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**。规划器读懂每个问题并路由到合适的形状：精准事实、**汇总**（「这个月聊了啥」）、**时间线**（「迁移策略怎么一步步演变的」）、**对比**（「这周和上周的一对一差在哪」）。过滤条件可自由组合——按时间、**按说话人**（「我和 Jerry 都聊过什么」）、按来源——「最新/现状」类问题还会**近因加权**让最近的讨论优先。跨大范围的回顾会**检索整段历史**（量大走 map-reduce），不再只取零星几段；过滤到空时**自动放宽**而非直接挡死。引用**区分来源**——一段答案里可同时混引 🎙️ 录音和 📄 文档，各自可点（录音跳到时间点，文档打开并高亮被引段落）。也可**针对单条录音**提问（检索会连同它的**关联文档**一起纳入，让回答也吸收挂着的 PRD/议程/会议材料）或**针对单篇文档**提问（严格限定该篇文档）。
@@ -151,6 +151,8 @@ open build/Resound.app
 | `CHAT_API_KEY` / `CHAT_BASE_URL` | LLM（DeepSeek 官方，OpenAI 兼容） |
 | `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | 在线转录开关与模型（关则走本地 WhisperKit） |
 | `TRANSCRIBE_API_KEY` / `TRANSCRIBE_BASE_URL` | 转录端点，缺省同 Embedding |
+| `TRANSCRIBE_BACKEND` | `moss` = 优先 MOSS 云端转写（失败回退 whisper） |
+| `MOSS_SUBMIT_URL` / `MOSS_RESULT_URL` / `MOSS_API_KEY` | MOSS 服务端点与密钥（应用内一键部署自动写入） |
 | `CONTEXT_MODEL` | 逐 chunk contextual 增强（高频，默认 flash） |
 | `CORRECT_MODEL` | 转录 AI 校对（默认 flash） |
 | `RERANK_MODEL` | 召回重排 |
@@ -191,8 +193,8 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 ## 工作原理
 
 ```
-录音 ─► VAD 门控(剪静音/噪声) ─► 转录(在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
-   └─► 说话人识别(Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
+录音 ─► VAD 门控(剪静音/噪声) ─► 转录(MOSS 云端·转录+说话人一体 / 在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
+   └─► 说话人识别(MOSS: 标签→CAM++ 声纹命名；whisper: Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
                           │
 切块 ─► contextual 增强 ─► embedding ─► SQLite(FTS5 + sqlite-vec)
                                               │

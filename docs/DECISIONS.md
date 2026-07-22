@@ -5,6 +5,58 @@
 
 ---
 
+## MOSS 转写后端全量落地：三选后端 + 一键部署（2026-07-22）
+
+**需求（用户定）**：设置页优先推荐 MOSS；新装用户选 MOSS 可一键登录 Modal 自动部署；不用则回退 whisper 在线/本地。spec [2026-07-22-moss-transcription-backend-design.md](../superpowers/specs/2026-07-22-moss-transcription-backend-design.md)。三波全部编译通过，Wave 1 已 CLI 端到端验证。
+
+**Wave 1 Core**：
+- 配置：`Config` 加 `transcribeBackend/mossSubmitURL/mossResultURL/mossKey`（.env 键 `TRANSCRIBE_BACKEND`/`MOSS_*`）+ `mossEnabled`；`ProvidersConfig` 同名可选字段（旧 json 解码不变，零回归），`toConfig` 回落 env。
+- [MossTranscriber.swift](../Sources/ResoundCore/MossTranscriber.swift)：submit(multipart)→10s 轮询（网络抖动容忍连续 6 次）→ 解析成 `Transcript`（段级无词级）+ 平行说话人标签数组；热词=glossary.terms 前 24 个/400 字节拼官方 prompt；语言启发式判 zh/en。
+- [IngestPipeline](../Sources/ResoundCore/IngestPipeline.swift)：`transcribeMoss`（VAD 剪静音省 GPU 费→归一→MOSS→VADGate.remap 回原轴）；MOSS 启用时**分轨也走混音**（联合模型自带分离，分开转两遍会得到两个互不相认的标签空间）；失败自动回退原 whisper 路径（抽成 `whisperTranscribe`，行为不变）；transcript.json 后写 **moss-diar.json 暂存**（S01/S02 匿名段，待命名，保留供重识别）。
+- [MossSpeakers.swift](../Sources/ResoundCore/MossSpeakers.swift) `nameSpeakersFromMossDiarization`：**不做 diarization/归属投票/平滑**（MOSS 已产出干净轮次，平滑反而吞合法短附和），只做「标签→谁」：每标签取最长 6 段→VAD 清静音→CAM++ 质心→cos>0.80 凝聚合并（MOSS 也会拆同一人，实测 RMA S03/S04 同为一人）→注册库 tauAbs=0.5 双门+互斥→真名/说话人N→写 diarization.json+同步 index chunk。
+- 接线：LibraryModel worker/analyze/reidentify + CLI speaker-identify 都按 `hasMossDiarStaging` 分流。
+- **CLI 验证**（60s 真实剪辑 + 临时 vault）：MOSS 转写 87s 出 16 段 2 说话人 → 命名 S01(43s)→**Wynne cos=0.83** 自动认出、S02(2s 附和)正确落匿名、VAD 时间戳映射回原轴无误。
+
+**Wave 2 设置页**：转写卡三选「MOSS 云端 ★ / 在线 Whisper / 本地 Whisper」（[ProvidersView](../Sources/ResoundApp/ProvidersView.swift) mossCard：未部署=一键部署+进度日志滚动；已部署=endpoint+测试连接+重新部署）。[MossDeployer.swift](../Sources/ResoundCore/MossDeployer.swift) 六步状态机：找 python3(≥3.9,防 CLT stub)→App Support venv+pip modal→`modal app list` 探测登录否则 `modal setup`（自动开浏览器，流式抓 token-flow URL 显示）→随机 key+`modal secret create --force`（保证本地与云端一致）→`modal deploy` 内置脚本（[Resources/moss_modal.py](../Sources/ResoundCore/Resources/moss_modal.py) 随 bundle 分发）正则抓两 endpoint→合成 1.2s WAV 真打一遍验证（顺路预热权重）。轻量「测试连接」不动 GPU：带 key 打 result 端点按状态码区分密钥错/可达。
+
+**Wave 3**：Onboarding 转写卡（collapsible=false）未配置时默认落 MOSS 面板（推荐位）；README 双语同步（转录 bullet/env 表/架构图）。
+
+**已知取舍**（评测时已确认）：MOSS 无词级时间戳→逐句点跳退化为段级 2–5s 粒度；跨录音识人仍靠 CAM++（MOSS 只给场内标签）。**当前用户的 providers.json 已预填此前部署好的 endpoint+key（backend 仍 whisper，设置里点「MOSS 云端」即启用，免重部署）**。**待实机验收 + commit**：①设置切 MOSS→导入录音→moss-diar.json→列表徽标→说话人自动命名 ②MOSS 故意断网→回退 whisper ③重新识别 ④一键部署全流程（可在删掉 venv/token 的干净环境试）。
+
+---
+
+## MOSS 云端推理服务部署上 Modal（2026-07-22）
+
+**背景**：用户拍板用 MOSS 但本地跑太卡（Mac 上 RTF≈0.5 且占 GPU 影响使用），问能否部署免费云服务。**Vercel 类不行**（无 GPU、函数超时 10–60s、放不下 1.8GB 权重）；选型 **Modal**（Starter 档每月 $30 免费额度自动刷新——未绑卡只解锁 $1，绑卡后解锁完整 $30/月；T4 $0.59/hr、L4 约 $0.80/hr）。官方 MOSS API 已上线但文档要注册 mosi.cn 才可见、定价未知，留作备选。
+
+**落地**：[experiments/moss-eval/moss_modal.py](../experiments/moss-eval/moss_modal.py)，`modal deploy` 即可。架构 = **异步提交+轮询**（`POST …-submit.modal.run` 传 multipart 音频 → 返回 `call_id`；`GET …-result.modal.run?call_id=…` → 202 running / 200 结果 JSON）。L4 GPU + transformers 裸 generate，权重缓存 Modal Volume（云端从 HF 下载很快，不用 ModelScope），Bearer 鉴权（key 在 Modal Secret `moss-api-key` + 本地 gitignored `.moss-api-key`），`scaledown_window=180` 无流量缩零。
+
+**实测**：16 分钟录音 infer 356s（**RTF 0.36**），输出与本地 MLX 一致（337 vs 342 段、说话人结构相同）；60s 短音频 infer 44s（短音频 prefill 占比高 RTF 差些）；冷启动（权重已在 Volume）约 2 分钟。**成本**：每天 1 小时会议 ≈ $0.3/天 ≈ $9/月，$30 免费额度内。**提速后手**：换 vLLM serving（官方支持，OpenAI 兼容 transcription API）或升 A10G/A100。
+
+**踩坑**（都修了）：①Modal web endpoint 对 >150s 的同步请求回 **303 转轮询**，curl `-L` 对 303+POST 处理不兼容（`bad redirect method`）——别用同步 endpoint 扛长推理，一开始就走 spawn+FunctionCall 异步；②fastapi.Request 用字符串注解会被 FastAPI 当 query 参数（422）——顶层真 import；③**redeploy 后 `.spawn` 仍可能落到旧版热容器**（跑旧代码），要 `modal container stop -y <id>` 强制换代；④ffmpeg 输入输出同名（上传 .wav 时）原地转换失败——输出固定命名 `out-16k.wav`。
+
+**下一步（待用户确认）**：把 Modal endpoint 接进 Resound 当一个转写 backend（配置放 providers.json，submit/poll 逻辑进 ResoundCore），跨录音识人仍走本地 CAM++。
+
+---
+
+## MOSS-Transcribe-Diarize 0.9B 评测：说话人归属显著更强，建议影子模式接入（2026-07-22）
+
+**背景**：用户发现 [OpenMOSS/MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize)（复旦，Apache-2.0，2026-07 开源，INTERSPEECH 2026 MLC-SLM 冠军）——端到端「转录+说话人+时间戳」联合模型（Whisper-Medium 编码器 + Qwen3-0.6B 解码器，0.9B/1.8GB BF16），与我们「whisper 转录 ⊕ diarization 事后拼接」架构本质不同。已用 mlx-audio（Python，Apple Silicon 本地）对两条真实录音实测，完整报告在 `experiments/moss-eval/REPORT.md`（gitignored，含个人数据）。
+
+**实测结论**：
+1. **说话人归属明显赢**（正是拼接式的死穴）：多人评审会上，pipeline 把两人争论整段归给一人、把一问一答塞进同一 30s 块，MOSS 都正确拆轮次；1-on-1 里 MOSS 抓到 ~94 个被 pipeline 吞进主讲长段的「嗯/对」短附和，且支持重叠语音区间（拼接式表达不了）。说话人结构跨运行稳定。
+2. **难音频转录可读性更好**：pipeline 乱码段（如「两边的距离出发」应为「两边notification触发」）MOSS 对应处通顺；静音「Thank you.」类幻觉 MOSS 没有。
+3. **中英夹杂术语是裸输出弱点**（AI coding→「A群的扣顶」、Claude Code→「CROKOR」）：**热词长列表（全量词表 114 词）无效——列表过长稀释注意力**；精简 12 词部分有效（Cursor/Codex/H2 修对，Claude Code→"Cloud Call" 接近仍错）。兜底仍靠现有 glossary 替换 + AI 校对层（对 MOSS 输出同样适用）。
+4. **性能**：M 系 Mac MLX 稳态 RTF≈0.5（20.7min 音频跑 9.6min），内存压力小。质量>速度可接受。
+5. **网络坑**：HF 直连/hf-mirror 拉大权重都 ~70KB/s 不可用，**ModelScope ~4MB/s**（`modelscope.cn/models/OpenMOSS/MOSS-Transcribe-Diarize` resolve/master 直链 curl 即可）。
+6. **mlx-audio 的 `--context` 参数对 MOSS 无效**（静默忽略，输出与无热词逐字节相同）——热词要按官方格式拼进 `--prompt`（默认 prompt + `热词提示：w1, w2, …`）。
+
+**集成缺口**（若切换）：①无声纹 embedding，跨录音识人仍需 CAM++（用 MOSS 分段取音频段算声纹走现有注册库匹配）；②产品集成走 mlx-audio Swift Package（0.1.3+ day-0 支持），成熟度待验证；③**无词级时间戳**，逐句点跳/引用定位会退化成段级（2–5s）粒度；④输出段偏碎需句级重组（可改造现有 SpeakerAttribution 平滑逻辑）。
+
+**建议路线（待用户拍板）**：影子模式——现管线不动，加可选 backend 对新录音并行跑 MOSS 对比展示，攒几场体感再决定切默认；切换后 Sortformer/逐窗回退可退役、FluidAudio 只留 CAM++ 命名。**待用户抽听裁判**：Hydra 1-on-1 的 554s/679s/829s/896s 四处归属分歧（MOSS 归对方、pipeline 归 Wynne，对话逻辑上 MOSS 更像对的）。
+
+---
+
 ## 录音合并功能（2026-07-09）
 
 **需求**：录音列表多选 2+ 条 → 合并成一条 → 按创建时间排时间轴 → 合并后重跑完整转录流程。**确认的决策**（问用户）：①原录音→**移到归档**（不删，可恢复）②音频→**按创建时间首尾相接**（不还原真实间隔、不插静音——相隔可能几天会产出巨量死区）③新标题→**flash 模型基于原标题建议**、弹窗可改。**实现**：Core 新增 [AudioMerge.swift](../Sources/ResoundCore/AudioMerge.swift)（`AVMutableComposition` 按序 `insertTimeRange` 拼接→AppleM4A 导出，镜像 VADGate 的成熟写法）+ [VaultBrowser.archiveRecording](../Sources/ResoundCore/VaultBrowser.swift)（移目录到 `<vault>/archive/recordings/<id>/`——在 `recordings/` 之外故不被 `findRecordings` 扫描/重索引，可手动恢复）。App [LibraryModel](../Sources/ResoundApp/LibraryModel.swift)：`selectionMode`/`mergeSelection`/`mergeSheet`/`merging` 状态 + `beginMerge`（按 recordedAt 升序排定顺序 + flash 建议标题）+ `confirmMerge`（拼音频→复用 `ingestOne` 走导入全流程转录/索引/后台说话人/摘要→**仅入库成功后**归档原录音+删索引+清本场对话）。[LibraryView](../Sources/ResoundApp/LibraryView.swift)：头部多选开关按钮、行内勾选框（多选模式改点击为勾选、隐藏 hover 操作/拖拽/右键菜单）、底部 `mergeBar`（已选 N + 合并/取消）。[Overlays](../Sources/ResoundApp/Overlays.swift) `mergeRecModal`（合并顺序列表 + 可编辑标题 + AI 建议中 spinner）。**关键取舍/护栏**：归档只在 ingest 成功后做（原文件合并期间需在场供 AVAsset 导出）；失败保留原录音+保留临时拼接文件供列表顶部重试（source=import）；成功才删临时文件。编译+打包+重启通过，README 双语同步。**待实机验收**：多选 2+ → 合并 → 看新录音转录/说话人/摘要齐全、原录音从列表消失且在 `<vault>/archive/` 里、AI 标题合理可改、失败时原录音不动可重试。**待 commit**。

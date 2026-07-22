@@ -19,9 +19,20 @@ public struct Config {
     public var transcribeKey: String     // 在线转写 key（TRANSCRIBE_API_KEY，缺省同 embedding）
     public var correctModel: String    // 转录 AI 校对模型（CORRECT_MODEL，缺省 deepseek-v4-flash）
     public var transcribeCorrect: Bool // true=转录后跑一轮 LLM 校对纠错（默认开）
+    // MOSS 云端转写（端到端转录+说话人，自部署 Modal 服务；TRANSCRIBE_BACKEND=moss 时启用，
+    // 失败自动回退 whisper 在线/本地）。三项都来自一键部署写回（MOSS_SUBMIT_URL/MOSS_RESULT_URL/MOSS_API_KEY）。
+    public var transcribeBackend: String  // "whisper"（默认） | "moss"
+    public var mossSubmitURL: String
+    public var mossResultURL: String
+    public var mossKey: String
     public var speakerModel: String?   // 声纹模型 .onnx 路径（SPEAKER_MODEL）；缺省则索引不做说话人标注
     public var vaultPath: String?      // vault 根目录（VAULT_PATH）；App 录音入库用
     public var vaultAutoPush: Bool     // vault 是 git repo 时，处理完自动 commit+push 文本（VAULT_AUTOPUSH，默认关）
+
+    /// MOSS 后端已选且配置齐全（submit/result 两端点都在）。
+    public var mossEnabled: Bool {
+        transcribeBackend == "moss" && !mossSubmitURL.isEmpty && !mossResultURL.isEmpty
+    }
 
     public static func load() throws -> Config {
         let env = loadDotEnv()
@@ -59,6 +70,10 @@ public struct Config {
             transcribeKey: v("TRANSCRIBE_API_KEY") ?? v("AIHUBMIX_API_KEY") ?? "",
             correctModel: v("CORRECT_MODEL") ?? "deepseek-v4-flash",
             transcribeCorrect: (v("TRANSCRIBE_CORRECT") ?? "true").lowercased() != "false",
+            transcribeBackend: v("TRANSCRIBE_BACKEND") ?? "whisper",
+            mossSubmitURL: v("MOSS_SUBMIT_URL") ?? "",
+            mossResultURL: v("MOSS_RESULT_URL") ?? "",
+            mossKey: v("MOSS_API_KEY") ?? "",
             speakerModel: v("SPEAKER_MODEL"),
             vaultPath: v("VAULT_PATH"),
             vaultAutoPush: (v("VAULT_AUTOPUSH") ?? "false").lowercased() == "true"

@@ -7,8 +7,52 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
+}
+
+/// resound retranscribe —— 原地重转录一条已入库录音（保 id/目录；换后端如迁 MOSS、或修转录质量）
+struct Retranscribe: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "retranscribe",
+        abstract: "原地重转录已入库录音（当前转写后端，如 MOSS）→ 重索引 → 说话人识别 → 重生成摘要")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "录音 id（yyyy-MM-dd-HHmm-slug）")
+    var id: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Flag(name: .long, help: "跳过重生成摘要")
+    var skipSummary = false
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let vaultURL = URL(fileURLWithPath: vault)
+        guard let rec = listRecordings(vaultRoot: vaultURL).first(where: { $0.id == id }) else {
+            throw ValidationError("没找到录音：\(id)")
+        }
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        print("▶︎ 重转录 \(rec.title)（\(rec.id)）")
+        try await IngestPipeline(vaultRoot: vaultURL).retranscribe(recDir: rec.dir)
+        print("▶︎ 重建索引…")
+        try await IndexPipeline(config: cfg).indexRecording(recDir: rec.dir, indexPath: indexURL, labelSpeakers: false)
+        if let model = cfg.speakerModel {
+            print("▶︎ 说话人识别…")
+            if hasMossDiarStaging(rec.dir) {
+                _ = try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            } else {
+                _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            }
+        }
+        if !skipSummary {
+            print("▶︎ 重生成摘要…")
+            _ = try await IndexPipeline(config: cfg).summarizeRecording(recDir: rec.dir, indexPath: indexURL)
+        }
+        print("✅ 完成（App 里重开该录音即见新转录/说话人/摘要）")
+    }
 }
 
 /// resound diarize <audio> —— Phase A 冒烟：跑 FluidAudio diarization 看分段
@@ -241,7 +285,12 @@ struct SpeakerIdentify: AsyncParsableCommand {
         guard !recs.isEmpty else { print("没有匹配的录音"); return }
         for rec in recs {
             print("▶︎ \(rec.id)")
-            _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            if hasMossDiarStaging(rec.dir) {
+                // MOSS 录音：分段已由联合模型产出，只做「标签→谁」声纹命名
+                _ = try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            } else {
+                _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            }
         }
         print("✅ 完成 \(recs.count) 条")
     }

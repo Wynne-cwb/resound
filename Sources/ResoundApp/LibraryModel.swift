@@ -713,8 +713,10 @@ final class LibraryModel: ObservableObject {
         Task {
             defer { if analyzingId == rec.id { analyzingId = nil } }
             do {
-                // 真 diarization 优先（干净轮次→簇级声纹+VAD→匹配真名）；多人会(≥4簇)自动回退逐窗法
-                let segs = try await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                // MOSS 录音：重跑「标签→谁」声纹命名；否则真 diarization 优先（多人会≥4簇自动回退逐窗法）
+                let segs = hasMossDiarStaging(rec.dir)
+                    ? try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                    : try await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 refreshDetail()
                 markIdentified(rec.id)   // 手动识别也要清列表「待识别」徽标（否则详情有说话人、列表却仍待识别）
                 let named = Set(segs.map { $0.speaker }.filter { !$0.hasPrefix("说话人") && $0 != "?" }).count
@@ -733,7 +735,9 @@ final class LibraryModel: ObservableObject {
         Task {
             defer { if analyzingId == rec.id { analyzingId = nil } }
             do {
-                let segs = try await reidentifySpeakers(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                let segs = hasMossDiarStaging(rec.dir)
+                    ? try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                    : try await reidentifySpeakers(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 refreshDetail(); buildRoster()
                 markIdentified(rec.id)   // 同 analyze：确保列表「待识别」徽标清除
                 let named = Set(segs.map { $0.speaker }.filter { !$0.hasPrefix("说话人") && $0 != "?" }).count
@@ -761,7 +765,12 @@ final class LibraryModel: ObservableObject {
             defer { speakerWorking = false }
             while !speakerQueue.isEmpty {
                 let rec = speakerQueue.removeFirst()   // 队列直接存录音，不再每条全量扫盘取一条
-                _ = try? await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                if hasMossDiarStaging(rec.dir) {
+                    // MOSS 录音：分段已由联合模型产出，只做「标签→谁」的声纹命名（快得多）
+                    _ = try? await nameSpeakersFromMossDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                } else {
+                    _ = try? await identifySpeakersByDiarization(rec, model: model, indexPath: defaultIndexPath(), embeddingDim: d)
+                }
                 _ = try? await IndexPipeline(config: cfg).summarizeRecording(recDir: rec.dir, indexPath: defaultIndexPath())
                 await computeFolderSuggestion(rec, force: false)   // 摘要就绪 → 智能推算文件夹（未归类才给）
                 identifyingIds.remove(rec.id)

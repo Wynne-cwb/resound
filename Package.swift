@@ -47,7 +47,7 @@ let package = Package(
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "Logging", package: "swift-log"),
             ],
-            resources: [.copy("Resources/TSCharacters.txt")],
+            resources: [.copy("Resources/TSCharacters.txt"), .copy("Resources/moss_modal.py")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(

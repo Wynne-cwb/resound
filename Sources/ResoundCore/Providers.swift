@@ -29,6 +29,12 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
     public var embedding: ModelRef?
     public var embeddingDim: Int?            // 验证 embedding 时自动探测，建索引用
     public var transcribe: ModelRef?         // nil = 本地 WhisperKit
+    // MOSS 云端转写（端到端转录+说话人）："moss" 则优先走 MOSS（失败回退 whisper 在线/本地）。
+    // 三项由设置页「一键部署」写回；旧 providers.json 无这些键 → 全 nil，行为不变。
+    public var transcribeBackend: String?    // nil/"whisper" | "moss"
+    public var mossSubmitURL: String?
+    public var mossResultURL: String?
+    public var mossAPIKey: String?
     // 转录后 AI 校对：是否开（nil=默认开）、用哪个模型（nil=跟随 chat.model）。校对跑在 chat 服务商上。
     public var transcribeCorrect: Bool?
     public var correctModel: String?
@@ -42,11 +48,15 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
 
     public init(providers: [AIProvider] = [], chat: ModelRef? = nil, embedding: ModelRef? = nil,
                 embeddingDim: Int? = nil, transcribe: ModelRef? = nil,
+                transcribeBackend: String? = nil, mossSubmitURL: String? = nil,
+                mossResultURL: String? = nil, mossAPIKey: String? = nil,
                 transcribeCorrect: Bool? = nil, correctModel: String? = nil,
                 rerankModel: String? = nil, contextModel: String? = nil,
                 summaryModel: String? = nil) {
         self.providers = providers; self.chat = chat; self.embedding = embedding
         self.embeddingDim = embeddingDim; self.transcribe = transcribe
+        self.transcribeBackend = transcribeBackend; self.mossSubmitURL = mossSubmitURL
+        self.mossResultURL = mossResultURL; self.mossAPIKey = mossAPIKey
         self.transcribeCorrect = transcribeCorrect; self.correctModel = correctModel
         self.rerankModel = rerankModel; self.contextModel = contextModel
         self.summaryModel = summaryModel
@@ -85,6 +95,10 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
             transcribeKey: tp?.apiKey ?? ep.apiKey,
             correctModel: correctModel ?? chatModel,
             transcribeCorrect: transcribeCorrect ?? ((envv("TRANSCRIBE_CORRECT") ?? "true").lowercased() != "false"),
+            transcribeBackend: transcribeBackend ?? envv("TRANSCRIBE_BACKEND") ?? "whisper",
+            mossSubmitURL: mossSubmitURL ?? envv("MOSS_SUBMIT_URL") ?? "",
+            mossResultURL: mossResultURL ?? envv("MOSS_RESULT_URL") ?? "",
+            mossKey: mossAPIKey ?? envv("MOSS_API_KEY") ?? "",
             speakerModel: envv("SPEAKER_MODEL"),
             vaultPath: envv("VAULT_PATH"),
             vaultAutoPush: (envv("VAULT_AUTOPUSH") ?? "false").lowercased() == "true"

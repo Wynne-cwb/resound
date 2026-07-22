@@ -117,10 +117,79 @@ final class ProvidersModel: ObservableObject {
     func useLocalTranscribe() {
         var c = config
         c.transcribe = nil
+        c.transcribeBackend = nil
         c.providers.removeAll { $0.id == Capability.transcribe.providerId }
         c.verified?[Capability.transcribe.rawValue] = nil
         commit(c)
         probe[.transcribe] = .idle
+    }
+
+    // MARK: MOSS 云端转写（端到端转录+说话人，自部署 Modal）
+
+    enum TranscribeBackendChoice { case moss, online, local }
+    var transcribeBackendChoice: TranscribeBackendChoice {
+        if config.transcribeBackend == "moss" { return .moss }
+        return config.transcribe != nil ? .online : .local
+    }
+    /// MOSS endpoint 已配置（部署过）。选没选 MOSS 看 transcribeBackendChoice。
+    var mossDeployed: Bool {
+        !(config.mossSubmitURL ?? "").isEmpty && !(config.mossResultURL ?? "").isEmpty
+    }
+    var mossSubmitURL: String { config.mossSubmitURL ?? "" }
+
+    @Published var mossDeploying = false
+    @Published var mossDeployLog: [String] = []
+    @Published var mossProbe: ProbeState = .idle
+
+    /// 选 MOSS 后端（在线 whisper 配置保留作为回退，不清）。
+    func useMossBackend() {
+        var c = config
+        c.transcribeBackend = "moss"
+        commit(c)
+    }
+    /// 切回 whisper（在线）。MOSS endpoint 配置保留，再切回来免重部署。
+    func useWhisperBackend() {
+        var c = config
+        c.transcribeBackend = nil
+        commit(c)
+    }
+
+    /// 一键部署：MossDeployer 全流程（登录→Secret→deploy→验证），进度逐行进 mossDeployLog。
+    func deployMoss() {
+        guard !mossDeploying else { return }
+        mossDeploying = true
+        mossDeployLog = []
+        Task {
+            do {
+                let d = try await MossDeployer.deploy { line in
+                    Task { @MainActor in self.mossDeployLog.append(line) }
+                }
+                var c = config
+                c.transcribeBackend = "moss"
+                c.mossSubmitURL = d.submitURL
+                c.mossResultURL = d.resultURL
+                c.mossAPIKey = d.apiKey
+                commit(c)
+                mossProbe = .ok("已部署并验证 · GPU 推理可用")
+                app?.toast("MOSS 部署完成 🎉")
+            } catch {
+                mossDeployLog.append("❌ \(error)")
+                mossProbe = .fail(String(describing: error))
+                app?.toast("MOSS 部署失败，详见部署日志")
+            }
+            mossDeploying = false
+        }
+    }
+
+    /// 轻量测试连接（不动 GPU）：验证 endpoint 可达 + 密钥有效。
+    func testMoss() {
+        guard mossDeployed else { mossProbe = .fail("还没部署"); return }
+        mossProbe = .running
+        let (s, r, k) = (config.mossSubmitURL ?? "", config.mossResultURL ?? "", config.mossAPIKey ?? "")
+        Task {
+            let res = await MossDeployer.probe(submitURL: s, resultURL: r, apiKey: k)
+            mossProbe = res.ok ? .ok(res.detail) : .fail(res.detail)
+        }
     }
 
     private func commit(_ c: ProvidersConfig) {
