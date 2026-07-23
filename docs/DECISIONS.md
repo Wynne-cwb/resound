@@ -5,6 +5,35 @@
 
 ---
 
+## "切了 MOSS 却仍走 whisper"：二进制比代码老 64 分钟（2026-07-23）
+
+**现象**：用户 07-23 录的 Platform Department Weekly Meeting 转录满是噪音，怀疑双轨合并 bug——"online 那条清晰、本地基本没说话，可能是 mic 那条误识别 + 合并出问题"。
+
+**诊断链**（4 层证据环环相扣）：
+1. **配置层无误**：`providers.json` 里 `transcribeBackend: "moss"` + submit/result URL 齐全；`Config.load()` 走 `ProvidersStore.load()?.toConfig()` → `mossEnabled = true`。理论上 IngestPipeline 应走 MOSS 分支。
+2. **但 recording.yaml 里 `asr_model: aihubmix-whisper-large-v3-turbo`**——实际走了 whisper。且录音目录里有 `track-mic.m4a`/`track-system.m4a`（分轨路径产物，MOSS 分支不产生）。
+3. **根因** = **二进制里没有 MOSS 分支代码**：
+   - `build/Resound.app/Contents/MacOS/Resound` mtime = **Jul 22 15:40:04**
+   - MOSS 代码 commit b8ac745 = **Jul 22 16:44:09**（**晚了 64 分钟**）
+   - `grep -S "mossEnabled"` 确认 `mossEnabled` 分支只在这个 commit 里被引入 [IngestPipeline.swift:69,171](../Sources/ResoundCore/IngestPipeline.swift)
+   - STATE 里那句"App 运行中未重打包——待用户 killall + bundle" 是 07-22 写的准确观察，用户之后 8 天没重打包过。运行中的 App 就是那个 15:40 版，二进制里根本没有 `if cfg.mossEnabled { transcribeMoss(...) }`——**静默回落到走 whisper 分轨**。
+4. **whisper + 分轨 + 用户没说话 = 大量幻觉**（这是"噪音"的直接来源）：`ffmpeg volumedetect` 量出 mic 轨 mean_volume=**-39.2dB**（几乎全静音，用户没说话验证），但 whisper 对着这条静音轨转出了 **272 段 / 1402s** 幻觉——30-40 秒不换句、内容飘散是典型 whisper 幻觉/重复循环形态。system 轨 -33.5dB 只出了 15 段 / 60s 真人话。[TranscriptMerge](../Sources/ResoundCore/TranscriptMerge.swift) 的去重规则是"时间重叠>50% 且 bigram Jaccard≥0.4 → 丢 mic 保 sys"，mic 幻觉段和 sys 真话既不时间重叠也不文本相似，全部作为独立段保留——用户看到的"噪音"就是这 272 段幻觉。**改合并层救不了幻觉**。
+
+**用户假设纠错**：怀疑对了一半——**mic 那条链路确实是"噪音"的源头**，但不是"合并 bug"，而是"whisper 对超低响度轨的静音幻觉 + 合并层无法识别幻觉去重"。真正的根因在更上游：二进制没被重打包。
+
+**修复**（三步）：
+1. `killall Resound && ./scripts/bundle-app.sh release && open build/Resound.app`——重打包让 App 二进制真的带上 MOSS 分支。
+2. `.build/release/resound retranscribe --vault vaults/wayne-resound --id 2026-07-23-1829-platform-department-weekly-meeting`——07-22 才做好的通用入口，原地重转录（保 id/目录 → MOSS 混音 → 重索引 → 声纹命名 → 重摘要）。
+3. **结果**：248 段（无幻觉，从 287 段砍下）、VAD 自动剪静音 103s（~7% 静音）、Mason 主讲 1254s（20.9min，占全场 84%）、认出 Mason(cos=0.84)/Tony(0.64)/River(0.68) 3 熟人、27 chunks 干净入索引。
+
+**教训**（都记进 memory）：
+1. **"配置文件立即生效"是错觉**——`providers.json` 是数据文件（改一次就落盘、Config.load() 下次能读到），但**消费这份配置的代码在二进制里**——二进制不重打包，改哪个 JSON 都白改。Swift/编译型语言尤其明显。这类"数据 vs 代码"的分离系统里，配置切换后**必须重新构建**才能生效。
+2. **静默回落是最坏的行为**——App 设置页明明写着"MOSS 云端"，实际却在跑 whisper，用户完全没有肉眼可辨的信号。**下次可以加一条 App 启动时 `AppLog` 记录实际生效的 backend + 转录首次调用时 log 是走 MOSS 还是 whisper**，能提前一天定位到问题（不紧急待做）。
+3. **诊断顺序对了才快**：从"录音走了 whisper"这个事实开始 → 查配置（正确）→ 查 backend 读取逻辑（正确）→ 查代码是否在二进制里（**这才是真凶**）。中间容易停在"用户设置里没切"或"MOSS 失败回退"这种猜测——**始终要问"我怀疑的这层代码/二进制真的存在吗"**。
+4. **用户直觉 30% 对时也是有效信号**——用户说"mic 那条链路有噪音"完全对（幻觉都在 mic 那条），只是他把归因指向"合并"是错的。别因为归因错就否定整个观察。
+
+---
+
 ## MOSS 转写后端全量落地：三选后端 + 一键部署（2026-07-22）
 
 **需求（用户定）**：设置页优先推荐 MOSS；新装用户选 MOSS 可一键登录 Modal 自动部署；不用则回退 whisper 在线/本地。spec [2026-07-22-moss-transcription-backend-design.md](../superpowers/specs/2026-07-22-moss-transcription-backend-design.md)。三波全部编译通过，Wave 1 已 CLI 端到端验证。
