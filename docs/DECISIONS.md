@@ -1423,3 +1423,51 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **生效路径**：改动只在**新写入**时套开放 ACL，旧 item 不会自己变。让用户打开新打包 App → 设置›外部 MCP 把 Notion **断开重连一次**（走一次 save = delete 旧 item + add 开放 ACL）→ 之后重 build/重启/续 token 都不再弹。
 
 **验证**：编译通过、`bundle-app.sh` 打包 `Resound Dev` 签名完成。真机「重连后不再弹」待用户确认。README 双语无需改（"tokens live in the Keychain / 令牌存 Keychain" 仍成立，未新增/改动用户可见能力）。**待 commit。**
+
+## 踩坑：FluidAudio 0.15.5 移除 `DownloadUtils`，锁定 exact 0.15.4（2026-07-23）
+
+**现象**：干净环境（无 `.build/`）`swift build` 时 `Diarizer.swift` 报 `cannot find 'DownloadUtils' in scope`。
+
+**根因**：`Package.swift` 原来写 `from: "0.15.0"`，全新解析会拉到上游最新 0.15.5——该版把公开的 `DownloadUtils` 拆掉重构进 `Shared/Download/`（源码注释自述 "Absorbs the two pre-0.16 nested enums"，patch 版本号却带 breaking change）。旧机器上因缓存了旧解析没暴露。
+
+**对策**：`Package.swift` 改为 `exact: "0.15.4"`（该版仍有 `DownloadUtils.loadModels`）。将来若要升级 FluidAudio，需同步迁移 `Diarizer.swift` 到新 download API。
+
+**另**：干净机器构建还需 `cmake`（`brew install cmake`），`scripts/build-sherpa-onnx.sh` 依赖它生成 `Vendor/sherpa-onnx/`。
+
+## 踩坑：MOSS 一键部署报 `No module named 'fastapi'`（2026-07-23）
+
+**现象**：App 内一键部署第⑤步 `modal deploy` 失败，`moss_modal.py` 第 12 行 `import fastapi` 报 ModuleNotFoundError。
+
+**根因**：`modal deploy` 会在**本地**执行 moss_modal.py 顶层代码来构建应用图，脚本顶层 `import fastapi`（`@modal.fastapi_endpoint` 签名也需要），但 `MossDeployer` 第②步只 pip install 了 `modal`——modal 包自身不依赖 fastapi。之前没暴露是因为开发机全局 python 恰好有 fastapi。
+
+**对策**：`MossDeployer.swift` 第②步改为 `pip install --upgrade modal fastapi`。该步每次部署都跑，老用户的存量 venv 重跑一次部署即自愈，无需手动修。
+
+## 打包分发（无开发者证书给同事装）的完整修补（2026-07-23）
+
+- `bundle-app.sh` 固化两件事：① 随包分发 `libswiftCompatibilitySpan.dylib`（Swift 6.2 工具链弱依赖，rpath 指向 Xcode 工具链路径，异机无 Xcode 找不到；`@loader_path` 在 rpath 里所以放 MacOS/ 即可）+ 签名前先签这个 dylib；② 路径用 `xcrun --find swiftc` 推导，不硬编码。
+- 分发流程：`bundle-app.sh release` → `ditto -c -k --keepParent` 打 zip。同事侧过 Gatekeeper：macOS 15+ 系统设置›隐私与安全性›仍要打开；或 `xattr -dr com.apple.quarantine`。
+
+## 踩坑：MOSS 长音频（~80 分钟）输出丢时间戳 → 解析出 0 段 →「MOSS 返回空转录」（2026-07-24）
+
+**现象**：85 分钟会议 mp3 重试转录，服务端 HTTP 200，客户端报 `MossError.badResponse("MOSS 返回空转录")`，随后回退在线 Whisper 又因 p-transcribe（api.openai.com）没配 key 而 401，整次导入失败。
+
+**取证**（直接用昨晚失败请求的 call_id 查 Modal 结果）：`duration_sec=4849.85, infer_sec=3022.88`（L4 上 RTF≈0.62，不是评测时的 0.36），`text` 长 39285 字、内容质量正常，但**通篇只有 [S01]/[S02] 标签、没有任何时间戳**（且 [Sxx] 逐子句重复出现，格式已崩），`parse_transcript` 因此解析出 0 段。**80+ 分钟音频超出 0.9B 模型的格式稳定区间，转录内容还在、时间戳格式先崩**——这是反直觉点：不是"没转出来"，是"转出来了但格式解析不了"，客户端只看 segments 把 39k 字直接扔了。
+
+**待定对策**（未实施）：① 长音频客户端切块（如 ≤30 分钟/块）分次提交再拼接；② 服务端 parse 失败时降级：按 [Sxx] 切分出无时间戳 segments，起码保住文字；③ 回退链修复：给 p-transcribe 配 key 或指到已有 key 的 aihubmix。
+
+## MOSS 长音频三修落地 + 端到端验证（2026-07-24）
+
+接上条「MOSS 长音频输出丢时间戳」的对策落地（用户拍板：自行闭环）：
+
+1. **客户端分块（治本）**：[MossTranscriber.swift](../Sources/ResoundCore/MossTranscriber.swift) `transcribe` 音频 >30 分钟自动均分成 ~25 分钟块（`M4AExporter` 新增时间段导出），TaskGroup 并行 submit/poll，拼接时段时间戳加块偏移、说话人标签按块重编号成全局唯一（S01…递增）。**下游不需要改**：`nameSpeakersFromMossDiarization` 本就有 cos>0.80 声纹凝聚合并，跨块同人标签会自动并回。「空转录」独立成 `MossError.empty`，分块场景单块静音只跳过不拖垮全局。
+2. **服务端降级（保底）**：moss_modal.py `_fallback_segments`——parse 出 0 段且 text 非空时按 [Sxx] 切分、合并连续同人子句（>120 字按句再切）、时间戳按字符比例分摊。已重部署（endpoint URL 不变）。用昨晚真实失败输出验证：39285 字 → 524 段 / 5 说话人 / 时长全覆盖 / 零倒挂。
+3. **回退链修复**：IngestPipeline `transcribeAudio` 拆成 online/local 两函数；在线转录**未配 key 直接走本地** WhisperKit、在线请求失败也回退本地——转录链路不再有"必死"分支（此前 p-transcribe 空 key 裸打 api.openai.com 吃 401）。
+
+**端到端验证（真数据）**：85 分钟「Data Agent 对接」mp3——VAD 5079s→4800s → 切 4 块并行 → **8.9 分钟**出 1073 段（之前单条推理 50 分钟还全丢）、时间戳 0→5072s 单调零倒挂、AI 校对改 84 段、入库+索引 91 chunks。顺手把 11:26 转写失败被抢救的 58 分钟会议录音也重新导入了。**待实机验收**：App 里看两条录音的说话人凝聚质量（分块产生 21 个标签，等后台声纹命名 worker 并回真实人数）。
+
+**注意**：分块块长 25 分钟是"格式稳定区间"的保守值（20 分钟/块实测格式完好，80 分钟必崩，中间未细扫）；若未来发现 25~30 分钟也偶发丢时间戳，降 `chunkTargetSec` 即可，服务端降级兜底不丢内容。
+
+## 追加发现：长音频劣化的另一形态=静默截断；归档需配套清索引（2026-07-24）
+
+- **静默截断**：11:00 那条 58 分钟会议录音，旧单发路径下 MOSS「成功」入库过一版——但只转出前 35 分钟（2076/3482s，60%），尾部 23 分钟无声无息丢了。**长音频劣化不总是全空，有时是截断**，比全空更危险（没有任何报错）。已写扫描脚本核查 vault 全部 MOSS 录音：仅此一条截断。处置：截断版挪 `<vault>/archive/`（分轨保留可恢复），保留分块重转的完整版（725 段、100% 覆盖）。
+- **索引残留**：归档/手动删录音目录后 `resound index`（增量）不会清掉旧 chunks → 检索会命中死链。新增 ResoundCore `IndexPipeline.pruneOrphanRecordings` + CLI `index-prune`（README 双语已加）。注意 index.sqlite 的 `chunks_vec` 是 sqlite-vec 虚表，**外部 python/sqlite3 打不开（no such module: vec0），别试图绕过 ResoundCore 直改**。

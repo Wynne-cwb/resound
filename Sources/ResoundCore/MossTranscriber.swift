@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// MOSS-Transcribe-Diarize 云端转写客户端（自部署 Modal 服务，见 experiments/moss-eval/moss_modal.py）。
@@ -15,6 +16,10 @@ public struct MossTranscriber {
 
     static let maxHotwords = 24
     static let pollInterval: UInt64 = 10 * 1_000_000_000   // 10s
+    /// 长音频分块：0.9B 模型在 ~80 分钟级输入上输出会丢时间戳（格式崩、解析 0 段，
+    /// DECISIONS 2026-07-24），超过阈值就切块分转再拼接。25 分钟/块在评测验证的稳定区间内。
+    static let chunkThresholdSec: Double = 1800   // >30 分钟启用分块
+    static let chunkTargetSec: Double = 1500      // 目标 25 分钟/块（实际均分）
     /// 官方默认 prompt（与模型训练口径一致，改了会伤输出格式）。
     static let defaultPrompt = "请将音频转写为文本，每一段需以起始时间戳和说话人编号（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，并在段末标注结束时间戳，以清晰标明该段语音范围。"
 
@@ -34,10 +39,72 @@ public struct MossTranscriber {
         public let speakerLabels: [String]
     }
 
-    /// 转写一条音频：submit → 轮询 → 解析成现有 Transcript 结构（段级时间戳，无词级）。
-    /// `timeout` 缺省 60 分钟（90 分钟长录音 RTF≈0.36 也够）。
+    /// 转写一条音频：短音频整条 submit → 轮询；超过 30 分钟自动切块并行转写再拼接
+    /// （时间戳加块偏移；说话人标签按块重编号成全局唯一，下游声纹凝聚合并会把同人并回）。
     public func transcribe(audio: URL, timeout: TimeInterval = 3600,
                            log: (String) -> Void = { _ in }) async throws -> Output {
+        let duration = (try? await AVURLAsset(url: audio).load(.duration).seconds) ?? 0
+        guard duration > Self.chunkThresholdSec else {
+            return try await transcribeWhole(audio: audio, timeout: timeout, log: log)
+        }
+
+        let n = Int((duration / Self.chunkTargetSec).rounded(.up))
+        let per = duration / Double(n)
+        log(String(format: "   ✂️ 长音频 %.0f 分钟：切 %d 块（%.0f 分钟/块）并行转写…", duration / 60, n, per / 60))
+        var chunks: [(url: URL, offset: Double)] = []
+        defer { for c in chunks { try? FileManager.default.removeItem(at: c.url) } }
+        for i in 0..<n {
+            let s = Double(i) * per, e = min(duration, Double(i + 1) * per)
+            let out = FileManager.default.temporaryDirectory
+                .appendingPathComponent("moss-chunk-\(UUID().uuidString)-\(i).m4a")
+            _ = try await M4AExporter().exportM4A(from: audio, to: out, range: (s, e))
+            chunks.append((out, s))
+        }
+
+        // 并行提交：Modal 按调用自动扩容，总 GPU 秒数不变、墙钟约等于单块推理时长
+        let me = self
+        let results: [Output?] = try await withThrowingTaskGroup(of: (Int, Output?).self) { group in
+            for (i, c) in chunks.enumerated() {
+                group.addTask {
+                    do { return (i, try await me.transcribeWhole(audio: c.url, timeout: timeout, log: { _ in })) }
+                    catch MossError.empty { return (i, nil) }   // 单块无语音（如整块静音）不拖垮全局
+                }
+            }
+            var arr = [Output?](repeating: nil, count: chunks.count)
+            for try await (i, o) in group {
+                arr[i] = o
+                log("   ✓ 块 \(i + 1)/\(n) 完成（\(o?.result.transcript.segments.count ?? 0) 段）")
+            }
+            return arr
+        }
+
+        var segs: [Transcript.Segment] = []
+        var labels: [String] = []
+        var globalLabels = 0
+        for (i, r) in results.enumerated() {
+            guard let r else { continue }
+            var localToGlobal: [String: String] = [:]
+            for (s, lab) in zip(r.result.transcript.segments, r.speakerLabels) {
+                if localToGlobal[lab] == nil {
+                    globalLabels += 1
+                    localToGlobal[lab] = String(format: "S%02d", globalLabels)
+                }
+                segs.append(Transcript.Segment(id: segs.count, start: s.start + chunks[i].offset,
+                                               end: s.end + chunks[i].offset,
+                                               text: s.text, words: [], track: nil))
+                labels.append(localToGlobal[lab]!)
+            }
+        }
+        guard !segs.isEmpty else { throw MossError.empty }
+        let language = Self.dominantLanguage(segs.map(\.text).joined())
+        return Output(result: TranscribeResult(transcript: Transcript(language: language, segments: segs),
+                                               modelName: "moss-transcribe-diarize-0.9b"),
+                      speakerLabels: labels)
+    }
+
+    /// 单段（≤30 分钟）转写：submit → 轮询 → 解析。
+    func transcribeWhole(audio: URL, timeout: TimeInterval = 3600,
+                         log: (String) -> Void = { _ in }) async throws -> Output {
         let callId = try await submit(audio: audio)
         log("   ☁️ MOSS 已提交（\(callId)），GPU 推理中…")
         let deadline = Date().addingTimeInterval(timeout)
@@ -118,7 +185,7 @@ public struct MossTranscriber {
         struct MossSeg: Codable { let start: Double; let end: Double; let speaker: String; let text: String }
         struct MossResp: Codable { let segments: [MossSeg] }
         let r = try JSONDecoder().decode(MossResp.self, from: data)
-        guard !r.segments.isEmpty else { throw MossError.badResponse("MOSS 返回空转录") }
+        guard !r.segments.isEmpty else { throw MossError.empty }
         var segs: [Transcript.Segment] = []
         var labels: [String] = []
         for (i, s) in r.segments.enumerated() {
@@ -163,12 +230,14 @@ public enum MossError: Error, CustomStringConvertible {
     case badConfig(String)
     case http(Int, String)
     case badResponse(String)
+    case empty                  // 服务端正常返回但解析出 0 段（如无语音内容）
     case timeout(Int)
     public var description: String {
         switch self {
         case .badConfig(let m): return "MOSS 配置错误：\(m)"
         case .http(let c, let b): return "MOSS HTTP \(c)：\(b)"
         case .badResponse(let m): return "MOSS 响应异常：\(m)"
+        case .empty: return "MOSS 返回空转录"
         case .timeout(let s): return "MOSS 推理超时（>\(s)s）"
         }
     }

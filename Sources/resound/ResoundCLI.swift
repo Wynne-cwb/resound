@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
 }
 
@@ -725,6 +725,26 @@ struct IndexCommand: AsyncParsableCommand {
         try await IndexPipeline(config: cfg).build(
             vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL,
             enrichContext: context, contextModel: contextModel)
+    }
+}
+
+struct IndexPrune: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "index-prune",
+        abstract: "清掉索引里已不在 vault 的录音（归档/手动删目录后跑一次，去掉检索残留）")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let pruned = try IndexPipeline(config: cfg)
+            .pruneOrphanRecordings(vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL)
+        print(pruned.isEmpty ? "✅ 索引无残留" : "✅ 清理 \(pruned.count) 条索引残留")
     }
 }
 

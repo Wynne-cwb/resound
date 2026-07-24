@@ -291,7 +291,32 @@ public struct IngestPipeline {
         _ audio: URL, glossary: Glossary, model: String, language: String?,
         maxFallback: Int, log: (String) -> Void
     ) async throws -> TranscribeResult {
+        // 在线转录要 key：没配 key 直接走本地（此前会裸打端点吃 401，整条链路白挂）；
+        // 在线请求失败也回退本地兜底，转录链路不再有"必死"分支。
         if let cfg = try? Config.load(), cfg.transcribeOnline {
+            guard !cfg.transcribeKey.isEmpty else {
+                log("   ⚠️ 在线转录未配置 API key，改用本地 WhisperKit")
+                return try await localTranscribe(audio, glossary: glossary, model: model,
+                                                 language: language, maxFallback: maxFallback, log: log)
+            }
+            do {
+                return try await onlineTranscribe(audio, cfg: cfg, glossary: glossary,
+                                                  language: language, log: log)
+            } catch {
+                log("   ⚠️ 在线转录失败（\(error)），回退本地 WhisperKit")
+                AppLog.error("在线转录失败，回退本地 WhisperKit", error)
+                return try await localTranscribe(audio, glossary: glossary, model: model,
+                                                 language: language, maxFallback: maxFallback, log: log)
+            }
+        }
+        return try await localTranscribe(audio, glossary: glossary, model: model,
+                                         language: language, maxFallback: maxFallback, log: log)
+    }
+
+    /// 在线 whisper 单音频链路（VAD 门控 → 归一 → 转录 → 时间戳映射回原轴）。
+    private func onlineTranscribe(
+        _ audio: URL, cfg: Config, glossary: Glossary, language: String?, log: (String) -> Void
+    ) async throws -> TranscribeResult {
             log("☁️ 在线转录中（\(cfg.transcribeModel) @ \(cfg.transcribeBaseURL)）…")
             var upload = audio
             var temps: [URL] = []
@@ -315,12 +340,17 @@ public struct IngestPipeline {
                                           modelName: result.modelName)
             }
             return result
-        } else {
-            log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
-            return try await Transcriber(model: model, language: language,
-                                         prompt: glossary.promptString, maxFallback: maxFallback)
-                .transcribe(audio: audio)
-        }
+    }
+
+    /// 本地 WhisperKit 单音频链路。
+    private func localTranscribe(
+        _ audio: URL, glossary: Glossary, model: String, language: String?,
+        maxFallback: Int, log: (String) -> Void
+    ) async throws -> TranscribeResult {
+        log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
+        return try await Transcriber(model: model, language: language,
+                                     prompt: glossary.promptString, maxFallback: maxFallback)
+            .transcribe(audio: audio)
     }
 
     /// 对 vault 内已有 transcript.json 重新做 繁→简归一 + 别名纠正并改写（免重新转录）。

@@ -56,7 +56,9 @@ public enum MossDeployer {
             let r = try await run(python.path, ["-m", "venv", supportDir.appendingPathComponent("modal-venv").path])
             guard r.code == 0 else { throw DeployError.step("创建 venv", r.tail) }
         }
-        let pip = try await run(venvPython.path, ["-m", "pip", "install", "-q", "--upgrade", "modal"], timeout: 300)
+        // fastapi 必须一起装：`modal deploy` 会在本地执行 moss_modal.py（顶层 import fastapi），
+        // 而 modal 包自身不依赖 fastapi。
+        let pip = try await run(venvPython.path, ["-m", "pip", "install", "-q", "--upgrade", "modal", "fastapi"], timeout: 300)
         guard pip.code == 0 else { throw DeployError.step("安装 modal", pip.tail) }
         log("   ✓ modal CLI 就绪")
 
@@ -122,7 +124,7 @@ public enum MossDeployer {
         let t = try MossTranscriber(config: withMoss(c, d), hotwords: [])
         do {
             _ = try await t.transcribe(audio: tmp, timeout: timeout, log: log)
-        } catch MossError.badResponse {
+        } catch MossError.empty {
             // 合成音没有语音内容 → 「MOSS 返回空转录」也算链路通（服务端 GPU 正常跑完了）
         }
     }

@@ -36,6 +36,51 @@ vol = modal.Volume.from_name("moss-weights", create_if_missing=True)
 api_key_secret = modal.Secret.from_name("moss-api-key")
 
 
+def _fallback_segments(text: str, duration: float) -> list:
+    """时间戳解析失败时的降级：长音频下模型输出会丢时间戳、只剩 [Sxx] 标签
+    （实测 80 分钟输入必现），parse_transcript 会解析出 0 段。这里按 [Sxx] 切分、
+    合并连续同说话人子句（过长按句再切），时间戳按字符数比例分摊到音频时长——
+    近似值仅保底（内容不丢），客户端分块后正常路径不该走到这。"""
+    import re
+
+    pieces = re.split(r"(\[S\d+\])", text)
+    turns: list[tuple[str, str]] = []
+    cur_sp, cur_txt = None, ""
+    for i in range(1, len(pieces) - 1, 2):
+        sp = pieces[i].strip("[]")
+        seg = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]", "", pieces[i + 1]).strip()
+        if not seg:
+            continue
+        if sp == cur_sp:
+            cur_txt += seg
+        else:
+            if cur_txt:
+                turns.append((cur_sp, cur_txt))
+            cur_sp, cur_txt = sp, seg
+    if cur_txt:
+        turns.append((cur_sp, cur_txt))
+
+    # 同说话人长发言按句号级再切（≤120 字/段），下游索引切块更均匀
+    sized: list[tuple[str, str]] = []
+    for sp, txt in turns:
+        while len(txt) > 120:
+            cut = max((txt.rfind(p, 40, 120) for p in "。？！；"), default=-1)
+            if cut < 0:
+                cut = 119
+            sized.append((sp, txt[: cut + 1]))
+            txt = txt[cut + 1 :]
+        if txt:
+            sized.append((sp, txt))
+
+    total = sum(len(t) for _, t in sized) or 1
+    segs, t = [], 0.0
+    for sp, txt in sized:
+        dur = duration * len(txt) / total
+        segs.append({"start": round(t, 2), "end": round(t + dur, 2), "speaker": sp, "text": txt})
+        t += dur
+    return segs
+
+
 def _check_auth(request: fastapi.Request):
     import os
 
@@ -128,9 +173,14 @@ class Moss:
             {"start": s.start, "end": s.end, "speaker": s.speaker, "text": s.text}
             for s in parse_transcript(result["text"])
         ]
+        approx = False
+        if not segments and result["text"].strip():
+            segments = _fallback_segments(result["text"], duration)
+            approx = bool(segments)
         return {
             "text": result["text"],
             "segments": segments,
+            "approx_timestamps": approx,
             "duration_sec": round(duration, 2),
             "infer_sec": round(infer, 2),
         }

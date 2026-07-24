@@ -641,6 +641,25 @@ public struct IndexPipeline {
         }
         return out.map { $0 ?? [] }
     }
+
+    /// 清掉索引里已不在 vault 的录音（归档/手动删目录后 `index` 增量重建不会删，
+    /// 残留 chunk 会污染检索且点击跳转是死链）。返回清理的录音 id。CLI `index-prune` 用。
+    public func pruneOrphanRecordings(
+        vaultRoot: URL, indexPath: URL, log: (String) -> Void = { print($0) }
+    ) throws -> [String] {
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        var onDisk = Set<String>()
+        for d in findRecordings(vaultRoot) {
+            if let m = try? parseManifest(d.appendingPathComponent("recording.yaml")) { onDisk.insert(m.id) }
+        }
+        var pruned: [String] = []
+        for recId in index.allRecordingIds() where !onDisk.contains(recId) {
+            try index.deleteRecording(id: recId)
+            pruned.append(recId)
+            log("  🧹 已清理索引残留：\(recId)")
+        }
+        return pruned
+    }
 }
 
 func chunkHash(model: String, text: String) -> String {
