@@ -12,7 +12,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.4"),
         .package(url: "https://github.com/apple/swift-markdown.git", from: "0.4.0"),
         // 锁 <0.10.2：0.10.2 起需 swift-tools-version 6.1（用了 6.1 才有的 withThrowingTaskGroup 无 of: 重载），
         // 当前工具链 Swift 6.0.3 编不过。0.10.1 是最后一个 swift-tools 6.0 兼容版。
