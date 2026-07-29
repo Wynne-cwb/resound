@@ -32,6 +32,7 @@ struct ResoundApp: App {
                     recorder.library = library   // 录完后把说话人识别交给 Library 的后台串行 worker
                     library.app = app
                     library.prefetchCount()      // 侧栏 Library 角标即时正确，不等进 Library 全量加载
+                    library.recoverOrphanRecordings()   // 上次退出前没转完的录音：捞回列表顶部可重试
                     documents.app = app
                     documents.load()             // 文档列表启动即载入：侧栏角标 + 录音详情「相关文档」都依赖它
                     settings.app = app
@@ -80,7 +81,7 @@ struct MenuBarContent: View {
             activate()
             rec.isRecording ? rec.stopAndIngest() : (rec.isIdle ? rec.startRecording() : ())
         }
-        .disabled(rec.isProcessing)
+        .disabled(rec.isFinishing)   // 只在秒级收尾时禁用；后台转写不再挡下一场录音
 
         Button("打开 Resound 窗口") { activate() }
 
@@ -92,7 +93,7 @@ struct MenuBarContent: View {
 
     private var statusLine: String {
         if rec.isRecording { return "录音中 · \(mmss(Double(rec.recSeconds)))" }
-        if rec.isProcessing { return "处理中…" }
+        if rec.isFinishing { return "收尾中…" }
         return "空闲 · 监听中"
     }
 

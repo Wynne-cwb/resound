@@ -64,7 +64,7 @@ struct LibraryView: View {
 
             ScrollView {
                 LazyVStack(spacing: 2, pinnedViews: []) {
-                    if rec.isProcessing { processingRow }
+                    if rec.isFinishing { finishingRow }
                     ForEach(vm.pendingImports) { p in importingRow(p) }
                     ForEach(secs) { sec in
                         VStack(spacing: 2) {
@@ -156,11 +156,12 @@ struct LibraryView: View {
         }
     }
 
-    private var processingRow: some View {
+    /// 停录后的秒级收尾行（对齐混音）。转写进度不在这里——排队后由下方 `importingRow` 显示。
+    private var finishingRow: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("正在处理新录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
-                Text(RecordingController.procLabels[min(rec.procStep, RecordingController.procLabels.count - 1)]).font(.system(size: 11.5)).foregroundStyle(pal.text2)
+                Text("正在收尾新录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                Text(RecordingController.finishingLabel).font(.system(size: 11.5)).foregroundStyle(pal.text2)
             }
             Spacer()
             Spinner(size: 13, color: pal.accent)
@@ -171,12 +172,18 @@ struct LibraryView: View {
         .padding(.top, 4)
     }
 
-    /// 后台导入中的占位行（转写/识别中显示 spinner；失败可关掉）。
+    /// 后台待转写/转写中的占位行（导入的文件与刚录完的会议共用；失败可关掉）。
     private func importingRow(_ p: LibraryModel.ImportItem) -> some View {
         let failed = p.status == .failed
         // 失败副标题：有具体原因就显示（截断成一行，完整文案进 tooltip），否则只说「转写失败」。
-        let subtitle = failed ? (p.error.map { "转写失败：\($0)" } ?? "转写失败")
-                              : (p.status == .identifying ? "识别说话人…" : "转写中…")
+        let subtitle: String = {
+            if failed { return p.error.map { "转写失败：\($0)" } ?? "转写失败" }
+            switch p.status {
+            case .queued: return "排队等待转写…"      // 前面还有别的在转（见 maxIngestConcurrency）
+            case .identifying: return "识别说话人…"
+            default: return "转写中…"
+            }
+        }()
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(p.name).font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1)

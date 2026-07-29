@@ -5,6 +5,182 @@
 
 ---
 
+## MOSS 静默截断：分片阈值 80min→30min（推翻 07-28 的决策前提）+ 整合外部 PR #1（2026-07-29）
+
+**触发**：外部贡献者 [PR #1](https://github.com/Wynne-cwb/resound/pull/1)（aniu201701，07-24 提）报告「80+ 分钟走 MOSS 必失败」，含 8 项修复。评估时做了全库取证，**结论比 PR 说的严重**。
+
+### 取证：静默截断真实存在，且 30–70 分钟区间普遍中招
+
+方法：全库 80 条录音，比对「音频时长」vs「transcript 末段时间戳」得覆盖率；对低覆盖的逐条测**转录结束点之后的音量** vs 会议中段音量——用来区分「真漏转」和「会议结束忘挂断的静音尾巴」。
+
+| 覆盖率 | 音频 | 转录到 | 尾部 mean vs 中段 mean | 判定 |
+|---|---|---|---|---|
+| 48.8% | 56.4min | 27.5min | -25.9 vs -27.0 dB | **漏转 28.9min** |
+| 64.1% | 68.3min | 43.8min | -27.2 vs **-44.7** dB（尾部更响） | **漏转 24.5min** |
+| 68.0% | 58.8min | 40.0min | -25.5 vs -26.1 dB | **漏转 18.8min** |
+| 74.7% | 59.6min | 44.5min | -37.4 vs -36.4 dB | **漏转 15.1min** |
+| 79.8% | 58.3min | 46.5min | -21.5 vs -21.3 dB | **漏转 11.8min** |
+| 86.2% | 23.4min | 20.2min | **-39.0 vs -24.1** dB（静 15dB） | 静音尾巴，**误报** |
+
+**9 条确认漏转**（37.8–68.3min 区间），全部 `asr_model = moss-transcribe-diarize-0.9b`（非 `-chunked`）→ 都因 <80min 走了单次提交。1 条（23.4min）复核为静音尾巴。
+
+**关键**：截断时 `segments` 非空、HTTP 200、无任何报错 → 入库、索引、摘要、问答全部照常跑完，**用户和代码都看不出异常**。79.8% 那条正是 STATE 里记着「58min 会议跑通全流程验证」的那场——当时以为验收通过，实际丢了 11.8 分钟人声。
+
+### 决策：阈值 4800s(80min) → 1800s(30min)
+
+**这直接推翻 07-28「按质量>速度暂不降默认阈值，先补重叠去重+短簇归并再开」的前提**——那条决策假设 80min 以下安全（依据「MOSS 官方设计 90 分钟」），于是把权衡看成「分片的碎片化代价（说话人 3→6、内容 -1.1%）vs 不分片零代价」。实测证明不分片的真实代价是**丢 12–51% 的内容**，量级完全不对等。**教训：把上游文档的设计上限当成自家实测边界，是没有证据的推断。**
+
+阈值选 30min 而非更低：9 条真漏转样本全部 >37min，30min 有余量；而 23.4min 那条是误报，把它拖进分片只会白吃碎片化。影响面：全库 >30min 的 28 条（原走分片仅 4 条），新增 24 条走分片、每条 2–3 片。
+
+### 从 PR 采纳（8 项）
+
+1. **切片改 AVFoundation**（`M4AExporter(range:)` + `AVURLAsset.load(.duration)`），删掉 `ffmpegSlice`/`probeDuration`/`locateTool`。原实现硬依赖 brew 的 ffmpeg/ffprobe，且 `probeDuration` 是 `try?` 吞错——**没装 ffmpeg 的机器不会报「请装 ffmpeg」，而是静默退回单次提交然后被截断**，这是最隐蔽的一条失败路径。
+2. **`MossError.empty`** 独立成错误类型：分片路径只跳过该片（`runChunk` 返回 nil）而非整条失败；部署自检把「合成静音跑通链路」判成成功。
+3. **服务端降级解析** `_fallback_segments`：`parse_transcript` 出 0 段但 `text` 非空时，按 `[Sxx]` 切分、合并同说话人、超 120 字按句再切、时间戳按字符比例分摊。离线验证：149 字 4 段、时间戳单调不倒挂、覆盖到音频结尾、内容零丢失、空输入/无标签输入安全返回 `[]`。**⚠️ 需重新 `modal deploy` 才生效。残留缺口：模型输出连 `[Sxx]` 都没有时仍救不回。**
+4. **在线转录不再有「必死」分支**：无 key → 直接走本地 WhisperKit；在线请求失败 → 回退本地。MOSS 失败本来就回退到这条路，这里再死就没兜底了。
+5. **`MossDeployer` venv 同装 `fastapi`**（`modal deploy` 在本地执行 moss_modal.py，顶层 `import fastapi`，而 modal 包不依赖它）。
+6. **CLI `index-prune`**：清索引里已不在 vault 的录音（归档/删目录后 `index` 增量重建不会删，残留 chunk 污染检索且跳转是死链）。实跑当前库 = 无残留。
+7. **`bundle-app.sh` 随包分发 `libswiftCompatibilitySpan.dylib`** 并在签 App 前先签它（其 rpath 指向本机 Xcode 工具链，异机无 Xcode 起不来）。
+8. **FluidAudio 版本约束**——已验证 `v0.15.4` 有 `Sources/FluidAudio/DownloadUtils.swift`、**`v0.15.5` 该文件 404 已移除**，而 `Diarizer.swift` 在用 `DownloadUtils.loadModels`。
+
+### 与 PR 不同的三处取舍
+
+- **保留我们的并发闸** `chunkConcurrency = 5`（PR 把所有片一次性 `addTask`，无上限）。Modal 按调用扩容但免费额度有限（本月已用 ~$14/$30）、并发过高会限流。
+- **保留时间戳倒挂保护** `end: max(s.end, s.start) + offset`（PR 是裸 `s.end + offset`）；保留 07-28 那套上传/GPU 分离埋点（PR 的 `transcribeWhole` 没有）。
+- **依赖锁法改了**：PR 用 `exact: "0.15.4"`（锁死，后续 patch 修复也进不来）。改为**上界约束 `"0.15.0"..<"0.15.5"`（问题精确始于 0.15.5）+ 把 `Package.resolved` 移出 `.gitignore`**。根因是 `Package.resolved` 被 ignore 了——Resound 是应用不是库，本该提交；不提交的后果是新用户 clone 后 fresh resolve 拉到未验证版本，**「clone 下来就编译不过」**。
+
+### 存量数据（用户拍板：暂不动）
+
+9 条漏转录音已入库，检索/问答/摘要都建立在残缺转录上。修复只保证**以后**的录音不再丢；这 9 条要 `retranscribe` 重跑才能补回，用户决定暂不处理。
+
+**验收点（待实机）**：①转一条 30–70min 录音 → 日志出现「切 N 片并发」且覆盖率回到 ~100%；②`swift build` 后 `Package.resolved` 仍锁 0.15.4；③重新 `modal deploy` 后降级解析生效；④未配转写 key 时不再吃 401 而是走本地 WhisperKit；⑤`index-prune` 对归档后的库能清残留。
+
+---
+
+## 转写不再堵住录音：转写挪进后台队列，停录即可开下一场（2026-07-29）
+
+**现象（用户报告）**：录完一场会、这场正在转录时，**没法接着立马录下一场**。
+
+**根因**：`RecordingController` 是**单一 phase 状态机**，而「转写+建索引」整段被塞在 `.processing` 里（`stopAndIngest`）。三个入口全被它锁住：①顶栏「录音」按钮 `if rec.isIdle` 才渲染 → processing 时**按钮直接消失** ②菜单栏「立即开始录音」`.disabled(rec.isProcessing)` ③MeetWatcher 检测到新会议时 `phase == .processing` **直接 return，连弹窗都不弹 → 第二场会静默漏录**。而这个封锁窗口 = 0.40× 音频时长（见 2026-07-28 耗时分析），20min 会 = **8min 录不了**。
+
+**关键观察：这是疏漏不是设计**——文件导入路径 `startImport` 早就是非阻塞的（排进 `pendingImports` 后台转写，UI 不锁），说话人识别+摘要也有现成的后台串行 worker（`enqueueSpeakerID`）。**只有录音这条路把转写绑死在状态机上**。所以修法是让录音复用导入那条队列，而不是新造机制。
+
+**落地**：
+- `RecordingController`：`.processing` → **`.finishing`**（只覆盖「停设备 + 对齐混音落盘」的秒级收尾），收尾完把音频交 `LibraryModel.enqueueRecording` 后**立刻回 `.idle`**。整个 ingest/index/git-push/失败兜底那 60 行从 controller 删除（本就与 `ingestOne` 重复）。`procStep`/`procLabels`/`addRecorded` 随之删掉（死代码）。
+- `LibraryModel`：新增**统一转写队列** `ingestQueue` + `pumpIngestQueue()`，导入/录音/重试三条路共用。`ImportItem` 加 `micURL`/`sysURL` → 录音走队列也**保留分轨独立转录**（dual-track 能力不丢）。
+- **并发上限（用户拍板）**：云端后端（`mossEnabled || transcribeOnline`）**2 条**，本地 WhisperKit **1 条**（多条抢 GPU/ANE 反而更慢）。每次取活时重算 → 设置里换后端立即生效。上限选 2 而非更高：MOSS 内部已有 5 并发分片，叠太多会顶到 Modal 免费额度。
+- 「合并录音」必须同步等结果（成败决定是否归档原录音），故不入队列，改用 `awaitIngestSlot()` 等一个并发位再跑——保留 await 语义又不越过上限。
+- `startRecording` 加**重入保护**（`guard phase == .idle || meetingDetected`）：并发门放开后，录音中再开一场会覆盖 `recorder`，把正在录的那场连引擎带音频一起丢掉。
+
+**两个被改造放大的风险，一并堵掉**：
+1. **音频留在 tmp 有被系统清的风险**（排队期间可能已在录下一场）→ `enqueueRecording` 用 `stashAudio` 把混音+分轨先搬到 `App Support/Resound/pending-recordings/`。
+2. **`pendingImports` 是内存态，排队途中退出 App 就丢登记**（音频在磁盘却对用户不可见 = 等于丢）→ 新增 `recoverOrphanRecordings()`（启动时扫 pending-recordings，登记成可重试失败项）+ **会议名 sidecar**（`<audio>.wav.title`）：不写它的话恢复后标题只能落回文件名（还会撞 2026-07-07 那个「从 UUID 里抠出日期」的坑）。分轨按 v1 约定清掉，重试只走混音。
+   - 配套：`dismissPending` 对会议录音**搬去 failed-recordings 而不是删**——既让「移除」真的生效（否则下次启动又被回收捞回来），又不主动销毁录好的会议，仍可 Finder 取回。
+
+**取舍**：停录后仍有秒级 `.finishing` 不能开新录音（混音是流式的，很快）——没为省这几秒去做双录音并存，因为 `MeetingRecorder` 双实例（两个 AVAudioEngine + 两条 SCStream）的采集路径无法离线验证，风险远大于收益。
+
+**验收点（待实机）**：①录完 A 立刻能点「录音」开 B，A 在录音库顶部显示「转写中…」；②A 转写中 Meet 检测到新会议**照常弹窗**（不再静默漏录）；③连开三场 → 第三条显示「排队等待转写…」，逐条转完；④转写途中退出 App → 重启后顶部出现「上次退出前未完成转写」且**标题是会议名不是文件名**，点重试能补回；⑤录音中再点「录音」→ toast「已在录音中」，正在录的那场不受影响；⑥导入/合并/失败重试零回归。
+
+---
+
+## 转录耗时分析：瓶颈是 MOSS GPU 推理（占 77%），不是说话人识别（2026-07-28）
+
+**背景**：用户反馈"转录会议很慢"。按「性能优化先埋点」原则，先补齐分阶段埋点再实测，不猜。
+
+**埋点**（本轮新增，永久保留）：`MossTranscriber.runSinglePass` 拆开「上传」vs「GPU 等待」（两种性质的等待）+ 轮询次数；`IngestPipeline` 的 VAD/归一/转录/校对；`IndexPipeline` 的说话人标注/contextual/embed；`MossSpeakers` 的解码/VAD/CAM++；`summarizeRecording` 的 LLM。CLI `retranscribe` 收尾打四阶段占比表 + 实时倍率。
+
+**测量方法**：隔离测量——真录音目录拷到 `/tmp/resound-perf-vault` + `--index` 指向 scratch sqlite（缓存全冷，等价一场新会议），不碰真 vault/index。样本=当天真实会议「对齐性能优化 H2 的目标」20.1 min。
+
+**实测（单片路径 = 现状）**：合计 **483.8s = 8.1 min，0.40× 音频时长**
+| 阶段 | 耗时 | 占比 |
+|---|---|---|
+| 转录（MOSS + AI 校对） | 413.9s | **85.5%** |
+| ├ VAD 门控 | 3.2s | 剪掉 170s 静音（省 14% GPU） |
+| ├ 响度归一 | 0.9s | |
+| ├ 上传（3.1MB） | 8.5s | |
+| ├ **MOSS GPU 等待** | **371.4s** | **76.8%（全流程单一最大项）** |
+| └ AI 校对（7 批 ×5 并发） | 29.0s | |
+| 索引（contextual 20.4s + embed 7.9s） | 28.4s | 5.9% |
+| 说话人识别（CAM++） | 3.6s | 0.8% |
+| 摘要（LLM 单次调用） | 37.9s | 7.8% |
+
+**关键结论 1：GPU 那 371s 里没有水分**。VAD 后语音 1038s × 实测 RTF 0.357 = 374s ≈ 实测 371s → **几乎全是纯推理，无排队/无冷启动/无轮询浪费**。所以调参（poll 间隔、超时、上传）都救不了，**只能靠并行**。轮询 10s 粒度只浪费 ≤10s（1.3%），不值得动。
+
+**关键结论 2：旧结论「说话人识别占导入 ~80%」已过时**（那是 whisper+Sortformer 时代）。MOSS 路径下 diar 随转写一次产出，命名只剩 CAM++ 声纹 → **3.6s，占 0.8%**。已改掉 [LibraryModel.swift](../Sources/ResoundApp/LibraryModel.swift) 里那条误导注释。
+
+**关键结论 3：分片并发是现成的 1.8× 提速，但要付质量代价**。`chunkThresholdSec=4800`(80min) 当初只为规避 MOSS 90min 上限，不是为提速。实测把阈值临时降到 10min（4 片 ×4.4min，5 并发）跑同一条录音：
+- 转录 413.9s → **190.9s**；合计（不含摘要）483.8-37.9=445.9s → **227.5s**，即 **0.40× → 0.19×，20min 会议 8.1min → 4.4min**
+- 单片 GPU 371s vs 分片 GPU wall ~150s。注意 **没到理论值 93s**（261s×0.357）——差的 ~50s 是新起 Modal 容器的冷启动税，**故片数越多收益递减**，不是线性。
+- ✅ **跨片说话人自动合并确实工作**（此前 STATE 记的"需手动合并"过于悲观）：现有簇级质心 + cos>0.80 凝聚合并对标签名不敏感，实测 P1_S01+P2_S01+P3_S01+P4_S01 以 cos 0.89–0.93 全并成一人，主讲时长 815s vs 单片 814s 几乎一致。
+- ⚠️ **代价一：说话人碎片化 3 人 → 6 人**。片边界切开的短附和各片独立编号、又太短不敢并（多出 19s/2s/2s 三个伪说话人）。
+- ⚠️ **代价二：内容 -1.1%**（6621 → 6549 字，段数 275 → 234）。硬切边界处截断，无重叠切片。
+
+**决策**：**暂不改默认阈值**。按项目原则「质量 > 速度」，1.8× 提速换 3→6 说话人碎片化 + 1% 内容损失，不能无脑开。**要开得先补两个护栏**：①重叠切片（overlap + 边界去重）治内容损失；②短簇（<5s）归并/丢弃治说话人碎片化。补齐后再降阈值，届时 20min 会议 4.4min、60min 会议约 8–10min（现状 24min）。
+
+**次要杠杆（各省 ~20s，独立可做）**：contextual 上下文与摘要互不依赖却串行跑，可并行；两者都是纯 LLM 等待。
+
+---
+
+## MOSS 全库迁移：清库 → 73 条 retranscribe → chunked 集成主流水线（2026-07-24）
+
+**背景**：07-22/23 才启用 MOSS，vault 里只有 2 条录音走了 MOSS，剩 73 条仍是老 whisper + FluidAudio diarization 流水线的产物。用户要求"能不能把这批老录音也全部换成 MOSS，同时把注册库脏 centroid 一次清理干净"。
+
+**Step 1 — 注册库健康度审计（脏得没法救）**：直接从 `speaker_refs` 表读所有 37 个 centroid 两两算余弦相似度：
+- **46 对不同人的 centroid cos > 0.60**（远超 SpeakerMatcher tauAbs=0.5 匹配阈值）
+- **Wynne vs Sara = 0.864**（按余弦看基本是同一个人）
+- **Wynne vs Jerry = 0.733**（最高频两个说话人的 centroid 严重重叠）
+- 几乎所有 `count=5` 小样本（Len/Mark/Chico/Fate/Hulk…）跟别人都 cos > 0.7 → "从错分片段学出来的伪 centroid"
+
+根因：老 FluidAudio diarization 切错 → CAM++ 拿脏音频段算 centroid → SpeakerMatcher 用脏 centroid 匹配又强化污染。**不能救、必须重建**。
+
+**方案**：备份 `speaker_refs` → 清空（`DELETE FROM speaker_refs`）→ 全量 MOSS 重跑 → 用户手动重新命名建库（这次是干净 MOSS 切分产生的 centroid）。备份到 `experiments/moss-eval/speaker_refs.backup-20260723-223644.sql`（gitignored）。
+
+**Step 2 — CLI 加 `--skip-speakers` flag**：为了让用户按"命名第 1 条 → 库变干净 → 触发第 2 条自动识别"的节奏推进，不能在 retranscribe 时就用空库跑 CAM++ 匹配（浪费+污染）。给 `resound retranscribe` 加了 `@Flag var skipSpeakers = false`（[ResoundCLI.swift:28-30](../Sources/resound/ResoundCLI.swift)），跳过说话人识别，保留 MOSS 匿名 `S01/S02` 待手动命名。
+
+**误解纠错**：用户以为跳过 speaker naming 能省 Modal credit——**不能**。MOSS 转写 + 端到端切分产生 `S01/S02` 匿名 label 是花钱那部分，CAM++ 匹配是本地跑的免费部分。但"等库变干净了再匹配"这个诉求本身是对的（脏/空库匹配没意义）。
+
+**Step 3 — 批量脚本演进（3 版）**：
+- V1 `rerun-all.sh` 串行 —— 顺利但太慢（10h 跑 41/70）；先前批处理版发现 whisper fallback 语言参数 bug（"Chinese" → aihubmix 拒识，只认 ISO "zh"），8 条失败。
+- V2 `rerun-parallel.sh` batch-3 —— 引入并发 + 自动重试（单条 fail 重试 2 次），但**批处理 barrier 拖累**：一批 3 个必须都完才起下一批，最慢那条卡全批 20 分钟。
+- V3 `rerun-rolling.sh` **xargs -P 5 滚动窗口** —— 任一 worker 完成立刻起下一个，wall-clock ≈ 最慢单条。加了 Modal 预算监控（`modal billing report --for "this month" --json`）：本月累计 >= `BUDGET_STOP_USD`（默认 $20，触顶剩 $10 停）就 touch STOP 文件、后续 worker 见到 flag 自动退出。
+- 结果：73 条中 70 条 MOSS 成功、3 条长 group 讨论（103/119/149 min）三次 attempt 一致挂在"返回空转录/推理 >3600s"。
+
+**Step 4 — 长音频挂的根因 = MOSS 90min 官方设计上限**。全录音按时长分档验证：
+- ≤ 30 min: 46/46 ✅
+- 30-60 min: 22/22 ✅
+- 60-90 min: 2/2 ✅（最长成功 85 min）
+- **> 90 min: 0/3 ❌**（103/119/149 min）
+
+界限严丝合缝对上 MOSS 官方"单次 90 分钟"设计，不是随机运气。**再重试盲试没意义**（`do_sample=False` 已 greedy 无参数空间，prompt 已最简）。
+
+**Step 5 — chunked 应急路径 → 集成主流水线**：
+- **应急版**（`chunked_retranscribe.py`）：Python 独立脚本，ffmpeg 切 15min/片、5 片并发提交 Modal、按 chunk.start 偏移时间戳、speaker label 加 `P{n}_` 前缀（跨片对齐留给用户在 App 里手动合并）。**3 条大 group 会议 25 chunks 全 ok**（round-3=1604 段/group-1=2322 段/round-2=2412 段）。
+- **主流水线集成**（[MossTranscriber.swift](../Sources/ResoundCore/MossTranscriber.swift)）：`transcribe()` 入口用 ffprobe 探测时长，> `chunkThresholdSec = 4800`（80 min）自动走 `transcribeChunked()`；每片 `chunkTargetSec = 1500`（25 min）均匀切、`chunkConcurrency = 5` 并发。`runSinglePass()` 抽出来共享单次 submit/poll 逻辑。ffmpeg/ffprobe 走 `locateTool()`（Homebrew /opt/homebrew 优先→/usr/local→/usr/bin）。
+- **副作用**：`transcribe`/`transcribeChunked` 的 log 参数改成 `@escaping (String) -> Void`（TaskGroup 需要）；`IngestPipeline.ingest/retranscribe/transcribeMoss` 的 log 参数也随之改 escaping。
+- **冒烟验证**：临时把阈值改成 300s、用 hydra 9 min 录音跑一次——`✂️ 音频 8.4 min > 5 min 阈值，切成 3 片各 ~2.8 min，5 片并发` → 三片各 65/66/64 段 → 拼接 195 段 → moss-diar.json 里 `P1_S01/P1_S02/P2_S01/P2_S02/P3_S01/P3_S02` 六个标签 → 跨片时间戳偏移正确（片 2 首段 187s = 片 1 长度 168s + 片内 19.97s）。改回生产阈值 4800/1500 rebuild。
+
+**Step 6 — 收尾**：
+- 3 条 chunked 录音用 `resound transcribe-correct` 各跑一遍 AI 校对（改动 40/57/106 段）。
+- 全量 `resound index --vault ...` reindex。**中途 aihubmix embedding 端点断网**（NSURLErrorDomain -1009）跑到 42/76 条挂——网络恢复后重跑，靠 `embedding_cache(hash,vec,model)` 表兜底：前 42 条命中缓存秒过，只有失败那批和后续重新调 API。最终 73 录音 / 2369 chunks + 4 文档 / 161 chunks 全部入库。
+
+**Modal 预算实际消耗**：本月累计 ~$14（含冒烟测试 + 3 版批量 + chunked 3 条）——$30 免费额度剩 $16 空间。
+
+**教训**：
+1. **注册库健康度可以量化审计**：centroid 两两余弦矩阵直接暴露污染程度，不用凭直觉猜。
+2. **批处理 vs 滚动窗口**：并发处理不齐工作量时（RTF 变化大），batch barrier 造成的等待可能吃掉一半 wall-clock。默认走 xargs -P。
+3. **"模型能力硬上限"是硬约束**：MOSS 90min 是设计边界，不是随机故障，不能靠重试解决——**看时长分布判断天花板 vs 网络抖动**。
+4. **失败录音数据没被污染**：老 whisper 转写还在 recording.yaml/transcript.json、失败的 MOSS 没写入任何产物文件。"整体失败不落地"是好的原子性设计，重试无副作用。
+5. **网络断连中途失败**：`resound index` 全量重跑 + embedding_cache 是 idempotent 兜底——同 model + 同 text hash 命中缓存，不再花钱、不再等 API。这层缓存救了这次事故。
+
+**待用户**：所有录音已进 App 可命名。建议按 Wynne 密度倒序（1-on-1 会议先），命名一条 → 触发下一条重新识别，跨片 `P{n}_S0x` 标签手动合并。跨片 CAM++ 自动对齐（Unit B）留作后续。
+
+**代码涉及**：
+- 新增：[MossTranscriber.swift](../Sources/ResoundCore/MossTranscriber.swift) chunked 分支 + ffprobe/ffmpeg helpers（Process wrappers）
+- 修改：[IngestPipeline.swift](../Sources/ResoundCore/IngestPipeline.swift) log 参数 escaping、[ResoundCLI.swift](../Sources/resound/ResoundCLI.swift) Retranscribe.skipSpeakers flag
+- 实验区（gitignored）：`experiments/moss-eval/chunked_retranscribe.py`、`rerun-rolling.sh`、`finalize-chunked.sh`、`speaker_refs.backup-*.sql`
+
+---
+
 ## "切了 MOSS 却仍走 whisper"：二进制比代码老 64 分钟（2026-07-23）
 
 **现象**：用户 07-23 录的 Platform Department Weekly Meeting 转录满是噪音，怀疑双轨合并 bug——"online 那条清晰、本地基本没说话，可能是 mic 那条误识别 + 合并出问题"。

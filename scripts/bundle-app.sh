@@ -34,6 +34,14 @@ for b in "$BIN_DIR"/*.bundle; do
     [ -e "$b" ] && cp -R "$b" "$APP/Contents/Resources/"
 done
 
+# 可执行弱依赖 libswiftCompatibilitySpan.dylib（Swift 6.2 工具链产物），其 rpath 指向本机 Xcode
+# 工具链目录——别人机器上没装 Xcode 就找不到，App 起不来。随包分发（@loader_path 能找到）。
+SPAN_DYLIB="$(dirname "$(xcrun --find swiftc)")/../lib/swift-6.2/macosx/libswiftCompatibilitySpan.dylib"
+if [ -f "$SPAN_DYLIB" ]; then
+    cp "$SPAN_DYLIB" "$APP/Contents/MacOS/"
+    echo "  📦 已随包分发 libswiftCompatibilitySpan.dylib（异机运行必需）"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -95,8 +103,11 @@ if [ -z "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev
     RESOUND_SIGN_ID="Resound Dev"
 fi
 # 注意：用 `find-identity -p`（不带 -v）——自签名证书未受信会被 -v 过滤掉，但本地签名/ TCC 用途不需要受信。
+# 嵌入的 dylib 必须先于 App 单独签（签完 App 再改内容会破坏签名）
+DYLIB_IN_APP="$APP/Contents/MacOS/libswiftCompatibilitySpan.dylib"
 if [ -n "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev/null | grep -qF "$RESOUND_SIGN_ID"; then
     echo "▶︎ 稳定身份签名：$RESOUND_SIGN_ID"
+    [ -f "$DYLIB_IN_APP" ] && codesign --force --sign "$RESOUND_SIGN_ID" "$DYLIB_IN_APP"
     if codesign --force --identifier com.wynne.resound --sign "$RESOUND_SIGN_ID" "$APP"; then
         SIGN_OK=1
     else
@@ -104,6 +115,7 @@ if [ -n "${RESOUND_SIGN_ID:-}" ] && security find-identity -p codesigning 2>/dev
     fi
 fi
 if [ "$SIGN_OK" != 1 ]; then
+    [ -f "$DYLIB_IN_APP" ] && codesign --force --sign - "$DYLIB_IN_APP"
     codesign --force --sign - "$APP"
     echo "  ℹ️ ad-hoc 签名：重新打包后需在「系统设置 › 隐私与安全性 › 屏幕录制」重新勾选 Resound。"
     echo "     想一劳永逸：创建一个自签名「代码签名」证书后 export RESOUND_SIGN_ID=\"证书名\" 再打包。"

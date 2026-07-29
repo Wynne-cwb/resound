@@ -127,12 +127,12 @@ struct StatusBar: View {
     @Environment(\.palette) var pal
 
     var body: some View {
-        if rec.isRecording || rec.isProcessing {
+        if rec.isRecording || rec.isFinishing {
             HStack(spacing: 12) {
                 HStack(spacing: 12) {
                     icon
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(rec.isRecording ? "正在录音" : "正在处理录音")
+                        Text(rec.isRecording ? "正在录音" : "正在收尾录音")
                             .font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.text)
                         Text(sub).font(.system(size: 11.5)).foregroundStyle(pal.text2).lineLimit(1)
                     }
@@ -154,7 +154,7 @@ struct StatusBar: View {
                 } else {
                     HStack(spacing: 8) {
                         Spinner(size: 14, color: pal.accent)
-                        Text(RecordingController.procLabels[min(rec.procStep, 2)])
+                        Text(RecordingController.finishingLabel)
                             .font(.system(size: 12)).foregroundStyle(pal.text2)
                     }
                 }
@@ -168,7 +168,7 @@ struct StatusBar: View {
 
     private var sub: String {
         rec.isRecording ? "正在采集你的麦克风 + Google Meet 声音 · 全程本地"
-                        : RecordingController.procLabels[min(rec.procStep, 2)]
+                        : RecordingController.finishingLabel
     }
 
     @ViewBuilder private var icon: some View {

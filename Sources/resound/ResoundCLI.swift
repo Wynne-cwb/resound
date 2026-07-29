@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
 }
 
@@ -28,6 +28,9 @@ struct Retranscribe: AsyncParsableCommand {
     @Flag(name: .long, help: "跳过重生成摘要")
     var skipSummary = false
 
+    @Flag(name: .long, help: "跳过说话人识别（用于批量重跑，先攒干净的匿名切分，之后手动命名建库再逐条识别）")
+    var skipSpeakers = false
+
     func run() async throws {
         let cfg = try Config.load()
         let vaultURL = URL(fileURLWithPath: vault)
@@ -36,21 +39,51 @@ struct Retranscribe: AsyncParsableCommand {
         }
         let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
         print("▶︎ 重转录 \(rec.title)（\(rec.id)）")
-        try await IngestPipeline(vaultRoot: vaultURL).retranscribe(recDir: rec.dir)
+        // 四阶段各自计时 → 收尾打占比表（阶段内的细项由 Core 的 ⏱ 日志给出）
+        var phases: [(String, Double)] = []
+        func phase<T>(_ name: String, _ body: () async throws -> T) async throws -> T {
+            let t = Date()
+            let r = try await body()
+            phases.append((name, Date().timeIntervalSince(t)))
+            return r
+        }
+
+        try await phase("转录（MOSS + AI 校对）") {
+            try await IngestPipeline(vaultRoot: vaultURL).retranscribe(recDir: rec.dir)
+        }
         print("▶︎ 重建索引…")
-        try await IndexPipeline(config: cfg).indexRecording(recDir: rec.dir, indexPath: indexURL, labelSpeakers: false)
-        if let model = cfg.speakerModel {
+        try await phase("索引（上下文 + embedding）") {
+            try await IndexPipeline(config: cfg).indexRecording(recDir: rec.dir, indexPath: indexURL, labelSpeakers: false)
+        }
+        if !skipSpeakers, let model = cfg.speakerModel {
             print("▶︎ 说话人识别…")
-            if hasMossDiarStaging(rec.dir) {
-                _ = try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
-            } else {
-                _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+            try await phase("说话人识别（CAM++）") {
+                if hasMossDiarStaging(rec.dir) {
+                    _ = try await nameSpeakersFromMossDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+                } else {
+                    _ = try await identifySpeakersByDiarization(rec, model: model, indexPath: indexURL, embeddingDim: cfg.embeddingDim)
+                }
             }
+        } else if skipSpeakers {
+            print("▶︎ 跳过说话人识别（--skip-speakers），保留 MOSS 匿名 S01/S02")
         }
         if !skipSummary {
             print("▶︎ 重生成摘要…")
-            _ = try await IndexPipeline(config: cfg).summarizeRecording(recDir: rec.dir, indexPath: indexURL)
+            try await phase("摘要（LLM）") {
+                _ = try await IndexPipeline(config: cfg).summarizeRecording(recDir: rec.dir, indexPath: indexURL)
+            }
         }
+
+        let total = phases.reduce(0) { $0 + $1.1 }
+        print("\n⏱ 阶段耗时（音频 \(rec.durationSec)s = \(String(format: "%.1f", Double(rec.durationSec) / 60)) min）")
+        for (name, sec) in phases {
+            let pct = total > 0 ? sec / total * 100 : 0
+            let bar = String(repeating: "█", count: max(1, Int((pct / 100 * 30).rounded())))
+            print(String(format: "  %-26@ %6.1fs  %5.1f%%  %@", name as NSString, sec, pct, bar))
+        }
+        print(String(format: "  %-26@ %6.1fs  实时倍率 %.2f× 音频时长",
+                     "合计" as NSString, total,
+                     rec.durationSec > 0 ? total / Double(rec.durationSec) : 0))
         print("✅ 完成（App 里重开该录音即见新转录/说话人/摘要）")
     }
 }
@@ -725,6 +758,26 @@ struct IndexCommand: AsyncParsableCommand {
         try await IndexPipeline(config: cfg).build(
             vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL,
             enrichContext: context, contextModel: contextModel)
+    }
+}
+
+struct IndexPrune: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "index-prune",
+        abstract: "清掉索引里已不在 vault 的录音（归档/手动删目录后跑一次，去掉检索残留）")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    func run() async throws {
+        let cfg = try Config.load()
+        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
+        let pruned = try IndexPipeline(config: cfg)
+            .pruneOrphanRecordings(vaultRoot: URL(fileURLWithPath: vault), indexPath: indexURL)
+        print(pruned.isEmpty ? "✅ 索引无残留" : "✅ 清理 \(pruned.count) 条索引残留")
     }
 }
 

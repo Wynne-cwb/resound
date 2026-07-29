@@ -9,22 +9,25 @@ final class RecordingController: ObservableObject {
         case idle
         case meetingDetected(url: String)
         case recording
-        case processing
+        /// 停录后的收尾：停设备 + 对齐混音落盘（秒级）。**转写不在这里**——它排进
+        /// LibraryModel 的转写队列在后台跑，所以收尾一完成就回 idle，可以马上录下一场。
+        case finishing
+
+        var isMeetingDetected: Bool { if case .meetingDetected = self { return true }; return false }
     }
 
     @Published var phase: Phase = .idle
     @Published var watching = false
     @Published var recSeconds = 0
-    @Published var procStep = 0          // 0 转写 · 1 建立索引（说话人识别录完后由 Library 后台 worker 补）
     @Published var meetingTitle: String? // 检测到的会议名（取自 Chrome 标签标题），用作录音标题
     @Published var promptStop = false     // 会议结束、未开自动停录时：弹「停止录音？」一键弹窗（录音仍在继续）
 
     /// toast 走 AppModel（全局），录音引擎只负责发消息。
     weak var app: AppModel?
-    /// 录完后把"说话人识别+摘要"交给 Library 的后台串行 worker（与导入同一路径），不阻塞收尾。
+    /// 录完后把「转写+入库」以及随后的「说话人识别+摘要」都交给 Library 的后台队列（与导入同一路径）。
     weak var library: LibraryModel?
 
-    static let procLabels = ["正在转写音频…", "正在加入录音库…"]
+    static let finishingLabel = "正在收尾录音（对齐混音）…"
 
     private var watchTask: Task<Void, Never>?
     private var recorder: MeetingRecorder?
@@ -33,7 +36,7 @@ final class RecordingController: ObservableObject {
     private var recStart = Date()
 
     var isRecording: Bool { phase == .recording }
-    var isProcessing: Bool { phase == .processing }
+    var isFinishing: Bool { phase == .finishing }
     var isIdle: Bool { phase == .idle }
 
     // MARK: 监听 Meet
@@ -49,7 +52,8 @@ final class RecordingController: ObservableObject {
                     guard let self else { return }
                     switch event {
                     case .started(let url, let title, _):
-                        if self.phase == .recording || self.phase == .processing { return }
+                        // 只在录音中/收尾中（秒级）忽略新会议；转写已挪到后台队列，不再挡下一场。
+                        if self.phase == .recording || self.phase == .finishing { return }
                         let d = UserDefaults.standard
                         // 关了「自动检测会议」→ 既不提示也不录。
                         guard d.object(forKey: Self.autoDetectKey) as? Bool ?? true else { return }
@@ -105,6 +109,11 @@ final class RecordingController: ObservableObject {
 
     /// fromMeeting=true：由会议触发（弹窗确认或自动开始）→ 会议结束时自动停录。
     func startRecording(fromMeeting: Bool) {
+        // 重入保护：录音中/收尾中再开一场会覆盖 `recorder`，把正在录的那场连引擎带音频一起丢掉。
+        // （UI 三个入口都各有门禁，但这里是唯一的必经之路，护栏放这最稳。）
+        guard phase == .idle || phase.isMeetingDetected else {
+            app?.toast("已在录音中"); return
+        }
         let rec = MeetingRecorder()
         recorder = rec
         recordingFromMeeting = fromMeeting
@@ -126,15 +135,16 @@ final class RecordingController: ObservableObject {
         }
     }
 
+    /// 停录：只做「停设备 + 对齐混音落盘」（秒级），随后把转写+入库**排进后台队列**并立刻回 idle。
+    /// 这样一场会刚录完就能马上录下一场——转写（20min 会 ≈ 8min）在后台排着跑，不再堵住录音。
     func stopAndIngest() {
         promptStop = false   // 停止弹窗若在显示则收起
         guard let rec = recorder else { phase = .idle; return }
         stopRecTimer()
-        phase = .processing
-        procStep = 0
+        phase = .finishing
         let title = meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            // ① 先把录音收尾（对齐混音+分轨落盘）。这一步失败=没有音频可救，只能报错。
+            // 录音收尾（对齐混音+分轨落盘）。这一步失败=没有音频可救，只能报错。
             let cap: MeetingRecorder.Capture
             do {
                 cap = try await rec.finishCapture { _ in }
@@ -146,57 +156,18 @@ final class RecordingController: ObservableObject {
                 }
                 return
             }
-            // ② 转写 + 入库。任何一步失败都**不丢音频**：登记成可重试的失败项（录音库顶部），并落盘日志。
-            do {
-                let cfg = try Config.load()
-                guard let vault = cfg.vaultPath, !vault.isEmpty else {
-                    await MainActor.run {
-                        AppLog.log("⚠️ 录音转写中止：未设置 VAULT_PATH（音频已保留待重试）")
-                        self.library?.recordFailedRecording(url: cap.mixed, title: title,
-                            error: "未设置录音库路径（去 设置 配置 vault 后，可在录音库顶部重试）")
-                        self.app?.toast("未设置录音库路径，录音已保留：配置后可在录音库顶部重试")
-                        self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
-                    }
+            await MainActor.run {
+                // 转写+入库+说话人识别+摘要全交后台队列（与导入同一路径，队列内部管并发上限）。
+                // 音频由 enqueueRecording 搬出 tmp，失败也留在录音库顶部可重试/取回，绝不丢。
+                guard let lib = self.library else {
+                    AppLog.log("⚠️ library 未挂载，录音临时文件：\(cap.mixed.path)")
+                    self.app?.toast("无法加入录音库，音频保留在：\(cap.mixed.path)")
+                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
                     return
                 }
-                // 分轨齐全 → 分开转录合并（dual-track spec）；缺轨 → 回退混音单转录
-                let tracks: (mic: URL, sys: URL)? = { if let m = cap.mic, let s = cap.sys { return (m, s) }; return nil }()
-                let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
-                    .ingest(audioPath: cap.mixed, tracks: tracks, title: (title?.isEmpty == false) ? title : nil,
-                            source: "meeting", tags: [], model: "large-v3", language: "zh", hints: [], push: false)
-                let pipeline = IndexPipeline(config: cfg)
-                await MainActor.run { self.procStep = 1 }
-                // labelSpeakers:false——说话人交给后台 worker 的 diarization（会覆盖 chunk 说话人），此处不重复标注
-                try await pipeline.indexRecording(recDir: out.recordingDir, indexPath: defaultIndexPath(), labelSpeakers: false)
-                if cfg.vaultAutoPush {   // 开了自动推送：把文本派生物同步到 vault 远端（音频已 gitignore）
-                    _ = try? Git(repo: URL(fileURLWithPath: vault)).syncTextOnly(message: "rec: 会议录音 \(out.id)")
-                }
-                for u in [cap.mixed, cap.mic, cap.sys].compactMap({ $0 }) {
-                    try? FileManager.default.removeItem(at: u)   // 入库成功，清掉临时混音+分轨
-                }
-                // 转写+入库完成即收尾；说话人识别(慢)+摘要交后台串行 worker，录音库里该条显示「识别说话人中…」
-                let sum = loadRecordingSummary(dir: out.recordingDir)
-                await MainActor.run {
-                    self.app?.toast("录音已转写并加入录音库")
-                    // 直接插入列表(内含 enqueueSpeakerID)，不只靠 reloadLibrary 的 token——见 LibraryModel.addRecorded。
-                    if let sum { self.library?.addRecorded(sum) }
-                    self.app?.reloadLibrary()   // 仍 bump：已挂载的 LibraryView 顺带全量刷新；幂等。
-                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
-                }
-            } catch {
-                await MainActor.run {
-                    AppLog.error("录音转写入库失败（音频已保留待重试）", error)
-                    if let lib = self.library {
-                        // v1：失败重试只保混音（分轨临时文件顺手清掉，避免堆积）——见 dual-track spec「失败重试路径」
-                        for u in [cap.mic, cap.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
-                        lib.recordFailedRecording(url: cap.mixed, title: title, error: String(describing: error))
-                        self.app?.toast("转写失败，录音已保留：可在录音库顶部重试或在 Finder 取回")
-                    } else {
-                        AppLog.log("⚠️ library 未挂载，录音临时文件：\(cap.mixed.path)")
-                        self.app?.toast("转写失败：\(error)")
-                    }
-                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
-                }
+                lib.enqueueRecording(mixed: cap.mixed, mic: cap.mic, sys: cap.sys, title: title)
+                self.app?.toast("录音已结束，正在后台转写（可以开始下一场了）")
+                self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
             }
         }
     }

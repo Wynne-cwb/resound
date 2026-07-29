@@ -23,7 +23,7 @@ public struct IngestPipeline {
         hints: [String] = [],
         maxFallback: Int = 5,
         push: Bool,
-        log: (String) -> Void = { print($0) }
+        log: @escaping (String) -> Void = { print($0) }
     ) async throws -> Output {
         try vault.validate()
 
@@ -152,7 +152,7 @@ public struct IngestPipeline {
     /// 重写 transcript.json（MOSS 时另写 moss-diar.json）；删旧 diarization.json——它按旧转录
     /// 的时间轴贴的标签，换了转录就作废。重索引/说话人命名/摘要由调用方接着串（CLI retranscribe）。
     public func retranscribe(recDir: URL, model: String = "large-v3",
-                             log: (String) -> Void = { print($0) }) async throws {
+                             log: @escaping (String) -> Void = { print($0) }) async throws {
         let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
         let audioOut = recDir.appendingPathComponent(manifest.audioFile)
         guard FileManager.default.fileExists(atPath: audioOut.path) else {
@@ -166,8 +166,11 @@ public struct IngestPipeline {
         let language = manifest.language.isEmpty ? "zh" : manifest.language
         let glossary = Glossary.load(vaultRoot: vault.root)
 
+        func el(_ t: Date) -> String { String(format: "%.1fs", Date().timeIntervalSince(t)) }
+
         var result: TranscribeResult
         var mossLabels: [String]? = nil
+        let tTranscribe = Date()
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
                 let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary, log: log)
@@ -183,7 +186,7 @@ public struct IngestPipeline {
                                                  glossary: glossary, model: model, language: language,
                                                  maxFallback: 5, log: log)
         }
-        log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language)")
+        log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language) · ⏱ 转录 \(el(tTranscribe))")
 
         // 与 ingest 步骤 3 同款后处理
         let normalized = ZhConverter.shared.normalize(result.transcript)
@@ -193,12 +196,13 @@ public struct IngestPipeline {
         if let cfg = try? Config.load(), cfg.transcribeCorrect {
             do {
                 log("🧠 AI 校对转录（\(cfg.correctModel)）…")
+                let tCorrect = Date()
                 let corrector = TranscriptCorrector(
                     chat: ChatClient(config: cfg, modelOverride: cfg.correctModel), glossaryTerms: glossary.terms,
                     mishearExamples: CorrectionLearner.mishearExamples())
                 let (fixed, n) = try await corrector.correct(finalTranscript, log: log)
                 finalTranscript = fixed
-                log("   ✓ AI 校对改动 \(n) 段")
+                log("   ✓ AI 校对改动 \(n) 段 · ⏱ 校对 \(el(tCorrect))")
             } catch { log("   ⚠️ AI 校对失败，保留原转录：\(error)") }
         }
         try finalTranscript.jsonData().write(to: recDir.appendingPathComponent("transcript.json"))
@@ -262,18 +266,22 @@ public struct IngestPipeline {
     /// MOSS 云端转写（端到端转录+说话人）：VAD 门控 → 归一 → submit/poll → 时间戳映射回原轴。
     /// 成功返回 (转录, 与段一一对应的 S01/S02 说话人标签)；抛错由调用方回退 whisper。
     private func transcribeMoss(
-        _ audio: URL, cfg: Config, glossary: Glossary, log: (String) -> Void
+        _ audio: URL, cfg: Config, glossary: Glossary, log: @escaping (String) -> Void
     ) async throws -> (TranscribeResult, [String]) {
         log("🤖 MOSS 云端转写中（转录+说话人一次产出，GPU 推理约音频时长 4 成）…")
         var upload = audio
         var temps: [URL] = []
         var vadSpans: [VADGate.Span] = []
         // 与在线 whisper 同款预处理：VAD 剪静音（顺带省 GPU 秒数=省额度）+ 分窗响度归一（仅上传副本）
+        let tVAD = Date()
         if let r = try? await VADGate.voicedM4A(of: audio, log: log) {
             upload = r.url; temps.append(r.url); vadSpans = r.spans
         }
+        log(String(format: "   ⏱ VAD 门控 %.1fs", Date().timeIntervalSince(tVAD)))
+        let tNorm = Date()
         if let norm = try? await AudioNormalizer.normalizedM4A(of: upload) {
-            upload = norm; temps.append(norm); log("   🔊 已响度归一（仅上传转录用）")
+            upload = norm; temps.append(norm)
+            log(String(format: "   🔊 已响度归一（仅上传转录用）· ⏱ %.1fs", Date().timeIntervalSince(tNorm)))
         }
         defer { for u in temps { try? FileManager.default.removeItem(at: u) } }
         let out = try await MossTranscriber(config: cfg, hotwords: glossary.terms)
@@ -291,7 +299,33 @@ public struct IngestPipeline {
         _ audio: URL, glossary: Glossary, model: String, language: String?,
         maxFallback: Int, log: (String) -> Void
     ) async throws -> TranscribeResult {
+        // 在线转录要 key：没配 key 就直接走本地（此前会裸打端点吃 401）。在线请求失败也回退本地——
+        // MOSS 失败已经回退到这条路了，这里再死整条链路就没有兜底了（转录不该有「必死」分支）。
         if let cfg = try? Config.load(), cfg.transcribeOnline {
+            guard !cfg.transcribeKey.isEmpty else {
+                log("   ⚠️ 在线转录未配置 API key，改用本地 WhisperKit")
+                return try await localTranscribe(audio, glossary: glossary, model: model,
+                                                 language: language, maxFallback: maxFallback, log: log)
+            }
+            do {
+                return try await onlineTranscribe(audio, cfg: cfg, glossary: glossary,
+                                                  language: language, log: log)
+            } catch {
+                log("   ⚠️ 在线转录失败（\(error)），回退本地 WhisperKit")
+                AppLog.error("在线转录失败，回退本地 WhisperKit", error)
+                return try await localTranscribe(audio, glossary: glossary, model: model,
+                                                 language: language, maxFallback: maxFallback, log: log)
+            }
+        }
+        return try await localTranscribe(audio, glossary: glossary, model: model,
+                                         language: language, maxFallback: maxFallback, log: log)
+    }
+
+    /// 在线 whisper 单音频链路（VAD 门控 → 分窗响度归一 → 转录 → 时间戳映射回原轴）。
+    private func onlineTranscribe(
+        _ audio: URL, cfg: Config, glossary: Glossary, language: String?, log: (String) -> Void
+    ) async throws -> TranscribeResult {
+        do {
             log("☁️ 在线转录中（\(cfg.transcribeModel) @ \(cfg.transcribeBaseURL)）…")
             var upload = audio
             var temps: [URL] = []
@@ -315,12 +349,18 @@ public struct IngestPipeline {
                                           modelName: result.modelName)
             }
             return result
-        } else {
-            log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
-            return try await Transcriber(model: model, language: language,
-                                         prompt: glossary.promptString, maxFallback: maxFallback)
-                .transcribe(audio: audio)
         }
+    }
+
+    /// 本地 WhisperKit 单音频链路（在线路径的兜底）。
+    private func localTranscribe(
+        _ audio: URL, glossary: Glossary, model: String, language: String?,
+        maxFallback: Int, log: (String) -> Void
+    ) async throws -> TranscribeResult {
+        log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
+        return try await Transcriber(model: model, language: language,
+                                     prompt: glossary.promptString, maxFallback: maxFallback)
+            .transcribe(audio: audio)
     }
 
     /// 对 vault 内已有 transcript.json 重新做 繁→简归一 + 别名纠正并改写（免重新转录）。

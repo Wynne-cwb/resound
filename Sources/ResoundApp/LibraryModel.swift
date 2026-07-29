@@ -85,8 +85,11 @@ final class LibraryModel: ObservableObject {
         var name: String
         var status: Status
         var error: String? = nil        // 失败原因（供 UI 显示 + 重试前清空）
-        var source: String = "import"   // "import"（用户文件，原处可重导）/ "meeting"（录音兜底，url 是抢救出的音频）
-        var title: String? = nil        // 入库标题：会议兜底带会议名（否则重试会落回文件名 id）；导入留 nil 用 defaultTitle
+        var source: String = "import"   // "import"（用户文件，原处可重导）/ "meeting"（录音，url 是收尾后的混音）
+        var title: String? = nil        // 入库标题：录音带会议名（否则重试会落回文件名 id）；导入留 nil 用 defaultTitle
+        /// 会议录音分轨（已与 url 混音同轴）：给了就分开转录再合并（dual-track spec）。
+        var micURL: URL? = nil
+        var sysURL: URL? = nil
         enum Status { case queued, transcribing, identifying, done, failed }
     }
 
@@ -195,7 +198,9 @@ final class LibraryModel: ObservableObject {
     @Published var importOpen = false
     @Published var importing = false
     @Published var importItems: [ImportItem] = []
-    @Published var pendingImports: [ImportItem] = []   // 已入列、正在后台转写的导入项（显示在录音库顶部）
+    @Published var pendingImports: [ImportItem] = []   // 已入列、正在后台转写的导入/录音项（显示在录音库顶部）
+    private var ingestQueue: [ImportItem] = []         // 待转写队列（导入/录音/重试共用），按 maxIngestConcurrency 取活
+    private var ingestRunning = 0
 
     var selected: RecordingSummary? { recordings.first { $0.id == selectedId } }
     var hasSpeakers: Bool { !speakers.isEmpty }
@@ -208,7 +213,11 @@ final class LibraryModel: ObservableObject {
     /// vault 是 git repo 且开了「自动推送」时，后台把文本派生物 commit+push（音频已 gitignore）。
     func autoPushVault(_ message: String) {
         guard let cfg = cfg(), cfg.vaultAutoPush, let vault = vaultURL() else { return }
-        Task.detached {
+        // 串成一条链：转写队列可并发跑（云端 2 条），两条几乎同时完成就会并发 `git add/commit/push`
+        // 同一个 vault repo → 撞 index.lock，其中一条白报「自动同步失败」。前一次同步跑完再开下一次。
+        let prev = pushChain
+        pushChain = Task.detached {
+            await prev?.value
             do {
                 let pushed = try Git(repo: vault).syncTextOnly(message: message)
                 if pushed { await MainActor.run { self.app?.toast("已同步到 vault 远端") } }
@@ -217,6 +226,7 @@ final class LibraryModel: ObservableObject {
             }
         }
     }
+    private var pushChain: Task<Void, Never>?
 
     // MARK: 加载
 
@@ -278,22 +288,16 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    /// 导入后增量插入单条录音（按时间倒序就位），避免每个文件都 reload() 全量扫盘。
+    /// 转写入库后增量插入单条录音（按时间倒序就位），避免每个文件都 reload() 全量扫盘。
+    /// ⚠️ 录音/导入落库后**必须走这里直接插入**，不能只靠 `app.reloadLibrary()` 的 token——
+    /// LibraryView 是懒挂载，录音时若没进过 Library 页则 `.onChange(libraryReloadToken)` 不存在、
+    /// token 会丢，且 `.onAppear{load()}` 幂等不会再扫盘 → 刚录的那条永远进不了列表。
     private func insertRecording(_ r: RecordingSummary) {
         guard !recordings.contains(where: { $0.id == r.id }) else { return }
         var arr = recordings
         arr.append(r)
         arr.sort { $0.recordedAt < $1.recordedAt }   // 升序：最新在末（列表最下）
         recordings = arr
-    }
-
-    /// 录音(会议)落库后登记进列表 + 排进说话人识别队列。**直接插入**而非靠 `app.reloadLibrary()` 的 token——
-    /// LibraryView 是懒挂载+keep-alive，录音时若没进过 Library 页则 `.onChange(libraryReloadToken)` 不存在、
-    /// token 会丢，且 `.onAppear{load()}` 幂等不会再扫盘 → 刚录的那条永远进不了列表（导入流程一直走 insertRecording
-    /// 故从不丢，录音流程之前却只 bump token，这就是「录完在 Library 找不到」的根因）。和导入对齐即稳。
-    func addRecorded(_ sum: RecordingSummary) {
-        insertRecording(sum)
-        enqueueSpeakerID(sum)
     }
 
     /// 后台识别说话人完成后，把该条的 identified 标志置真（列表「待识别」徽标即时消失，免重扫）。
@@ -871,7 +875,12 @@ final class LibraryModel: ObservableObject {
                 var item = ImportItem(url: tmp, name: title, status: .queued)
                 item.title = title
                 pendingImports.append(item)
+                // 合并要同步等结果（成败决定是否归档原录音），故不入队列而是等一个并发位后直接跑
+                await awaitIngestSlot()
+                ingestRunning += 1
                 await ingestOne(item)
+                ingestRunning -= 1
+                pumpIngestQueue()
                 // 3. 只在入库成功（占位已被移除、临时文件已消费）后归档原录音
                 let ok = !pendingImports.contains { $0.id == item.id }
                 if ok {
@@ -1149,17 +1158,110 @@ final class LibraryModel: ObservableObject {
     func startImport() {
         guard !importItems.isEmpty, vaultURL() != nil else { return }
         let queued = importItems.map {
-            var it = ImportItem(url: $0.url, name: $0.name, status: .transcribing)
+            var it = ImportItem(url: $0.url, name: $0.name, status: .queued)
             it.source = $0.source; it.title = $0.title   // 保留来源/标题，别在重建时丢
             return it
         }
         importItems = []; importOpen = false; importing = false
-        pendingImports.append(contentsOf: queued)
+        enqueueIngest(queued)
         app?.toast("已加入 \(queued.count) 个文件，正在后台转写…")
-        Task {
-            for p in queued { await ingestOne(p) }
-            let failed = pendingImports.filter { $0.status == .failed }.count
-            app?.toast(failed == 0 ? "导入转写完成" : "导入完成，\(failed) 个失败（点失败项可重试）")
+    }
+
+    // MARK: 转写队列（导入 / 录音 / 重试共用）
+
+    /// 转写并发上限：云端后端（MOSS / 在线 whisper）可同时跑 2 条；本地 WhisperKit 串行
+    /// （多条同时推理抢 GPU/ANE 反而更慢）。每次取活时重算，设置里换后端立即生效。
+    private var maxIngestConcurrency: Int {
+        guard let c = cfg() else { return 1 }
+        return (c.mossEnabled || c.transcribeOnline) ? 2 : 1
+    }
+
+    /// 排进转写队列：立即返回，后台按并发上限自动取活。
+    /// 录音（`enqueueRecording`）与导入共用同一条队列 → 录音停了就能马上开下一场，转写在后台排着。
+    func enqueueIngest(_ items: [ImportItem]) {
+        for it in items where !pendingImports.contains(where: { $0.id == it.id }) {
+            pendingImports.append(it)
+        }
+        ingestQueue.append(contentsOf: items)
+        pumpIngestQueue()
+    }
+
+    /// 等到有并发位再放行。给「合并录音」这类必须同步等结果（拿到成败才能决定是否归档原录音）
+    /// 的路径用：既保留 await 语义，又不越过 maxIngestConcurrency 叠加负载。
+    private func awaitIngestSlot() async {
+        while ingestRunning >= maxIngestConcurrency {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    private func pumpIngestQueue() {
+        while ingestRunning < maxIngestConcurrency, !ingestQueue.isEmpty {
+            let p = ingestQueue.removeFirst()
+            ingestRunning += 1
+            Task {
+                await ingestOne(p)
+                ingestRunning -= 1
+                if ingestQueue.isEmpty && ingestRunning == 0 {
+                    // 队列排空才汇报，避免每条都刷一次 toast
+                    let failed = pendingImports.filter { $0.status == .failed }.count
+                    app?.toast(failed == 0 ? "转写入库完成" : "转写完成，\(failed) 条失败（点失败项可重试）")
+                } else {
+                    pumpIngestQueue()   // 腾出的并发位立刻补活
+                }
+            }
+        }
+    }
+
+    /// 会议录音收尾完成 → 排队转写，**立刻返回**（录音状态机随即回 idle，可以马上开下一场）。
+    /// 混音+分轨先搬出 tmp 到 App Support：排队期间可能已在录下一场，留在 tmp 有被系统清掉的风险。
+    /// 转写失败时该项留在录音库顶部，可重试 / Finder 取回，**音频不丢**。
+    func enqueueRecording(mixed: URL, mic: URL?, sys: URL?, title: String?) {
+        let safeMixed = Self.stashAudio(mixed, into: Self.pendingRecordingsDir)
+        let name = (title?.isEmpty == false) ? title! : safeMixed.deletingPathExtension().lastPathComponent
+        var item = ImportItem(url: safeMixed, name: name, status: .queued)
+        item.source = "meeting"
+        item.title = (title?.isEmpty == false) ? title : nil
+        item.micURL = mic.map { Self.stashAudio($0, into: Self.pendingRecordingsDir) }
+        item.sysURL = sys.map { Self.stashAudio($0, into: Self.pendingRecordingsDir) }
+        // 会议名写成 sidecar：排队期间 App 退出后靠它恢复标题（否则重试只能落回文件名）。
+        if let t = item.title { try? t.write(to: Self.titleSidecar(for: safeMixed), atomically: true, encoding: .utf8) }
+        enqueueIngest([item])
+    }
+
+    private static let pendingRecordingsDir = "pending-recordings"
+    private nonisolated static func titleSidecar(for audio: URL) -> URL {
+        audio.appendingPathExtension("title")
+    }
+
+    /// 启动时回收孤儿录音：`pendingImports` 是内存态，排队/转写途中退出 App 就丢了登记，
+    /// 而音频还躺在 App Support/pending-recordings 里——用户看不见就等于丢了。这里扫出来
+    /// 登记成可重试的失败项（分轨按 v1 约定清掉，重试只走混音）。
+    func recoverOrphanRecordings() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Resound/\(Self.pendingRecordingsDir)", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return }
+        var found = 0
+        for f in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let name = f.lastPathComponent
+            if name.hasSuffix(".title") { continue }                       // sidecar，跟着混音一起处理
+            if name.hasSuffix("-mic.wav") || name.hasSuffix("-sys.wav") {  // 分轨：清掉
+                try? FileManager.default.removeItem(at: f); continue
+            }
+            guard !pendingImports.contains(where: { $0.url == f }) else { continue }
+            let sidecar = Self.titleSidecar(for: f)
+            let title = (try? String(contentsOf: sidecar, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var item = ImportItem(url: f, name: (title?.isEmpty == false) ? title! : f.deletingPathExtension().lastPathComponent,
+                                  status: .failed)
+            item.source = "meeting"
+            item.title = (title?.isEmpty == false) ? title : nil
+            item.error = "上次退出前未完成转写（音频已保住，点重试即可）"
+            pendingImports.append(item)
+            found += 1
+        }
+        if found > 0 {
+            AppLog.log("♻️ 回收 \(found) 条未完成转写的录音（App Support/pending-recordings）")
+            app?.toast("有 \(found) 条录音上次未完成转写，已放在录音库顶部可重试")
         }
     }
 
@@ -1173,9 +1275,11 @@ final class LibraryModel: ObservableObject {
         }
         let cfg = try? Config.load()
         setPendingStatus(p.id, .transcribing); setPendingError(p.id, nil)
+        // 会议录音分轨齐全 → 分开转录合并（dual-track spec）；缺轨/导入文件 → 单文件转录
+        let tracks: (mic: URL, sys: URL)? = { if let m = p.micURL, let s = p.sysURL { return (m, s) }; return nil }()
         do {
             let out = try await IngestPipeline(vaultRoot: vault)
-                .ingest(audioPath: p.url, title: p.title, source: p.source, tags: [],
+                .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
                         model: "large-v3", language: "zh", hints: [], push: false)
             if let cfg {
                 // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
@@ -1183,11 +1287,18 @@ final class LibraryModel: ObservableObject {
                 try await IndexPipeline(config: cfg).indexRecording(
                     recDir: out.recordingDir, indexPath: defaultIndexPath(), labelSpeakers: false)
             }
-            // 转录+入库完成即露出录音：可读/可搜/可问答。说话人识别(慢，占导入 ~80%)+摘要后台串行补，
+            // 转录+入库完成即露出录音：可读/可搜/可问答。说话人识别+摘要后台串行补，
             // 期间该条显示「识别说话人中…」。摘要放识别之后→摘要自带真名。
-            autoPushVault("rec: 导入 \(p.name)")
-            // 录音兜底（meeting）抢救出的临时音频，成功入库后清掉，避免 App Support 堆垃圾。
-            if p.source == "meeting" { try? FileManager.default.removeItem(at: p.url) }
+            // 注：「说话人识别占导入 ~80%」是 whisper+Sortformer 时代的旧结论，已过时——
+            // MOSS 路径下 diar 由转写一次产出，命名只做 CAM++ 声纹（20min 会实测 3.6s，占 0.8%）。
+            // 真瓶颈是 MOSS GPU 推理（占 77%），见 DECISIONS 2026-07-28「转录耗时分析」。
+            autoPushVault(p.source == "meeting" ? "rec: 会议录音 \(out.id)" : "rec: 导入 \(p.name)")
+            // 录音（meeting）的待转写混音+分轨存在 App Support，成功入库后清掉，避免堆垃圾。
+            if p.source == "meeting" {
+                for u in [p.url, p.micURL, p.sysURL, Self.titleSidecar(for: p.url)].compactMap({ $0 }) {
+                    try? FileManager.default.removeItem(at: u)
+                }
+            }
             pendingImports.removeAll { $0.id == p.id }   // 真录音已生成，移除占位
             // 增量插入这一条（免每个文件都全量扫盘 reload；文件夹/声纹库导入时不变，无需重扫）。
             if let sum = loadRecordingSummary(dir: out.recordingDir) {
@@ -1195,9 +1306,16 @@ final class LibraryModel: ObservableObject {
                 enqueueSpeakerID(sum)
             }
         } catch {
-            AppLog.error("导入转写失败「\(p.name)」(\(p.url.path))", error)
+            AppLog.error("转写入库失败「\(p.name)」(\(p.url.path))", error)
             setPendingStatus(p.id, .failed)
             setPendingError(p.id, String(describing: error))
+            // v1：失败重试只保混音——分轨清掉避免堆积（见 dual-track spec「失败重试路径」）
+            if p.source == "meeting" {
+                for u in [p.micURL, p.sysURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+                if let i = pendingImports.firstIndex(where: { $0.id == p.id }) {
+                    pendingImports[i].micURL = nil; pendingImports[i].sysURL = nil
+                }
+            }
         }
     }
 
@@ -1208,7 +1326,9 @@ final class LibraryModel: ObservableObject {
             app?.toast("源音频已不在原位置，无法重试：\(p.url.lastPathComponent)"); return
         }
         app?.toast("重新转写「\(p.name)」…")
-        Task { await ingestOne(p) }
+        setPendingStatus(p.id, .queued); setPendingError(p.id, nil)
+        ingestQueue.append(p)   // 走同一条队列：与其它在跑的转写共用并发上限，不叠加负载
+        pumpIngestQueue()
     }
 
     /// 在 Finder 中显示该项音频（失败时取回/另存原始录音）。
@@ -1220,10 +1340,9 @@ final class LibraryModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([p.url])
     }
 
-    /// 录音（Meet）转写失败兜底：把抢救出的音频登记成一个失败占位，复用导入失败行的「重试 / 在 Finder 中显示」。
-    /// 这样录好的会议即使转写翻车也**不会丢音频**，且能一键重试或取回。
+    /// 录音收尾失败兜底（拿不到混音时）：把手上的音频登记成失败占位，复用导入失败行的「重试 / Finder 取回」。
     func recordFailedRecording(url: URL, title: String?, error: String) {
-        let safe = Self.preserveFailedAudio(url)   // 临时混音 → App Support，免被系统清掉
+        let safe = Self.stashAudio(url, into: "failed-recordings")   // 临时文件 → App Support，免被系统清掉
         let name = (title?.isEmpty == false ? title! : safe.deletingPathExtension().lastPathComponent)
         var item = ImportItem(url: safe, name: name, status: .failed)
         item.error = error; item.source = "meeting"
@@ -1232,11 +1351,12 @@ final class LibraryModel: ObservableObject {
         AppLog.log("⚠️ 录音转写失败，音频已抢救到：\(safe.path)")
     }
 
-    /// 把临时目录里的录音搬到 App Support/Resound/failed-recordings/（系统不会清），返回新位置。
-    /// 搬动失败则退回原 url（至少暂时还在临时目录）。
-    private nonisolated static func preserveFailedAudio(_ src: URL) -> URL {
+    /// 把临时目录里的音频搬到 App Support/Resound/<sub>/（系统不会清），返回新位置。
+    /// 搬动失败则退回原 url（至少暂时还在临时目录）。待转写的录音必须走这里——排队期间
+    /// 可能已经在录下一场了，音频留在 tmp 有被系统清掉的风险。
+    private nonisolated static func stashAudio(_ src: URL, into sub: String) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Resound/failed-recordings", isDirectory: true)
+            .appendingPathComponent("Resound/\(sub)", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let dest = base.appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(src.lastPathComponent)")
         do { try FileManager.default.moveItem(at: src, to: dest); return dest }
@@ -1249,7 +1369,19 @@ final class LibraryModel: ObservableObject {
     private func setPendingError(_ id: UUID, _ msg: String?) {
         if let i = pendingImports.firstIndex(where: { $0.id == id }) { pendingImports[i].error = msg }
     }
-    func dismissPending(_ id: UUID) { pendingImports.removeAll { $0.id == id } }
+    /// 移除占位行。会议录音的占位是它在 UI 里的唯一登记，若把音频留在 pending-recordings，
+    /// 下次启动 `recoverOrphanRecordings` 又会把它捞回来 → 用户点了「移除」却移不掉。
+    /// 故搬去 failed-recordings（不再被回收扫到）而**不是删掉**——不主动销毁录好的会议，仍可从 Finder 取回。
+    func dismissPending(_ id: UUID) {
+        if let p = pendingImports.first(where: { $0.id == id }), p.source == "meeting",
+           FileManager.default.fileExists(atPath: p.url.path) {
+            let moved = Self.stashAudio(p.url, into: "failed-recordings")
+            try? FileManager.default.removeItem(at: Self.titleSidecar(for: p.url))
+            for u in [p.micURL, p.sysURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+            AppLog.log("🗃️ 已从列表移除录音「\(p.name)」，音频归置到：\(moved.path)")
+        }
+        pendingImports.removeAll { $0.id == id }
+    }
 
     // MARK: 播放器
 

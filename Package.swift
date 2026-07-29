@@ -12,7 +12,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.15.0"),
+        // 锁 <0.15.5：0.15.5 删掉了 Sources/FluidAudio/DownloadUtils.swift，而 Diarizer.swift 用
+        // `DownloadUtils.loadModels`（patch 版本里的 breaking change）。`from:` 会一路解析上去 →
+        // 干净机器 clone 后必编译失败。上界卡在 0.15.5 而非 exact，patch 修复仍能进来。
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", "0.15.0"..<"0.15.5"),
         .package(url: "https://github.com/apple/swift-markdown.git", from: "0.4.0"),
         // 锁 <0.10.2：0.10.2 起需 swift-tools-version 6.1（用了 6.1 才有的 withThrowingTaskGroup 无 of: 重载），
         // 当前工具链 Swift 6.0.3 编不过。0.10.1 是最后一个 swift-tools 6.0 兼容版。

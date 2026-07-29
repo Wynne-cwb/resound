@@ -27,13 +27,18 @@ public func nameSpeakersFromMossDiarization(
         throw MossError.badResponse("moss-diar.json 缺失或为空（\(rec.id)）")
     }
 
+    let tDecode = Date()
     let samples = try AudioConverter().resampleAudioFile(rec.audioURL)
+    log(String(format: "   ⏱ 整条音频解码重采样 %.1fs（%.1f min）",
+               Date().timeIntervalSince(tDecode), Double(samples.count) / 16000 / 60))
 
     // silero VAD：提声纹前清静音（与 diar 路径同款，best-effort）
     var voiced: [(start: Double, end: Double)] = []
+    let tVAD = Date()
     do {
         let vad = try await DiarModelCache.shared.vad()
         voiced = try await vad.segmentSpeech(samples).map { (Double($0.startTime), Double($0.endTime)) }
+        log(String(format: "   ⏱ VAD（声纹用）%.1fs", Date().timeIntervalSince(tVAD)))
     } catch {
         log("⚠️ VAD 不可用，跳过去静音：\(error.localizedDescription)")
     }
@@ -49,7 +54,9 @@ public func nameSpeakersFromMossDiarization(
     }
 
     // 每个 MOSS 标签 → 簇级质心（取最长的 6 段；≥0.5s 才提，短「嗯/对」附和不进声纹）
+    let tEmb = Date()
     let embedder = try await DiarModelCache.shared.embedder(model: model)
+    defer { log(String(format: "   ⏱ CAM++ 声纹提取+匹配 %.1fs", Date().timeIntervalSince(tEmb))) }
     var byLabel: [String: [SpeakerSeg]] = [:]
     for s in staging { byLabel[s.speaker, default: []].append(s) }
     func labelDur(_ segs: [SpeakerSeg]) -> Double { segs.reduce(0) { $0 + ($1.end - $1.start) } }

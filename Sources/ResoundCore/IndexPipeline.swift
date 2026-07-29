@@ -142,6 +142,7 @@ public struct IndexPipeline {
 
         // 说话人标注：配置了声纹模型 + index 已有注册声纹时，逐段识别填 person_id（缺一则跳过，不影响检索）
         var personSpans: [(start: Double, end: Double, name: String)] = []
+        let tLabel = Date()
         if labelSpeakers, let spkModel = config.speakerModel {
             let refs = index.loadSpeakerRefs()
             let audioURL = recDir.appendingPathComponent(manifest.audioFile)
@@ -153,18 +154,24 @@ public struct IndexPipeline {
                     segments: transcript.segments.map { (start: $0.start, end: $0.end) },
                     matcher: matcher, embedder: spkEmbedder)
                 let who = Set(personSpans.map { $0.name }).subtracting(["unknown"]).sorted()
-                log("  🗣 说话人标注：\(who.isEmpty ? "无匹配" : who.joined(separator: "/"))")
+                log(String(format: "  🗣 说话人标注：%@ · ⏱ %.1fs",
+                           who.isEmpty ? "无匹配" : who.joined(separator: "/"),
+                           Date().timeIntervalSince(tLabel)))
             }
         }
 
         var contexts: [Int: String] = [:]
         if enrichContext {
             let docText = transcript.segments.map { $0.text }.joined()
+            let tEnrich = Date()
             contexts = try await enrichAll(chunks: chunks, document: docText, index: index,
                 model: contextModel ?? config.contextModel, log: log)
+            log(String(format: "  ⏱ contextual 上下文 %.1fs（%d chunk × 全文 %d 字提示）",
+                       Date().timeIntervalSince(tEnrich), chunks.count, docText.count))
         }
 
         let recDate = localDate(fromISO: manifest.recordedAt)
+        let tEmbed = Date()
         for batch in chunks.chunked(into: 32) {
             let texts = batch.map { c -> String in
                 if let ctx = contexts[c.index] { return "\(ctx)\n\(c.text)" }
@@ -179,7 +186,9 @@ public struct IndexPipeline {
                     recordingDate: recDate, embedding: vec)
             }
         }
-        log("  ✓ \(manifest.id)：\(chunks.count) chunks\(enrichContext ? "（含上下文）" : "")")
+        log(String(format: "  ✓ %@：%d chunks%@ · ⏱ embed+入库 %.1fs",
+                   manifest.id, chunks.count, enrichContext ? "（含上下文）" : "",
+                   Date().timeIntervalSince(tEmbed)))
         return chunks.count
     }
 
@@ -271,10 +280,13 @@ public struct IndexPipeline {
             .map { linkedDocumentTexts(vaultRoot: $0, recordingId: manifest.id) } ?? []
         if !refDocs.isEmpty { log("📎 纳入 \(refDocs.count) 篇关联文档作为背景") }
         log("📝 生成摘要（模板：\(tmpl.name)）…")
+        let tSum = Date()
         let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel))
             .summarize(transcript: transcriptText,
                        meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers),
                        template: tmpl, referenceDocs: refDocs)
+        log(String(format: "   ⏱ 摘要 LLM %.1fs（转录 %d 字 → 摘要 %d 字，单次调用）",
+                   Date().timeIntervalSince(tSum), transcriptText.count, summary.count))
         try summary.data(using: .utf8)?.write(to: recDir.appendingPathComponent("summary.md"))
         if let indexPath {
             let idx = try Index(path: indexPath, dim: config.embeddingDim)
@@ -640,6 +652,25 @@ public struct IndexPipeline {
             }
         }
         return out.map { $0 ?? [] }
+    }
+
+    /// 清掉索引里已不在 vault 的录音（归档/手动删目录后 `index` 增量重建不会删，
+    /// 残留 chunk 会污染检索、且点击跳转是死链）。返回被清理的录音 id。CLI `index-prune` 用。
+    public func pruneOrphanRecordings(
+        vaultRoot: URL, indexPath: URL, log: (String) -> Void = { print($0) }
+    ) throws -> [String] {
+        let index = try Index(path: indexPath, dim: config.embeddingDim)
+        var onDisk = Set<String>()
+        for d in findRecordings(vaultRoot) {
+            if let m = try? parseManifest(d.appendingPathComponent("recording.yaml")) { onDisk.insert(m.id) }
+        }
+        var pruned: [String] = []
+        for recId in index.allRecordingIds() where !onDisk.contains(recId) {
+            try index.deleteRecording(id: recId)
+            pruned.append(recId)
+            log("  🧹 已清理索引残留：\(recId)")
+        }
+        return pruned
     }
 }
 

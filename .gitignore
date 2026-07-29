@@ -9,7 +9,9 @@ DerivedData/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 .swiftpm/
-Package.resolved
+# 注意：Package.resolved **要提交**（Resound 是应用不是库）。曾被 ignore，结果新用户 clone 后
+# fresh resolve 会拉到未验证的上游版本——FluidAudio 0.15.5 移除了我们在用的 DownloadUtils，
+# 于是「clone 下来就编译不过」。见 DECISIONS 2026-07-29。
 
 # Derived index (NEVER commit — rebuildable from vault)
 *.sqlite
@@ -43,3 +45,7 @@ experiments/moss-eval/REPORT.md
 experiments/moss-eval/hotwords.txt
 experiments/moss-eval/prompt*.txt
 experiments/moss-eval/.moss-api-key
+experiments/moss-eval/*.sql
+experiments/moss-eval/*.log
+experiments/moss-eval/rerun-*.sh
+experiments/moss-eval/progress-*.json
