@@ -5,6 +5,16 @@
 
 ---
 
+## 撤销「说话人名字自动进偏置词表」（2026-07-31）
+
+**决策**：移除 2026-07-02 上的那个特性（见本文件同名旧条目），并清掉词表里已积累的人名。**依据（用户判断 + 代码证据）**：①收益模糊——人名进偏置只影响拼写，但说话人归属本身已由 diarization/声纹解决，转录里人名拼错的代价低；②代价确凿——名字无上限地往 glossary.txt 里堆，直接顶破 aihubmix whisper 的 896 **字节** prompt 上限，2026-07-03 那次「转录全挂 HTTP 500」就是它引入的回归；截断护栏（`cappedPrompt`）虽在，但**挤掉的是真正的产品/技术术语**——偏置额度被人名占了，是纯亏；③人名还污染了「设置 › 专有词表」这份用户手工维护的列表（52/110 条是人名，人得在里面翻找术语）。
+
+**落地**：删 `Glossary.syncSpeakerNames`、删 `renameSpeakerInRecording` 里的 2.5 步同步块和它专用的 `vaultRoot` 参数（[SpeakerNaming.swift](../Sources/ResoundCore/SpeakerNaming.swift)，App 调用点同步简化）、删 CLI `sync-speaker-names` 及其注册、改掉 [OnlineTranscriber](../Sources/ResoundCore/OnlineTranscriber.swift) 里「自动加入的说话人名在后」这类过时注释（`cappedPrompt` **保留**——词表本身仍可能长）。README 双语删掉「命名的人名会自动加入专有词表」那句 + CLI 表那一行。
+
+**数据清理**：vault `glossary.txt` 110 条 → 58 条，移除 52 条纯偏置人名。**判定人名靠索引取证而非拍脑袋**：`sqlite3 index.sqlite "select name from speaker_refs"` 拿到 46 个已注册说话人做对照，剩下的中文昵称（锐珊/凯哥/源神…）是用户手写但同样是人名。**保留 3 条带手写变体的人名**（`Christine = Question`、`Abby = Abi`、`聪哥 = 冲哥`，用户拍板）——它们是在修真实错听、有独立价值；`CR` 虽也在 speaker_refs 里但按术语（code review）保留。**验证**：`swift build` 全绿、`resound --help` 里 `sync-speaker-names` 已消失、全库 grep 无残留引用。
+
+---
+
 ## MOSS 静默截断：分片阈值 80min→30min（推翻 07-28 的决策前提）+ 整合外部 PR #1（2026-07-29）
 
 **触发**：外部贡献者 [PR #1](https://github.com/Wynne-cwb/resound/pull/1)（aniu201701，07-24 提）报告「80+ 分钟走 MOSS 必失败」，含 8 项修复。评估时做了全库取证，**结论比 PR 说的严重**。

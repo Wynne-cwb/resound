@@ -19,7 +19,7 @@ public struct OnlineTranscriber {
 
     /// 把词表偏置 prompt 截到 API 上限内。**按 UTF-8 字节数算**（aihubmix 的 896 上限是字节数，不是字符数——
     /// 中文一字 3 字节，843 字符可达 915 字节顶破限制）。逐词累加、在 ", " 边界切、不切碎词；
-    /// 保留靠前的词——glossary.txt 里用户手写词在前、自动加入的说话人名在后，故优先保手写词。
+    /// 保留靠前的词——glossary.txt 里越靠前的词越早写入，超长时优先保留。
     static func cappedPrompt(_ s: String, maxBytes: Int = 880) -> String {
         guard s.utf8.count > maxBytes else { return s }
         var out = "", bytes = 0
@@ -50,7 +50,7 @@ public struct OnlineTranscriber {
         ]
         if let language, !language.isEmpty { fields.append(("language", language)) }
         // whisper prompt 有长度上限（aihubmix 实测 896 字符，超了整个请求 HTTP 500 失败）。
-        // 词表变长（尤其自动加入的说话人名字）会顶破 → 在逗号边界截断，保留靠前的词（用户手写词优先）。
+        // 词表变长会顶破 → 在逗号边界截断，保留靠前的词。
         if let prompt, !prompt.isEmpty {
             fields.append(("prompt", Self.cappedPrompt(prompt)))
         }

@@ -949,10 +949,9 @@ final class LibraryModel: ObservableObject {
         Task {
             defer { namingInProgress = nil }
             do {
-                let vroot = cfg()?.vaultPath.map { URL(fileURLWithPath: $0) }
                 let msg = try await renameSpeakerInRecording(
                     rec: rec, oldLabel: label, newName: name, enroll: remember,
-                    speakerModel: model, indexPath: defaultIndexPath(), embeddingDim: d, vaultRoot: vroot)
+                    speakerModel: model, indexPath: defaultIndexPath(), embeddingDim: d)
                 refreshDetail()
                 knownPeople = ((try? Index(path: defaultIndexPath(), dim: d))?.loadSpeakerRefs().map { $0.name } ?? []).sorted()
                 buildRoster()

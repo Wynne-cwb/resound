@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, SyncSpeakerNames.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
     )
 }
 
@@ -1075,28 +1075,6 @@ struct RecordMeeting: AsyncParsableCommand {
                     model: model, language: language, hints: hint, push: push)
         for u in [cap.mixed, cap.mic, cap.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
         print("✅ 完成：\(out.id)")
-    }
-}
-
-/// resound sync-speaker-names —— 把已注册说话人名字回填进 vault 的 glossary.txt 偏置词表
-struct SyncSpeakerNames: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "sync-speaker-names",
-        abstract: "把索引里已注册的说话人名字加入 glossary.txt 偏置词表（去重）；命名说话人时也会自动加入")
-
-    @Option(name: .long, help: "vault 根目录")
-    var vault: String
-
-    @Option(name: .long, help: "索引文件路径（默认 App Support）")
-    var index: String?
-
-    func run() async throws {
-        let cfg = try Config.load()
-        let indexURL = index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath()
-        let names = (try? Index(path: indexURL, dim: cfg.embeddingDim))?.loadSpeakerRefs().map { $0.name } ?? []
-        guard !names.isEmpty else { print("索引里没有已注册说话人"); return }
-        let added = Glossary.syncSpeakerNames(vaultRoot: URL(fileURLWithPath: vault), names: names)
-        print(added.isEmpty ? "✅ 词表已包含全部 \(names.count) 个说话人，无需新增"
-                            : "✅ 已加入 \(added.count) 个说话人到词表偏置：\(added.joined(separator: "、"))")
     }
 }
 

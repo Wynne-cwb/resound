@@ -252,7 +252,6 @@ public func identifySpeakers(_ rec: RecordingSummary, model: String,
 public func renameSpeakerInRecording(rec: RecordingSummary, oldLabel: String, newName: String,
                                      enroll: Bool, speakerModel: String?,
                                      indexPath: URL?, embeddingDim: Int,
-                                     vaultRoot: URL? = nil,
                                      log: (String) -> Void = { print($0) }) async throws -> String {
     let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty else { return "空名字，跳过" }
@@ -274,22 +273,6 @@ public func renameSpeakerInRecording(rec: RecordingSummary, oldLabel: String, ne
                 try? idx.setChunkPerson(id: c.id, person: name)
             }
         }
-    }
-
-    // 2.5) 把真名同步进 glossary.txt 偏置词表（会议里常念到人名 → 偏置让转录拼对）。
-    //      在 enroll 早退之前做，保证任何命名路径（记不记声纹）都会加入；顺带回填已注册的其他人名。
-    let vroot: URL? = vaultRoot ?? {
-        let v = rec.dir.deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()   // <vault>/recordings/YYYY/MM/<id> → 上溯 4 级
-        return FileManager.default.fileExists(atPath: v.appendingPathComponent("resound.yaml").path) ? v : nil
-    }()
-    if let vroot {
-        var names = [name]
-        if let indexPath, let idx = try? Index(path: indexPath, dim: embeddingDim) {
-            names.append(contentsOf: idx.loadSpeakerRefs().map { $0.name })
-        }
-        let added = Glossary.syncSpeakerNames(vaultRoot: vroot, names: names)
-        if !added.isEmpty { log("  📝 说话人已加入词表偏置：\(added.joined(separator: "、"))") }
     }
 
     // 3) 声纹注册（可选）
