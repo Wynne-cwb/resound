@@ -175,7 +175,7 @@ public struct Summarizer {
             直接输出纪要正文本身，不要任何开场白、承接语或客套话（例如「好的」「以下是」「这是根据您提供的转录内容整理的会议纪要」之类一律不要），\
             不要复述本提示，不要用代码块包裹整篇，结尾也不要追加说明。
             """,
-            user: filled, maxTokens: 3000)
+            user: filled)
     }
 }
 
@@ -217,7 +217,7 @@ public func assistTemplatePrompt(mode: TemplateAssistMode, intent: String, base:
     \(templatePlaceholderBlock)
     4. 只输出提示词正文，不要任何解释、标题或代码块。
     """
-    var out = (try? await chat.complete(system: system, user: instr, maxTokens: 1200, temperature: 0.4)) ?? ""
+    var out = (try? await chat.complete(system: system, user: instr, temperature: 0.4)) ?? ""
     out = out.trimmingCharacters(in: .whitespacesAndNewlines)
     if out.isEmpty { out = templateAssistFallback(mode: mode, intent: intentTrim, base: base) }
     // 兜底：内置占位符必须在（缺 {transcript} 视为没注入，补一段标准块）

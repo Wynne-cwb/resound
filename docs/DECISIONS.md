@@ -5,6 +5,46 @@
 
 ---
 
+## 摘要空白事故：`max_tokens` 被思维链吃光，空结果静默落盘（2026-08-31）
+
+**触发**：用户报告两场会（07-31 Team Sprite / 08-28 A-Frontend）的摘要是空白。查下来 `summary.md` 是 **0 字节**，但 `transcript.json` 正常、无任何报错。
+
+### 取证：不是生成失败，是模型只吐了思维链
+
+用同参数重放 08-13 那场（同样 0 字节）：
+
+| max_tokens | finish_reason | completion_tokens | 其中 reasoning | content |
+|---|---|---|---|---|
+| 3000（当时线上值） | **length** | 3000 | **3000（100%）** | **0 字** |
+| 16000 | stop | 4981 | 2609 | 4884 字 |
+| **不发送该字段** | stop | 8361 | 6478 | 3915 字 |
+
+**根因链**：`deepseek-v4-pro` / `-flash` 都是推理模型，DeepSeek 把 `reasoning_content` 和 `content` 算进**同一份** `max_tokens` 预算 → 思考先花光 3000 → 正文一个字吐不出来 → **HTTP 仍是 200**，`content` 是空串 → [ChatClient](../Sources/ResoundCore/ChatClient.swift) 原样返回 → [IndexPipeline.summarizeRecording](../Sources/ResoundCore/IndexPipeline.swift) 不校验就 `write` → 0 字节文件，索引照常更新，UI 无任何异常标记。
+
+**为什么是这个时间点爆发**：`summary-templates.json` 的「通用模板」在 **07-31 13:45** 换成 3427 字符的专业模板（多板块 + 表格 + 内部检查流程 + detailed 1000–2000 字），思维链随之变长，3000 的预算就此不够用。
+
+**范围远大于「两条空白」**：模板换新后生成的 **17 条全部中招**——6 条 0 字节，另外 11 条是**句中硬切断的残缺纪要**（08-27 结尾停在「包括 Ticket、R4C、Source、Gowmos、Shopify 等，」），而这 11 条肉眼看「有内容」，是最隐蔽的部分。同一个 bug 还有两处早被误诊的表现：①[AutoClassifier](../Sources/ResoundCore/AutoClassifier.swift) 里「推理模型 temp 0 偶发返回空 → 重试一次」的注释，实为 `maxTokens: 200` 被思维链吃光；②`suggestMergedTitle` 给 60 token，**实测 100% 失败**、一直静默走 fallback 拼接原标题。
+
+### 决策：删掉所有「按预计输出长度估的」`max_tokens`，并把截断当失败
+
+**①不发送 `max_tokens`**（`Int? = nil`，nil 则不放进 payload）而不是改成某个大数字：服务端按模型上限放行，实测单次到 8361 token 未截；换 provider 也不会因为猜的数字被拒。**用户的判断是对的——这是一次请求就该完成的事，不需要循环重试或分片**。
+
+**②截断必须抛错**（新增 `ChatError.truncated`）：`finish_reason == "length"` 或正文为空一律抛，绝不返回空串。这才是事故的真正教训——数值设错只是慢一点贵一点，**护栏缺失才让错误静默了三个月**。`ChatClient` 此前把 `finish_reason` 整个丢掉，等于把服务端明说的「我没说完」扔进垃圾桶。
+
+**③`timeoutInterval` 120s → 300s**：非流式响应在生成完之前不回任何数据，等待间隔≈整次生成耗时。不限上限后实测单条摘要要 **105.7s**，120s 余量太薄。
+
+**④`enrichAll` 单 chunk 降级不中断**（用户拍板）：contextual 是可选增强，此前 `try await` 在 TaskGroup 里，一次网络抖动就让整条录音索引失败；改为失败退化成「无上下文」+ 计数告警，空结果不入缓存（下次重建可再试）。
+
+### 落地与验证
+
+清掉 11 个调用点的估值（`60 / 200 / 500 / 1500 / 3000 / 4096 / 8192`）：QueryPlanner、MarkdownTidier、TranscriptCorrector、Synthesizer、ContextualEnricher、Summarizer×2、IndexPipeline×2、AutoClassifier×2、LibraryModel。逐点核过失败路径：QueryPlanner/MarkdownTidier 自带 catch 回退，TranscriptCorrector 每批 `try?` 不中断，AutoClassifier/标题合并上层 `try?` 走 fallback，摘要与 Ask 正是要让错误浮到 UI。
+
+`swift build` 全绿。单条端到端验证 08-28：**0 字节 → 7578 字节（3364 字）、结尾完整**。17 条按各自原模板（15 条 general / 2 条 t1782268540）批量重跑。
+
+**教训（下次遇到「AI 功能偶发返回空」先查这个）**：推理模型下，任何按「这个任务大概输出多长」估的 `max_tokens` 都是定时炸弹，且失效方式是静默的。**HTTP 200 不等于成功——要看 `finish_reason`**。
+
+---
+
 ## 撤销「说话人名字自动进偏置词表」（2026-07-31）
 
 **决策**：移除 2026-07-02 上的那个特性（见本文件同名旧条目），并清掉词表里已积累的人名。**依据（用户判断 + 代码证据）**：①收益模糊——人名进偏置只影响拼写，但说话人归属本身已由 diarization/声纹解决，转录里人名拼错的代价低；②代价确凿——名字无上限地往 glossary.txt 里堆，直接顶破 aihubmix whisper 的 896 **字节** prompt 上限，2026-07-03 那次「转录全挂 HTTP 500」就是它引入的回归；截断护栏（`cappedPrompt`）虽在，但**挤掉的是真正的产品/技术术语**——偏置额度被人名占了，是纯亏；③人名还污染了「设置 › 专有词表」这份用户手工维护的列表（52/110 条是人名，人得在里面翻找术语）。

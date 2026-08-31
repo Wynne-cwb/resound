@@ -23,7 +23,7 @@ public struct ContextualEnricher {
 
         用一两句话给出该片段的背景上下文，只输出上下文本身。
         """
-        let raw = try await chat.complete(system: system, user: user, maxTokens: 1500)
+        let raw = try await chat.complete(system: system, user: user)
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

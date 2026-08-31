@@ -30,6 +30,6 @@ public struct Synthesizer {
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n"
         let user = "\(histBlock)当前问题：\(query)\n\n检索到的片段：\n\(src)\n请基于以上片段回答，并用 [编号] 标注引用。"
-        return try await chat.complete(system: system, user: user, maxTokens: 3000)
+        return try await chat.complete(system: system, user: user)
     }
 }

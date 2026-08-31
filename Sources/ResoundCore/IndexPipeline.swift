@@ -420,7 +420,7 @@ public struct IndexPipeline {
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
         let text = try await chat.complete(system: system,
-            user: "\(histBlock)用户问题：\(question)\n\n\(blocks.joined(separator: "\n\n"))", maxTokens: 3000)
+            user: "\(histBlock)用户问题：\(question)\n\n\(blocks.joined(separator: "\n\n"))")
         return AnswerResult(text: text, plan: plan, hits: allHits, digestRecordings: [])
     }
 
@@ -566,7 +566,7 @@ public struct IndexPipeline {
         let hist = renderHistory(history)
         let histBlock = hist.isEmpty ? "" : "对话历史：\n\(hist)\n\n"
         return try await chat.complete(system: system,
-            user: "\(histBlock)用户问题：\(question)\n\n材料：\n\(source)", maxTokens: 3000)
+            user: "\(histBlock)用户问题：\(question)\n\n材料：\n\(source)")
     }
 
     /// 把片段正文压到 max 字以内（去换行），避免 digest 材料过度膨胀。
@@ -608,23 +608,28 @@ public struct IndexPipeline {
         guard !todo.isEmpty else { return out }
         log("  🧠 生成上下文 \(todo.count)/\(chunks.count) chunk（\(model)）…")
 
+        var failed = 0
         for slice in todo.chunked(into: 4) {   // 限并发 4，文档 prefix 命中 DeepSeek 缓存
             try await withThrowingTaskGroup(of: (Int, String, String).self) { group in
                 for c in slice {
                     let text = c.text
                     let idx = c.index
                     group.addTask {
-                        let ctx = try await enricher.context(document: document, chunk: text)
+                        // contextual 是可选增强：单个 chunk 失败就退化成「没有上下文」，
+                        // 不该让整条录音的索引跟着挂掉（此前一次网络抖动即中断全场）。
+                        let ctx = (try? await enricher.context(document: document, chunk: text)) ?? ""
                         return (idx, ctx, text)
                     }
                 }
                 for try await (idx, ctx, text) in group {
+                    guard !ctx.isEmpty else { failed += 1; continue }   // 空不入缓存，下次重建可再试
                     out[idx] = ctx
                     try? index.setCachedContext(
                         hash: chunkHash(model: model, text: text), context: ctx, model: model)
                 }
             }
         }
+        if failed > 0 { log("  ⚠️ \(failed)/\(todo.count) chunk 上下文增强失败，已按无上下文入库") }
         return out
     }
 

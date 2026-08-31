@@ -87,7 +87,7 @@ public struct TranscriptCorrector {
             .joined(separator: "\n")
         // 温度从 0 微调到 0.3：纯 0 太死板、不敢碰可疑的英文专名错听；0.3 给一点判断空间，
         // 又靠下方覆盖率闸 + 「拿不准就别改」约束兜住对齐与口语风格。
-        let out = try await chat.complete(system: system, user: user, maxTokens: 4096, temperature: 0.3)
+        let out = try await chat.complete(system: system, user: user, temperature: 0.3)
 
         var map: [Int: String] = [:]
         for raw in out.split(whereSeparator: \.isNewline) {

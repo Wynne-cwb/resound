@@ -48,7 +48,7 @@ public struct AutoClassifier {
         录音摘要：
         \(summary.prefix(maxContentChars))
         """
-        let raw = try await chat.complete(system: system, user: user, maxTokens: 200, temperature: 0)
+        let raw = try await chat.complete(system: system, user: user, temperature: 0)
         guard let obj = parseJSONObject(raw),
               let action = (obj["action"] as? String)?.lowercased() else { return nil }
         switch action {
@@ -94,9 +94,10 @@ public struct AutoClassifier {
         文档正文：
         \(content.prefix(maxContentChars))
         """
-        // 空结果对有主题的文档应是罕见例外；推理模型在 temp 0 下仍偶发返回空 → 空则重试一次兜底。
+        // 空结果对有主题的文档应是罕见例外，重试一次兜底。
+        // （曾以为是「推理模型 temp 0 偶发返回空」，实为这里写死 maxTokens: 200 被思维链吃光，已随根因移除。）
         for attempt in 0..<2 {
-            let raw = try await chat.complete(system: system, user: user, maxTokens: 200, temperature: 0)
+            let raw = try await chat.complete(system: system, user: user, temperature: 0)
             let out = parseTagSuggestions(raw, existingTags: existingTags)
             if !out.isEmpty || attempt == 1 { return out }
         }

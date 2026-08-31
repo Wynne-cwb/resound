@@ -114,7 +114,7 @@ public struct QueryPlanner {
         let hist = renderHistory(history)
         let userMsg = hist.isEmpty ? question : "对话历史：\n\(hist)\n当前问题：\(question)"
         do {
-            let raw = try await chat.complete(system: system, user: userMsg, maxTokens: 500)
+            let raw = try await chat.complete(system: system, user: userMsg)
             return dropFutureRange(parse(raw, fallback: question), today: today)
         } catch {
             return Plan(query: question, dateFrom: nil, dateTo: nil)

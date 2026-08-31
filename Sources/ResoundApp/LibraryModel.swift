@@ -846,7 +846,7 @@ final class LibraryModel: ObservableObject {
         let list = titles.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         let sys = "你把多个会议录音标题合并成一个简洁、准确的新标题。只输出标题本身，不要解释、不要引号、不超过 30 字。"
         let user = "这些录音将被合并成一条，请给合并后的标题：\n\(list)"
-        guard let out = try? await chat.complete(system: sys, user: user, maxTokens: 60, temperature: 0.3) else { return fallback }
+        guard let out = try? await chat.complete(system: sys, user: user, temperature: 0.3) else { return fallback }
         let t = out.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
         return t.isEmpty ? fallback : t
     }

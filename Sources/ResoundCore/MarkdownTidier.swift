@@ -63,7 +63,7 @@ public struct MarkdownTidier {
         实质内容一字不丢，但版式噪声该删就删。直接输出整理后的 Markdown，不要任何开场白、解释或代码围栏。
         """
         do {
-            let out = try await chat.complete(system: system, user: batch, maxTokens: 8192, temperature: 0.3)
+            let out = try await chat.complete(system: system, user: batch, temperature: 0.3)
             let cleaned = Self.stripCodeFence(out).trimmingCharacters(in: .whitespacesAndNewlines)
             if cleaned.count < base.count / 2 { return batch }   // 吞内容/截断 → 回退本批
             return cleaned
