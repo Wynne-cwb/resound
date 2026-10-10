@@ -1678,3 +1678,43 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **生效路径**：改动只在**新写入**时套开放 ACL，旧 item 不会自己变。让用户打开新打包 App → 设置›外部 MCP 把 Notion **断开重连一次**（走一次 save = delete 旧 item + add 开放 ACL）→ 之后重 build/重启/续 token 都不再弹。
 
 **验证**：编译通过、`bundle-app.sh` 打包 `Resound Dev` 签名完成。真机「重连后不再弹」待用户确认。README 双语无需改（"tokens live in the Keychain / 令牌存 Keychain" 仍成立，未新增/改动用户可见能力）。**待 commit。**
+
+
+## 10/08 DeepSeek ~655 次请求溯源 + 断网不回退 Whisper + LLM 用量账本（2026-10-10）
+
+**溯源（代码逐点核算，无请求级日志）**：10/08 入库 4 场会——每场 = AI 校对 ⌈段数/40⌉ 批 + contextual 增强每 chunk 1 次（整篇转录做前缀）+ 摘要 1 + 文件夹建议 ≤1。合计 ≈455：校对 19+16+10+**81**、增强 52+91+39+**141**。**Platform 周会一场 ~222 次**：19:31:58 断网（`-1009`）→ MOSS submit 失败 → 回退 whisper 双轨 → 3218 段 2.6s 碎句（mic 1369 + system 1849）→ 校对批次 ×5、chunk 也更多；且该场摘要缺失。余下 ~200 次本地无从归因：ChatClient 无重试；Claude Code 会话里 0 次 `search_meetings`（MCP 检索 `rerank:true` 每次 = 1 次 DeepSeek，Codex/Desktop 调用未覆盖）。**教训**：没有请求级账本就只能事后反推——这正是补 LLMUsageLog 的原因。
+
+**决策 1：网络类失败不回退 Whisper**（用户 10/10 拍板）。依据：断网是瞬时状态，回退 whisper 质量更差（碎句、无说话人联合建模）且 LLM 调用暴涨。实现：
+- `NetworkWait.isConnectivityError`：URLError 的断网/DNS/连不上主机/超时/TLS 失败；服务端 HTTP 错误不算。
+- `ConnectivityPatience`：系统路径离线 → `NWPathMonitor` 无限期等待恢复（不计次）；路径在线却连不上 → 15s→2min 退避，12 次（约 20min）后抛原错。
+- MOSS submit：等网后重提交；poll：**保留 call_id 续轮询**（服务端 GPU 照跑），离线时长顺延 deadline。
+- `ingest`/`retranscribe`：网络类错误 rethrow（队列项失败可重试，音频在 pending-recordings 不丢），**不回退**；其它 MOSS 错误仍回退 whisper（建议默认，未改）。
+- App：`ImportItem.Status.waitingNetwork`，行内显示「网络已断开，等待恢复后继续 MOSS 转写…」。
+- 已知边界：MossDeployer 部署自检也走同一 patience（端点不可达时最长 ~20min 才报错）；Modal call 结果保留期未核实，超长断网后 poll 若拿到 HTTP 错误会按服务端错误回退 whisper。
+
+**决策 2：先埋点再降耗**（遵循「性能优化先埋点」）。`ChatClient` 每次请求（含失败/断网）写 `llm-usage.jsonl`：purpose（correct/context/summary/rerank/plan/answer/classify/tidy/merge-title/template-assist）、`prompt_cache_hit/miss_tokens`、`completion_tokens`、`reasoning_tokens`、耗时；只记计数不记内容。CLI `resound llm-usage [--day]` 按用途汇总。写入用 `queue.sync`——`async` 时 CLI 进程退出前来不及落盘（冒烟时实测漏记）。
+
+**决策 3：contextual 增强缓存预热**（零质量影响）。DeepSeek V4 磁盘缓存规则（官方 kv_cache 文档）：缓存单元需**完整匹配**；公共前缀要在**两个请求完成后**才被识别持久化。原实现一上来 4 并发 → 前 4 次整篇转录全价。改为前 2 条串行、其余 4 并发。
+
+**新发现（待拍板，未改）**：
+- DeepSeek 思维模式**默认开启**（effort=high），且思维模式下 **`temperature` 被忽略**——校对的 0.3、其它的 0 都不生效。冒烟：classify 输出 193 token 中 169 是思维链（88%）。可对机械任务传 `{"thinking":{"type":"disabled"}}`（增强/分类/合并标题/rerank/plan），校对是否关需 A/B。
+- contextual 增强成本 = chunk 数 × 整篇转录；最大杠杆是**一次请求处理 K 个 chunk**（请求数与输入 token 均 ÷K），有轻微质量风险。
+- 校对按固定 40 段分批对 whisper 碎句极不划算，可改按字数分批。
+
+
+## LLM 降耗三项落地 + A/B 结论（2026-10-10，接上条「待拍板」）
+
+用户拍板「都做」，按「质量>速度」每项先用 `resound llm-bench` 拿真实录音 A/B，再决定上不上：
+
+| 项 | A/B 证据 | 结论 |
+|---|---|---|
+| contextual 增强：8 chunk/请求 + 关思维链 | 1738 迁移会 16 chunk：请求 16→2，输出 7876→480 token（旧 89% 是思维链），输入 103k→15k。初版批量 prompt 丢了全局背景（「继续讨论…」），加「每条自带整篇大背景、即使重复也写全」后与逐条版对齐 | **上线**。生产路径（scratch 索引）39 chunk=5 请求、缓存命中≈80%、9.1s、39/39 有上下文；批内缺失的单条补跑 |
+| 校对：按 2000 字/≤120 段分批（原固定 40 段） | MOSS 200 段：5→3 批，改动质量相当；whisper 碎句 300 段：8→3 批，改动 11→20 且更准（WhatsApp/拉齐/确实/QA），每批上下文更多 | **上线**（13→6 请求，输出 108.7k→68.7k） |
+| 校对关思维链 | MOSS 改 0 段、whisper 改 1 段——几乎不纠错 | **不上**，保留思维链 |
+| 查询规划关思维链 | 「上周」（今天周六 10-10）解析成本周 10-05~11（应为 09-28~10-04）；「昨天那场会」shape/source 判错 | **不上** |
+| 重排关思维链 | 「老客户迁移时间节点」top5 只重合 3/5，丢了带具体日期的片段、换进无关 action item | **不上** |
+| 分类（文件夹）关思维链 | Working Group 会被提议新建「知识库建设」，用户实际归在「AI-Native Delivery」；开思维链 2/2 判对 | **不上**（tag 关后 3/3 稳定且同结果，但单次调用省得少，统一不动） |
+| 合并标题关思维链 | 低频、未 A/B | **不动** |
+
+**原则沉淀**：思维链对「判断类」任务（时间换算、相关度、归类、错听纠正）是真有用的；只对「复述/概括类」高频任务（contextual 增强）关掉。`ChatClient(thinking:)` 只在 DeepSeek 端点发送（严格 OpenAI 兼容服务会拒未知字段）；账本里关思维链的请求记为 `<purpose>/nothink` 便于对比。
+**新坑**：思维模式下 `temperature` 被服务端忽略——AutoClassifier 注释里「temp 0 仍有采样方差」的真因就是它。

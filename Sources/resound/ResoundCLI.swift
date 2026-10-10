@@ -7,8 +7,156 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
     )
+}
+
+/// resound llm-usage —— summarize the per-request LLM ledger (llm-usage.jsonl) by purpose
+struct LLMUsage: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "llm-usage",
+        abstract: "按用途汇总 LLM 请求数与 token（含 DeepSeek 缓存命中），数据来自 llm-usage.jsonl")
+
+    @Option(name: .long, help: "只看某天/某时段（本地时间前缀，如 2026-10-08 或 2026-10-08T19）；缺省=全部")
+    var day: String?
+
+    func run() throws {
+        let entries = LLMUsageLog.load(prefix: day)
+        guard !entries.isEmpty else {
+            print("（无记录：\(LLMUsageLog.fileURL.path)）"); return
+        }
+        struct Agg { var n = 0, failed = 0, hit = 0, miss = 0, out = 0, reasoning = 0 }
+        var by: [String: Agg] = [:]
+        for e in entries {
+            var a = by[e.purpose, default: Agg()]
+            a.n += 1
+            if e.status != 200 { a.failed += 1 }
+            a.hit += e.cacheHitTokens ?? 0
+            a.miss += e.cacheMissTokens ?? (e.promptTokens ?? 0)
+            a.out += e.completionTokens ?? 0
+            a.reasoning += e.reasoningTokens ?? 0
+            by[e.purpose] = a
+        }
+        func k(_ v: Int) -> String { v >= 10_000 ? String(format: "%.1fk", Double(v) / 1000) : "\(v)" }
+        print("用途".padding(toLength: 28, withPad: " ", startingAt: 0)
+              + "请求  失败   输入命中   输入未命中  命中率   输出(含思维链)  思维链")
+        var total = Agg()
+        for (p, a) in by.sorted(by: { $0.value.n > $1.value.n }) {
+            let rate = a.hit + a.miss > 0 ? Double(a.hit) / Double(a.hit + a.miss) * 100 : 0
+            print(p.padding(toLength: 28, withPad: " ", startingAt: 0)
+                  + String(format: "%4d  %4d  %9@  %9@  %5.1f%%  %12@  %9@",
+                           a.n, a.failed, k(a.hit), k(a.miss), rate, k(a.out), k(a.reasoning)))
+            total.n += a.n; total.failed += a.failed; total.hit += a.hit; total.miss += a.miss
+            total.out += a.out; total.reasoning += a.reasoning
+        }
+        print("合计 \(total.n) 次请求（失败 \(total.failed)）· 输入 \(k(total.hit + total.miss))（命中 \(k(total.hit))）· 输出 \(k(total.out))（思维链 \(k(total.reasoning))）")
+    }
+}
+
+/// resound llm-bench —— A/B the LLM cost optimizations on real data. Read-only: no cache, no writes.
+/// Every request lands in llm-usage.jsonl under a "bench-*" purpose, so `resound llm-usage` compares them.
+struct LLMBench: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "llm-bench",
+        abstract: "调试：用真实录音 A/B 对比 LLM 降耗方案（context / correct / plan / rerank），只读不写盘")
+
+    @Argument(help: "context | correct | plan | rerank")
+    var task: String
+
+    @Option(name: .long, help: "vault 根目录（context/correct 必填）")
+    var vault: String?
+
+    @Option(name: .long, help: "录音 id（context/correct 必填）")
+    var id: String?
+
+    @Option(name: .long, help: "context：取前 N 个 chunk；correct：取前 N 段")
+    var limit: Int = 16
+
+    @Option(name: .long, parsing: .upToNextOption, help: "plan/rerank：要测的问题")
+    var q: [String] = []
+
+    func run() async throws {
+        let cfg = try Config.load()
+        func chat(_ purpose: String, thinking: Bool?) -> ChatClient {
+            ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: purpose, thinking: thinking)
+        }
+        func transcript() throws -> (RecordingSummary, Transcript) {
+            guard let vault, let id else { throw ValidationError("需要 --vault 与 --id") }
+            guard let rec = listRecordings(vaultRoot: URL(fileURLWithPath: vault)).first(where: { $0.id == id }) else {
+                throw ValidationError("没找到录音：\(id)")
+            }
+            let data = try Data(contentsOf: rec.dir.appendingPathComponent("transcript.json"))
+            return (rec, try JSONDecoder().decode(Transcript.self, from: data))
+        }
+        switch task {
+        case "context":
+            let (_, t) = try transcript()
+            let doc = t.segments.map(\.text).joined()
+            let chunks = Array(Chunker().chunk(t).prefix(limit)).map(\.text)
+            let old = ContextualEnricher(chat: ChatClient(config: cfg, modelOverride: cfg.contextModel,
+                                                          purpose: "bench-context-old"))
+            let new = ContextualEnricher(chat: ChatClient(config: cfg, modelOverride: cfg.contextModel,
+                                                          purpose: "bench-context-new", thinking: false))
+            var a: [String] = []
+            for c in chunks { a.append((try? await old.context(document: doc, chunk: c)) ?? "（失败）") }
+            var b: [String?] = []
+            let k = IndexPipeline.contextBatchSize
+            for batch in stride(from: 0, to: chunks.count, by: k).map({ Array(chunks[$0..<min($0 + k, chunks.count)]) }) {
+                b += (try? await new.contexts(document: doc, chunks: batch)) ?? Array(repeating: nil, count: batch.count)
+            }
+            for i in chunks.indices {
+                print("── chunk \(i + 1)：\(chunks[i].prefix(60))…")
+                print("   旧(逐条+思维链)：\(a[i])")
+                print("   新(批量+无思维)：\(b[i] ?? "（缺失→生产中会单条补跑）")")
+            }
+        case "correct":
+            let (_, t) = try transcript()
+            let sample = Transcript(language: t.language, segments: Array(t.segments.prefix(limit)))
+            let variants: [(String, TranscriptCorrector)] = [
+                ("old 40段+思维链", TranscriptCorrector(chat: chat("bench-correct-old", thinking: nil),
+                                                    maxBatchChars: .max, maxBatchSegments: 40)),
+                ("new 2000字+思维链", TranscriptCorrector(chat: chat("bench-correct-chars", thinking: nil))),
+                ("new 2000字+无思维", TranscriptCorrector(chat: chat("bench-correct-chars", thinking: false))),
+            ]
+            var results: [(String, Transcript, Int)] = []
+            for (name, c) in variants {
+                let (fixed, n) = try await c.correct(sample, log: { _ in })
+                results.append((name, fixed, n))
+                print("▶︎ \(name)：改动 \(n) 段，批次 \(c.makeBatches(sample.segments).count)")
+            }
+            for (i, seg) in sample.segments.enumerated() {
+                let outs = results.map { $0.1.segments[i].text }
+                guard outs.contains(where: { $0 != seg.text }) else { continue }
+                print("── [\(seg.id)] 原文：\(seg.text)")
+                for (r, o) in zip(results, outs) where o != seg.text { print("   \(r.0)：\(o)") }
+            }
+        case "plan":
+            let qs = q.isEmpty ? ["上周关于 OS 迁移讨论了什么", "十月以来 Mason 提过哪些风险", "最近 returns 通知渲染迁移的现状"] : q
+            for question in qs {
+                let p1 = await QueryPlanner(chat: chat("bench-plan-old", thinking: nil)).plan(question)
+                let p2 = await QueryPlanner(chat: chat("bench-plan-new", thinking: false)).plan(question)
+                print("── \(question)")
+                for (n, p) in [("思维链", p1), ("无思维", p2)] {
+                    print("   \(n)：shape=\(p.shape.rawValue) query=\(p.query) date=\(p.dateFrom ?? "-")~\(p.dateTo ?? "-") speakers=\(p.speakers ?? []) source=\(p.source.rawValue) recency=\(p.recency)")
+                }
+            }
+        case "rerank":
+            let qs = q.isEmpty ? ["Returns 通知渲染迁移方案", "MOSS 转写截断问题", "迁移给老客户的时间节点"] : q
+            for question in qs {
+                let cands = try await IndexPipeline(config: cfg).search(query: question, indexPath: defaultIndexPath(),
+                                                                        topK: 15, rerank: false)
+                let r1 = try await Reranker(chat: ChatClient(config: cfg, modelOverride: cfg.rerankModel,
+                                                             purpose: "bench-rerank-old")).rerank(query: question, candidates: cands, topK: 5)
+                let r2 = try await Reranker(chat: ChatClient(config: cfg, modelOverride: cfg.rerankModel,
+                                                             purpose: "bench-rerank-new", thinking: false)).rerank(query: question, candidates: cands, topK: 5)
+                let ids1 = r1.map(\.rowid), ids2 = r2.map(\.rowid)
+                print("── \(question)：top5 重合 \(Set(ids1).intersection(ids2).count)/5")
+                print("   思维链：\(ids1)\n   无思维：\(ids2)")
+                for h in r2 where !ids1.contains(h.rowid) { print("   仅无思维选中 #\(h.rowid)：\(h.text.prefix(70))") }
+                for h in r1 where !ids2.contains(h.rowid) { print("   仅思维链选中 #\(h.rowid)：\(h.text.prefix(70))") }
+            }
+        default:
+            throw ValidationError("task 只能是 context | correct | plan | rerank")
+        }
+    }
 }
 
 /// resound retranscribe —— 原地重转录一条已入库录音（保 id/目录；换后端如迁 MOSS、或修转录质量）

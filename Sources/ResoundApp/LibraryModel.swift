@@ -90,7 +90,8 @@ final class LibraryModel: ObservableObject {
         /// 会议录音分轨（已与 url 混音同轴）：给了就分开转录再合并（dual-track spec）。
         var micURL: URL? = nil
         var sysURL: URL? = nil
-        enum Status { case queued, transcribing, identifying, done, failed }
+        /// waitingNetwork: MOSS paused because the Mac is offline; resumes on its own when the network returns.
+        enum Status { case queued, transcribing, waitingNetwork, identifying, done, failed }
     }
 
     // data
@@ -842,7 +843,7 @@ final class LibraryModel: ObservableObject {
     private func suggestMergedTitle(_ titles: [String]) async -> String {
         let fallback = titles.joined(separator: " + ")
         guard let cfg = try? Config.load() else { return fallback }
-        let chat = ChatClient(config: cfg, modelOverride: cfg.correctModel)
+        let chat = ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: "merge-title")
         let list = titles.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         let sys = "你把多个会议录音标题合并成一个简洁、准确的新标题。只输出标题本身，不要解释、不要引号、不超过 30 字。"
         let user = "这些录音将被合并成一条，请给合并后的标题：\n\(list)"
@@ -1279,7 +1280,10 @@ final class LibraryModel: ObservableObject {
         do {
             let out = try await IngestPipeline(vaultRoot: vault)
                 .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
-                        model: "large-v3", language: "zh", hints: [], push: false)
+                        model: "large-v3", language: "zh", hints: [], push: false,
+                        onNetworkWait: { [weak self] waiting in
+                            Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
+                        })
             if let cfg {
                 // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
                 // 这里再标注是纯浪费的整段解码+提声纹。

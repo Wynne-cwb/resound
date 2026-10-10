@@ -109,7 +109,7 @@ public func tidiedExtraction(_ result: ExtractResult, config: Config?, model: St
     // （标题合并/删页眉页脚/重建表格）。需要时可用 model 覆盖成更强模型。
     let tidyModel = model ?? config.correctModel
     log("🪄 排版整理中（\(tidyModel)）…")
-    let chat = ChatClient(config: config, modelOverride: tidyModel)
+    let chat = ChatClient(config: config, modelOverride: tidyModel, purpose: "tidy")
     let tidied = await MarkdownTidier(chat: chat).tidy(result.markdown, log: log)
     var r = result
     r.markdown = tidied

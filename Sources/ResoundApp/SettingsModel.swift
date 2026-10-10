@@ -223,7 +223,7 @@ final class SettingsModel: ObservableObject {
         let intent = e.aiIntent, base = e.prompt
         aiBusy = true
         Task {
-            let chat = ChatClient(config: cfg, modelOverride: cfg.correctModel)
+            let chat = ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: "template-assist")
             let out = await assistTemplatePrompt(mode: mode, intent: intent, base: base, chat: chat)
             aiBusy = false
             if editTpl != nil { editTpl!.prompt = out }

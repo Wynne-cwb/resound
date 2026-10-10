@@ -247,7 +247,7 @@ public struct IndexPipeline {
         let fused = rrf([vHits, fHits], topK: rerank ? rerankCandidates : topK).map { $0.hit }
         guard rerank else { return Array(fused.prefix(topK)) }
 
-        let chat = ChatClient(config: config, modelOverride: rerankModel ?? config.rerankModel)
+        let chat = ChatClient(config: config, modelOverride: rerankModel ?? config.rerankModel, purpose: "rerank")
         return try await Reranker(chat: chat).rerank(query: query, candidates: fused, topK: topK)
     }
 
@@ -281,7 +281,7 @@ public struct IndexPipeline {
         if !refDocs.isEmpty { log("📎 纳入 \(refDocs.count) 篇关联文档作为背景") }
         log("📝 生成摘要（模板：\(tmpl.name)）…")
         let tSum = Date()
-        let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel))
+        let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel, purpose: "summary"))
             .summarize(transcript: transcriptText,
                        meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers),
                        template: tmpl, referenceDocs: refDocs)
@@ -320,9 +320,9 @@ public struct IndexPipeline {
     public func answer(question: String, indexPath: URL, topK: Int = 8,
                        usePlanner: Bool = true, answerModel: String? = nil,
                        history: [ChatTurn] = []) async throws -> AnswerResult {
-        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel, purpose: "answer")
         let plan: QueryPlanner.Plan = usePlanner
-            ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel)).plan(question, history: history)
+            ? await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel, purpose: "plan")).plan(question, history: history)
             : .init(query: question, dateFrom: nil, dateTo: nil)
 
         // compare：两组材料各自检索 → 对比综合（⑧）。判不出两个集合则落 qa 兜底。
@@ -429,7 +429,7 @@ public struct IndexPipeline {
     public func answerInRecording(question: String, recordingId: String, indexPath: URL,
                                   topK: Int = 6, answerModel: String? = nil,
                                   history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
-        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel, purpose: "answer")
         // 检索用「借历史改写成可独立检索」的查询（追问如"那么时间线呢"才能命中）；综合仍用原问 + 全量历史。
         let retrievalQuery = await condensedQuery(question, history: history)
         // 单录音提问也纳入「关联文档」：scope = 本录音 chunk ∪ 关联文档 chunk（无关联时同以前，严格限本录音）。
@@ -448,7 +448,7 @@ public struct IndexPipeline {
     /// scope 已被 recordingId/docId 锁定，故忽略 plan 的 shape/filters，仅借它把"那么时间线呢"补全成完整查询。
     private func condensedQuery(_ question: String, history: [ChatTurn]) async -> String {
         guard !history.isEmpty else { return question }
-        let plan = await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel))
+        let plan = await QueryPlanner(chat: ChatClient(config: config, modelOverride: config.rerankModel, purpose: "plan"))
             .plan(question, history: history)
         let q = plan.query.trimmingCharacters(in: .whitespacesAndNewlines)
         return q.isEmpty ? question : q
@@ -458,7 +458,7 @@ public struct IndexPipeline {
     public func answerInDocument(question: String, documentId: String, indexPath: URL,
                                  topK: Int = 6, answerModel: String? = nil,
                                  history: [ChatTurn] = []) async throws -> (text: String, hits: [SearchHit]) {
-        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel)
+        let chat = ChatClient(config: config, modelOverride: answerModel ?? config.answerModel, purpose: "answer")
         let retrievalQuery = await condensedQuery(question, history: history)
         let hits = try await search(query: retrievalQuery, indexPath: indexPath, topK: topK,
                                     rerank: true, filters: .init(docId: documentId))
@@ -593,9 +593,13 @@ public struct IndexPipeline {
 
     // MARK: contextual 增强（带缓存 + 限并发）
 
+    /// Chunks located per enrichment request (see ContextualEnricher.contexts).
+    public static let contextBatchSize = 8
+
     private func enrichAll(chunks: [Chunk], document: String, index: Index,
                            model: String, log: (String) -> Void) async throws -> [Int: String] {
-        let enricher = ContextualEnricher(chat: ChatClient(config: config, modelOverride: model))
+        let enricher = ContextualEnricher(chat: ChatClient(config: config, modelOverride: model,
+                                                           purpose: "context", thinking: false))
         var out: [Int: String] = [:]
         var todo: [Chunk] = []
         for c in chunks {
@@ -609,23 +613,38 @@ public struct IndexPipeline {
         log("  🧠 生成上下文 \(todo.count)/\(chunks.count) chunk（\(model)）…")
 
         var failed = 0
-        for slice in todo.chunked(into: 4) {   // 限并发 4，文档 prefix 命中 DeepSeek 缓存
-            try await withThrowingTaskGroup(of: (Int, String, String).self) { group in
-                for c in slice {
-                    let text = c.text
-                    let idx = c.index
+        // Batches of `contextBatchSize` chunks per request (requests and document tokens ÷K). Cache
+        // warm-up: DeepSeek persists the shared prefix (system + full transcript) as a cache unit only
+        // after two completed requests share it, so the first two batches run serially, then 4-wide.
+        let batches = todo.chunked(into: Self.contextBatchSize)
+        let waves = batches.prefix(2).map { [$0] } + Array(batches.dropFirst(2)).chunked(into: 4)
+        for wave in waves {   // 限并发 4，文档 prefix 命中 DeepSeek 缓存
+            try await withThrowingTaskGroup(of: [(Int, String, String)].self) { group in
+                for batch in wave {
                     group.addTask {
                         // contextual 是可选增强：单个 chunk 失败就退化成「没有上下文」，
                         // 不该让整条录音的索引跟着挂掉（此前一次网络抖动即中断全场）。
-                        let ctx = (try? await enricher.context(document: document, chunk: text)) ?? ""
-                        return (idx, ctx, text)
+                        let got = (try? await enricher.contexts(document: document, chunks: batch.map(\.text)))
+                            ?? Array(repeating: nil, count: batch.count)
+                        var rows: [(Int, String, String)] = []
+                        for (c, ctx) in zip(batch, got) {
+                            // A chunk the batch answer missed gets one single-chunk retry.
+                            var final = ctx ?? ""
+                            if ctx == nil {
+                                final = (try? await enricher.context(document: document, chunk: c.text)) ?? ""
+                            }
+                            rows.append((c.index, final, c.text))
+                        }
+                        return rows
                     }
                 }
-                for try await (idx, ctx, text) in group {
-                    guard !ctx.isEmpty else { failed += 1; continue }   // 空不入缓存，下次重建可再试
-                    out[idx] = ctx
-                    try? index.setCachedContext(
-                        hash: chunkHash(model: model, text: text), context: ctx, model: model)
+                for try await rows in group {
+                    for (idx, ctx, text) in rows {
+                        guard !ctx.isEmpty else { failed += 1; continue }   // 空不入缓存，下次重建可再试
+                        out[idx] = ctx
+                        try? index.setCachedContext(
+                            hash: chunkHash(model: model, text: text), context: ctx, model: model)
+                    }
                 }
             }
         }

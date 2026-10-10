@@ -181,6 +181,7 @@ struct LibraryView: View {
             switch p.status {
             case .queued: return "排队等待转写…"      // 前面还有别的在转（见 maxIngestConcurrency）
             case .identifying: return "识别说话人…"
+            case .waitingNetwork: return "网络已断开，等待恢复后继续 MOSS 转写…"
             default: return "转写中…"
             }
         }()
