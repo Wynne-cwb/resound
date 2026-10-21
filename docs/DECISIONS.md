@@ -1718,3 +1718,11 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 
 **原则沉淀**：思维链对「判断类」任务（时间换算、相关度、归类、错听纠正）是真有用的；只对「复述/概括类」高频任务（contextual 增强）关掉。`ChatClient(thinking:)` 只在 DeepSeek 端点发送（严格 OpenAI 兼容服务会拒未知字段）；账本里关思维链的请求记为 `<purpose>/nothink` 便于对比。
 **新坑**：思维模式下 `temperature` 被服务端忽略——AutoClassifier 注释里「temp 0 仍有采样方差」的真因就是它。
+
+## 踩坑：单屏/多屏切换后录音浮窗、会议弹窗看不到（2026-10-21）
+
+**现象**：用户在单屏/外接多屏之间来回切换，录音浮窗和 Meet 检测弹窗有时都看不到。
+**根因**（两个浮窗都没处理屏幕变化）：①录音浮窗每次 App 运行只在首次 `setFrameUsingName` 恢复一次记忆坐标、之后不再校验——defaults 里实测留着外接屏时代的坐标（y=1941，屏在内置屏上方），拔屏后落在不存在的屏上；**borderless NSPanel 不会被 AppKit 拉回屏内**。②会议弹窗用 `NSScreen.main` 定位，后台 App 的 main screen 可能是用户没在看/刚拔掉/休眠的那块屏。
+**修**：新增 [FloatingPanelPlacement](../Sources/ResoundApp/FloatingPanelPlacement.swift)——目标屏取**鼠标所在屏**（回退 main/首屏）；`isOnScreen` 要求浮窗 ≥50% 面积落在某屏 visibleFrame 内。录音浮窗每次 show + `didChangeScreenParametersNotification` 都校验，不在屏上就贴目标屏右上角；会议弹窗每次 show 贴鼠标所在屏、屏幕变化时若正显示则重定位。
+**验证**：编译通过；判定逻辑对旧外接屏坐标返回 false、当前内置屏坐标返回 true。用户实机验收（2026-10-21）：浮窗正常显示。
+**附**：worktree 编译需 `Vendor/sherpa-onnx`（gitignored 派生物）→ 软链到主仓库那份，并加进 `.git/info/exclude`（`.gitignore` 的 `Vendor/sherpa-onnx/` 带斜杠匹配不到软链）。

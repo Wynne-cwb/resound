@@ -32,6 +32,11 @@ final class MeetingPanelController {
             .dropFirst()
             .sink { [weak self] _ in if self?.panel?.isVisible == true { self?.rebuildContent() } }
             .store(in: &cancellables)
+        // Display plugged/unplugged/rearranged while the popup is up: re-pin it to a live screen.
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in if self?.panel?.isVisible == true { self?.reposition() } }
+            .store(in: &cancellables)
     }
 
     /// 按当前录音状态决定显示「开始」/「停止」卡片或隐藏。
@@ -94,12 +99,10 @@ final class MeetingPanelController {
         panel.contentView = host
     }
 
+    /// 贴鼠标所在屏右上角(panel 含透明留白即视觉边距)；不用 NSScreen.main——后台 App 的 main 可能是用户没在看的那块屏。
     private func reposition() {
-        guard let panel, let screen = NSScreen.main else { return }
-        let vf = screen.visibleFrame
-        let size = panel.frame.size
-        // panel 含 24pt 透明留白；贴右上角(留白即视觉边距 ~24)
-        panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width, y: vf.maxY - size.height))
+        guard let panel else { return }
+        FloatingPanelPlacement.placeTopRight(panel)
     }
 }
 
