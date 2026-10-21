@@ -1726,3 +1726,11 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **修**：新增 [FloatingPanelPlacement](../Sources/ResoundApp/FloatingPanelPlacement.swift)——目标屏取**鼠标所在屏**（回退 main/首屏）；`isOnScreen` 要求浮窗 ≥50% 面积落在某屏 visibleFrame 内。录音浮窗每次 show + `didChangeScreenParametersNotification` 都校验，不在屏上就贴目标屏右上角；会议弹窗每次 show 贴鼠标所在屏、屏幕变化时若正显示则重定位。
 **验证**：编译通过；判定逻辑对旧外接屏坐标返回 false、当前内置屏坐标返回 true。用户实机验收（2026-10-21）：浮窗正常显示。
 **附**：worktree 编译需 `Vendor/sherpa-onnx`（gitignored 派生物）→ 软链到主仓库那份，并加进 `.git/info/exclude`（`.gitignore` 的 `Vendor/sherpa-onnx/` 带斜杠匹配不到软链）。
+
+## 踩坑：Meet 会议检测静默失效——URL 多了 `/meet/` 路径段（2026-10-21）
+
+**现象**：修完浮窗多屏问题后，用户开着 Google Meet 会议，仍不弹「开始录音」。
+**取证**：Chrome 标签 URL 实为 `https://meet.google.com/meet/qzq-ityb-ztv`；麦克风 `DeviceIsRunningSomewhere=1`（通话条件满足）。[MeetWatcher.isMeetingRoom](../Sources/ResoundCore/MeetWatcher.swift) 的正则 `meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}` 要求会议码紧跟域名 → 多一段 `/meet/` 就整场匹配不上，**零报错、零提示**。用户感知为「浮窗看不到」，实际是检测根本没触发（与上条浮窗定位 bug 症状相同、根因不同）。
+**修**：正则改为允许任意路径段前缀 `meet\.google\.com/(?:[A-Za-z0-9_-]+/)*[a-z]{3}-[a-z]{4}-[a-z]{3}(?![a-z])`；尾部负向前瞻防误吞更长的串。
+**验证**：9 条 URL 用例全过（含 `/meet/`、`/lookup/`、带 query 的会议码为真；`/`、`/landing`、`/new`、超长码为假）；release 编译通过；重打包重启后对着真实 `/meet/` 会议 3s 内弹窗上屏（CGWindowList 取证：内置屏右上角 348×160）。
+**教训**：外部 URL 格式是会变的，检测失败要可见——目前 `chromeMeeting()` 匹配不上时无任何日志，下次同类问题仍只能靠人肉取证。
