@@ -1734,3 +1734,15 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **修**：正则改为允许任意路径段前缀 `meet\.google\.com/(?:[A-Za-z0-9_-]+/)*[a-z]{3}-[a-z]{4}-[a-z]{3}(?![a-z])`；尾部负向前瞻防误吞更长的串。
 **验证**：9 条 URL 用例全过（含 `/meet/`、`/lookup/`、带 query 的会议码为真；`/`、`/landing`、`/new`、超长码为假）；release 编译通过；重打包重启后对着真实 `/meet/` 会议 3s 内弹窗上屏（CGWindowList 取证：内置屏右上角 348×160）。
 **教训**：外部 URL 格式是会变的，检测失败要可见——目前 `chromeMeeting()` 匹配不上时无任何日志，下次同类问题仍只能靠人肉取证。
+
+**Notion 新域名 `app.notion.com` 识别不到（2026-10-22）**
+**现象**：粘贴 `https://app.notion.com/p/<workspace>/<slug>-<id>` 关联链接，Resound 不认作 Notion（落到「无法识别来源」）。
+**根因**：Notion 已迁到 `app.notion.com`（`notion-fetch` 返回的 canonical URL 也是这个域名），而内置来源 [MCPSource.swift](../Sources/ResoundCore/MCPSource.swift) 的 `hostPatterns` 只有 `notion.so`/`notion.site` → host 路由匹配失败，根本没走到取回。
+**修**：`hostPatterns` 加 `notion.com`（`MCPSourceStore.load()` 对内置来源以预设覆盖 hostPatterns，老用户的 `mcp-sources.json` 无需迁移）。
+**验证**：`resound mcp sources` 显示 hosts 含 notion.com；`resound mcp fetch <app.notion.com URL>` 已路由到 Notion（不再是 unknown）；用 Notion MCP 直接 `notion-fetch` 该 URL 能取回全文，证明 server 端接受新域名、无需改写 URL。CLI 取回报 `Authentication required`——Keychain 里 Notion token 自 2026-10-13 起未刷新，属另一问题（token 过期/刷新失败），需在 App 里实测或重连。
+
+**外部来源授权过期：401 → 强制刷新 → 仍失败标 expired（2026-10-22）**
+**现象**：修完域名后 Notion 链接仍取不回，App 提示「无权访问」，来源却一直显示「已连接」。新旧域名链接都报 `[-32603] Internal error: Authentication required`。
+**根因**：① swift-sdk `HTTPClientTransport` 把 HTTP 401 抛成 `MCPError.internalError("Authentication required")`，而 resolver 把所有非 MCPClientError 都归成 noPermission → 授权过期被误报成「无权限」；② `validAccessToken` 只在**本地** `expiresAt` 判过期时才刷新——服务端先吊销/token 无 expiresAt 时永远不刷新；③ 没有任何路径把来源标成 `.expired`，所以设置页已有的「重新授权」横幅从来不出现。
+**修**：`MCPOAuth.forceRefresh`（无视本地过期时间强制刷新）+ `ExternalLinkResolver.fetch`（401 → 刷新一次重试 → 仍 401/无法刷新抛 `MCPClientError.authExpired`），粘贴链接与 `MCPIngest.resync` 共用；新增 `LinkResolution.authExpired`，App 把来源标 `.expired`（设置页出横幅）并在关联弹窗显示「授权已过期 · 重新授权」，重新授权后自动重解析；取回成功会把 expired 来源自愈回 connected；`.expired` 来源仍会尝试取回（刷新可能成功）。401 判定集中在 `MCPClientError.isAuthFailure`；403 仍归无权限。
+**验证**：`resound mcp fetch <app.notion.com URL>` → 日志「token 刷新失败 → token 获取失败」（Notion 拒绝了 refresh token）→ 输出「授权已过期」→ `mcp sources` 显示 `[expired] Notion`。用户在 App 里重新授权 Notion 后，该 `app.notion.com` 链接成功取回正文（实机验收通过）。

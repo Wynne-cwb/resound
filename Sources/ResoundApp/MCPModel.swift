@@ -80,7 +80,7 @@ final class MCPModel: ObservableObject {
         var phase: Phase = .input
         var result: LinkResultView?
         var importError: String?
-        enum Phase { case input, resolving, resolved, importing, unconnected, unknown, noperm }
+        enum Phase { case input, resolving, resolved, importing, unconnected, expired, unknown, noperm }
     }
     @Published var linkFlow: LinkFlow?
     /// 正在同步的外部文档（按 dir.path），录音详情行内显示转圈。
@@ -149,6 +149,13 @@ final class MCPModel: ObservableObject {
         guard let i = sources.firstIndex(where: { $0.id == id }) else { return }
         mutate(&sources[i]); persistSources()
     }
+    /// Track auth health from real fetches: 401 after a refresh → expired (Settings shows the re-authorize banner);
+    /// a successful fetch heals an expired source.
+    private func setAuthHealthy(_ id: String, _ ok: Bool) {
+        guard let s = sources.first(where: { $0.id == id }) else { return }
+        if ok, s.status == .expired { updateSource(id) { $0.status = .connected } }
+        if !ok, s.status != .expired { updateSource(id) { $0.status = .expired } }
+    }
 
     /// 取某来源的有效 bearer：OAuth 来源走 Keychain（过期自动刷新），token 来源取存的 token。
     private func bearer(for source: MCPSource) async -> String? {
@@ -182,7 +189,7 @@ final class MCPModel: ObservableObject {
                 updateSource(source.id) { $0.status = .connected; $0.account = $0.account ?? "已连接" }
                 connecting?.phase = .done
                 // 粘贴链接流程里「去连接」过来的：连上后自动重解析
-                if let lf = linkFlow, lf.phase == .unconnected { resolveLink() }
+                if let lf = linkFlow, lf.phase == .unconnected || lf.phase == .expired { resolveLink() }
             } catch is CancellationError {
                 // 用户主动取消：cancelConnecting 已清状态，不弹失败提示
             } catch {
@@ -208,7 +215,7 @@ final class MCPModel: ObservableObject {
                 try await runManualLoopbackOAuth(source, clientId: cid, clientSecret: secret)
                 updateSource(source.id) { $0.status = .connected; $0.account = $0.account ?? "已连接" }
                 connecting?.phase = .done
-                if let lf = linkFlow, lf.phase == .unconnected { resolveLink() }
+                if let lf = linkFlow, lf.phase == .unconnected || lf.phase == .expired { resolveLink() }
             } catch is CancellationError {
             } catch {
                 app?.toast("连接失败：\(shortErr(error))")
@@ -327,10 +334,20 @@ final class MCPModel: ObservableObject {
             for dir in dirs {
                 guard let m = parseDocumentManifest(dir), let ext = m.external,
                       ext.form == "imported", ext.sourceId == source.id else { continue }
-                let ok = (try? await MCPIngest.resync(docDir: dir, vaultRoot: vault, indexPath: defaultIndexPath(),
-                                                      config: cfg, bearer: { await self.bearer(for: $0) })) ?? false
-                if ok { n += 1 }
+                do {
+                    if try await MCPIngest.resync(docDir: dir, vaultRoot: vault, indexPath: defaultIndexPath(),
+                                                  config: cfg, bearer: { await self.bearer(for: $0) }) { n += 1 }
+                } catch where MCPClientError.isAuthFailure(error) {
+                    // Every remaining doc would fail the same way: stop and ask for re-authorization.
+                    setAuthHealthy(source.id, false)
+                    documents?.refresh()
+                    app?.toast("\(source.name) 授权已过期，请重新授权后再同步")
+                    return
+                } catch {
+                    AppLog.log("外部文档同步失败 \(dir.lastPathComponent) → \(error)")
+                }
             }
+            if n > 0 { setAuthHealthy(source.id, true) }
             updateSource(source.id) { $0.lastSync = relativeNow() }
             documents?.refresh()
             app?.toast(n > 0 ? "已同步 \(n) 篇 \(source.name) 文档" : "\(source.name) 无可同步内容")
@@ -420,6 +437,7 @@ final class MCPModel: ObservableObject {
             guard var lf = linkFlow else { return }
             switch res {
             case .imported(let doc, let src):
+                setAuthHealthy(src.id, true)
                 pendingFetched = doc; pendingSource = src
                 lf.result = LinkResultView(title: doc.title, sourceName: src.name, url: url, kind: src.kind, imported: true)
                 lf.phase = .resolved
@@ -434,6 +452,11 @@ final class MCPModel: ObservableObject {
                 pendingSource = src
                 lf.result = LinkResultView(title: SourceAdapter.titleFromURL(url), sourceName: src.name, url: url, kind: src.kind, imported: false)
                 lf.phase = .noperm
+            case .authExpired(let src):
+                setAuthHealthy(src.id, false)
+                pendingSource = src
+                lf.result = LinkResultView(title: SourceAdapter.titleFromURL(url), sourceName: src.name, url: url, kind: src.kind, imported: false)
+                lf.phase = .expired
             }
             linkFlow = lf
         }
@@ -513,6 +536,9 @@ final class MCPModel: ObservableObject {
                 await documents?.refreshAndWait()
                 app?.reloadLibrary()
                 app?.toast(ok ? "已同步最新内容" : "无法同步（来源未连接？）")
+            } catch where MCPClientError.isAuthFailure(error) {
+                if let id = parseDocumentManifest(dir)?.external?.sourceId { setAuthHealthy(id, false) }
+                app?.toast("授权已过期，请到设置重新授权该来源")
             } catch {
                 AppLog.log("外部文档同步失败 \(dir.lastPathComponent) → \(error)")
                 app?.toast("同步失败：\(shortErr(error))")

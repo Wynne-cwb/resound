@@ -44,12 +44,9 @@ public enum MCPIngest {
         guard let m = parseDocumentManifest(docDir), let ext = m.external, ext.form == "imported" else { return false }
         let sources = MCPSourceStore.load()
         guard let src = sources.first(where: { $0.id == ext.sourceId }) ?? MCPSourceStore.source(forURL: ext.url, in: sources),
-              src.status == .connected else { return false }
-        let token = await bearer(src)
-        guard let session = MCPClientSession.make(for: src, bearer: token) else { return false }
-        try await session.connect()
-        let doc = try await SourceAdapter.fetchContent(url: ext.url, kind: src.kind, session: session)
-        await session.disconnect()
+              src.status != .disconnected else { return false }
+        // Throws MCPClientError.authExpired when the token cannot be refreshed; callers mark the source expired.
+        let doc = try await ExternalLinkResolver.fetch(url: ext.url, source: src, bearer: bearer)
         // 重写 content.md（保留 manifest，更新 external.lastSync/version）
         try doc.markdown.data(using: .utf8)?.write(to: docDir.appendingPathComponent("content.md"))
         var newExt = ext; newExt.contentVersion = doc.version; newExt.lastSync = iso8601(Date())

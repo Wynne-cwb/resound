@@ -267,6 +267,21 @@ public enum MCPOAuth {
         MCPTokenStore.save(refreshed, sourceId: sourceId)
         return refreshed.accessToken
     }
+
+    /// Refresh regardless of the local expiry (used after the server answered 401).
+    /// Returns the new access token, or nil when there is no refresh token or the refresh is rejected.
+    public static func forceRefresh(sourceId: String, clientId: String?) async -> String? {
+        guard let token = MCPTokenStore.load(sourceId: sourceId),
+              let cid = clientId ?? token.clientId else { return nil }
+        do {
+            let refreshed = try await refresh(token: token, clientId: cid)
+            MCPTokenStore.save(refreshed, sourceId: sourceId)
+            return refreshed.accessToken
+        } catch {
+            AppLog.log("MCP token 刷新失败 [\(sourceId)] → \(error)")
+            return nil
+        }
+    }
 }
 
 public enum MCPOAuthError: Error, CustomStringConvertible, LocalizedError {

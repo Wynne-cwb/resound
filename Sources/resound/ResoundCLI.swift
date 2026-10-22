@@ -1026,6 +1026,10 @@ struct McpFetch: AsyncParsableCommand {
             print("❓ 无法识别来源/不支持/不可达——可作为「仅链接」保存")
         case .noPermission(let src):
             print("🔒 已连「\(src.name)」但取不到这条（多半无权限）——可仅链接保存或重试")
+        case .authExpired(let src):
+            var expired = src; expired.status = .expired
+            MCPSourceStore.upsert(expired)
+            print("⏰ 「\(src.name)」授权已过期（自动刷新失败）——已标记为过期，请到 App 设置里重新授权")
         }
     }
 }
