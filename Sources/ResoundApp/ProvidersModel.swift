@@ -17,7 +17,7 @@ final class ProvidersModel: ObservableObject {
             switch self {
             case .chat: return "问答、摘要、AI 校对都用它。必填。"
             case .embedding: return "把文稿切块向量化以供检索。必填。"
-            case .transcribe: return "把录音转成文字。留空 = 用本地 Whisper（免联网，首次下模型较慢）。"
+            case .transcribe: return "把录音转成文字。推荐 MOSS 云端（转录+说话人一次产出），或配在线 whisper。"
             }
         }
         var required: Bool { self != .transcribe }
@@ -113,16 +113,7 @@ final class ProvidersModel: ObservableObject {
         commit(c)
     }
 
-    /// 转写改用本地 WhisperKit：清掉在线转写 provider + ref。
-    func useLocalTranscribe() {
-        var c = config
-        c.transcribe = nil
-        c.transcribeBackend = nil
-        c.providers.removeAll { $0.id == Capability.transcribe.providerId }
-        c.verified?[Capability.transcribe.rawValue] = nil
-        commit(c)
-        probe[.transcribe] = .idle
-    }
+    // useLocalTranscribe 已移除（本地 WhisperKit 整体下线，转写只剩 MOSS/在线两种云后端）
 
     // MARK: MOSS 云端转写（端到端转录+说话人，自部署 Modal）
 

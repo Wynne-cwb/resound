@@ -2,7 +2,7 @@ import SwiftUI
 import ResoundCore
 
 /// 首次启动引导：必须先配好「对话模型 + 向量模型」（各自验证通过）才能进主界面；
-/// 转写可留空兜底到本地 Whisper。复用 CapabilityCard，与设置页同一套交互。
+/// 转写后端二选一（MOSS 云端 / 在线 whisper，本地 Whisper 已移除）。复用 CapabilityCard，与设置页同一套交互。
 struct OnboardingView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var providers: ProvidersModel

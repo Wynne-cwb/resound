@@ -1124,7 +1124,7 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签，空格分隔")
     var tags: [String] = []
 
-    @Option(name: .long, help: "WhisperKit 模型")
+    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
     var model: String = "large-v3"
 
     @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测；中英混杂建议填 zh")
@@ -1204,7 +1204,7 @@ struct RecordMeeting: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签")
     var tags: [String] = []
 
-    @Option(name: .long, help: "WhisperKit 模型")
+    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
     var model: String = "large-v3"
 
     @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")
@@ -1287,7 +1287,7 @@ struct Record: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签")
     var tags: [String] = []
 
-    @Option(name: .long, help: "WhisperKit 模型")
+    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
     var model: String = "large-v3"
 
     @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")

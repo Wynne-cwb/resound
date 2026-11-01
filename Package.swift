@@ -10,7 +10,6 @@ let package = Package(
         .library(name: "ResoundCore", targets: ["ResoundCore"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         // 锁 <0.15.5：0.15.5 删掉了 Sources/FluidAudio/DownloadUtils.swift，而 Diarizer.swift 用
         // `DownloadUtils.loadModels`（patch 版本里的 breaking change）。`from:` 会一路解析上去 →
@@ -45,7 +44,6 @@ let package = Package(
             dependencies: [
                 "CSQLiteVec",
                 "CSherpaOnnx",
-                .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "Logging", package: "swift-log"),

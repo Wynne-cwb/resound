@@ -22,13 +22,13 @@ public struct ModelRef: Codable, Equatable, Sendable {
 }
 
 /// Provider 全量配置（GUI 真源，存 App Support `providers.json`）。
-/// chat + embedding 为必填；transcribe 为空 = 兜底本地 WhisperKit。
+/// chat + embedding 为必填；transcribe 为空 = 未配转写后端（本地 WhisperKit 已移除）。
 public struct ProvidersConfig: Codable, Equatable, Sendable {
     public var providers: [AIProvider]
     public var chat: ModelRef?
     public var embedding: ModelRef?
     public var embeddingDim: Int?            // 验证 embedding 时自动探测，建索引用
-    public var transcribe: ModelRef?         // nil = 本地 WhisperKit
+    public var transcribe: ModelRef?         // nil = 未配置（本地 WhisperKit 已移除）
     // MOSS 云端转写（端到端转录+说话人）："moss" 则优先走 MOSS（失败回退 whisper 在线/本地）。
     // 三项由设置页「一键部署」写回；旧 providers.json 无这些键 → 全 nil，行为不变。
     public var transcribeBackend: String?    // nil/"whisper" | "moss"

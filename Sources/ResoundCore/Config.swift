@@ -14,7 +14,7 @@ public struct Config {
     public var answerModel: String
     public var summaryModel: String   // 摘要模型（SUMMARY_MODEL，缺省同 answerModel）
     public var transcribeModel: String // 转写模型（TRANSCRIBE_MODEL）；在线走 OpenAI 兼容 /audio/transcriptions
-    public var transcribeOnline: Bool  // true=在线 turbo（默认），false=本地 WhisperKit
+    public var transcribeOnline: Bool  // true=在线 whisper 可用（默认）。本地 WhisperKit 已移除
     public var transcribeBaseURL: String // 在线转写端点（TRANSCRIBE_BASE_URL，缺省同 embedding）
     public var transcribeKey: String     // 在线转写 key（TRANSCRIBE_API_KEY，缺省同 embedding）
     public var correctModel: String    // 转录 AI 校对模型（CORRECT_MODEL，缺省 deepseek-v4-flash）
