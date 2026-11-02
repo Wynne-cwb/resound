@@ -90,6 +90,9 @@ final class LibraryModel: ObservableObject {
         /// 会议录音分轨（已与 url 混音同轴）：给了就分开转录再合并（dual-track spec）。
         var micURL: URL? = nil
         var sysURL: URL? = nil
+        /// Vault id/dir this audio is bound to once its first attempt starts; retries reuse it so the
+        /// same audio is ingested into one recording only (meetings also persist it as a `.ingest` sidecar).
+        var plan: IngestPipeline.Plan? = nil
         /// waitingNetwork: MOSS paused because the Mac is offline; resumes on its own when the network returns.
         enum Status { case queued, transcribing, waitingNetwork, identifying, done, failed }
     }
@@ -1232,22 +1235,47 @@ final class LibraryModel: ObservableObject {
     private nonisolated static func titleSidecar(for audio: URL) -> URL {
         audio.appendingPathExtension("title")
     }
+    /// Persisted `IngestPipeline.Plan` of a pending meeting recording: survives an app quit, so a
+    /// recovered retry resumes into the same vault dir instead of creating a duplicate recording.
+    private nonisolated static func planSidecar(for audio: URL) -> URL {
+        audio.appendingPathExtension("ingest")
+    }
+    private nonisolated static func loadPlan(for audio: URL) -> IngestPipeline.Plan? {
+        guard let data = try? Data(contentsOf: planSidecar(for: audio)) else { return nil }
+        return try? JSONDecoder().decode(IngestPipeline.Plan.self, from: data)
+    }
+    private nonisolated static func savePlan(_ plan: IngestPipeline.Plan, for audio: URL) {
+        // Default date encoding keeps sub-second precision, so year/month dir == the id's stamp.
+        try? JSONEncoder().encode(plan).write(to: planSidecar(for: audio), options: .atomic)
+    }
+    private nonisolated static func samePath(_ a: URL?, _ b: URL) -> Bool {
+        a?.standardizedFileURL.path == b.standardizedFileURL.path
+    }
+
+    /// 回收只在进程内跑一次：调用点是主窗口 onAppear，而关窗后从菜单栏重开会再次触发——
+    /// 那时队列里的录音正在转写，再扫一遍会删掉它们的分轨（2026-10-30 MOSS 超时后回退 whisper
+    /// 找不到 -mic.wav / -sys.wav 即此因）。
+    private var didRecoverOrphans = false
 
     /// 启动时回收孤儿录音：`pendingImports` 是内存态，排队/转写途中退出 App 就丢了登记，
     /// 而音频还躺在 App Support/pending-recordings 里——用户看不见就等于丢了。这里扫出来
     /// 登记成可重试的失败项（分轨按 v1 约定清掉，重试只走混音）。
     func recoverOrphanRecordings() {
+        guard !didRecoverOrphans else { return }
+        didRecoverOrphans = true
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Resound/\(Self.pendingRecordingsDir)", isDirectory: true)
         guard let files = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { return }
         var found = 0
         for f in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let name = f.lastPathComponent
-            if name.hasSuffix(".title") { continue }                       // sidecar，跟着混音一起处理
-            if name.hasSuffix("-mic.wav") || name.hasSuffix("-sys.wav") {  // 分轨：清掉
-                try? FileManager.default.removeItem(at: f); continue
+            if name.hasSuffix(".title") || name.hasSuffix(".ingest") { continue }   // sidecar，跟着混音一起处理
+            if name.hasSuffix("-mic.wav") || name.hasSuffix("-sys.wav") {  // 分轨：清掉（在队列里的除外）
+                let inFlight = pendingImports.contains { Self.samePath($0.micURL, f) || Self.samePath($0.sysURL, f) }
+                if !inFlight { try? FileManager.default.removeItem(at: f) }
+                continue
             }
-            guard !pendingImports.contains(where: { $0.url == f }) else { continue }
+            guard !pendingImports.contains(where: { Self.samePath($0.url, f) }) else { continue }
             let sidecar = Self.titleSidecar(for: f)
             let title = (try? String(contentsOf: sidecar, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1255,7 +1283,13 @@ final class LibraryModel: ObservableObject {
                                   status: .failed)
             item.source = "meeting"
             item.title = (title?.isEmpty == false) ? title : nil
+            item.plan = Self.loadPlan(for: f)
             item.error = "上次退出前未完成转写（音频已保住，点重试即可）"
+            if let plan = item.plan, let vault = vaultURL(),
+               FileManager.default.fileExists(atPath: IngestPipeline(vaultRoot: vault).recordingDir(for: plan)
+                   .appendingPathComponent("recording.yaml").path) {
+                item.error = "已入库但索引未完成（点重试只补索引，不会重复入库）"
+            }
             pendingImports.append(item)
             found += 1
         }
@@ -1277,13 +1311,30 @@ final class LibraryModel: ObservableObject {
         setPendingStatus(p.id, .transcribing); setPendingError(p.id, nil)
         // 会议录音分轨齐全 → 分开转录合并（dual-track spec）；缺轨/导入文件 → 单文件转录
         let tracks: (mic: URL, sys: URL)? = { if let m = p.micURL, let s = p.sysURL { return (m, s) }; return nil }()
+        // Bind this audio to one vault id before anything is written, and keep that binding across
+        // retries / app restarts. Without it every retry minted a new timestamped id: an index failure
+        // after a finished ingest, or a quit mid-transcription, produced a second recording of the same meeting.
+        let pipeline = IngestPipeline(vaultRoot: vault)
+        let plan = pendingImports.first(where: { $0.id == p.id })?.plan
+            ?? (p.source == "meeting" ? Self.loadPlan(for: p.url) : nil)
+            ?? pipeline.plan(audioPath: p.url, title: p.title, source: p.source)
+        if let i = pendingImports.firstIndex(where: { $0.id == p.id }) { pendingImports[i].plan = plan }
+        if p.source == "meeting" { Self.savePlan(plan, for: p.url) }
+        let planDir = pipeline.recordingDir(for: plan)
         do {
-            let out = try await IngestPipeline(vaultRoot: vault)
-                .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
-                        model: "large-v3", language: "zh", hints: [], push: false,
-                        onNetworkWait: { [weak self] waiting in
-                            Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
-                        })
+            let out: IngestPipeline.Output
+            if FileManager.default.fileExists(atPath: planDir.appendingPathComponent("recording.yaml").path) {
+                // Ingest already finished on an earlier attempt (it was the indexing that failed): only re-index.
+                AppLog.log("↩️ 「\(p.name)」已入库（\(plan.id)），重试只补索引，不重复入库")
+                out = IngestPipeline.Output(recordingDir: planDir, id: plan.id)
+            } else {
+                out = try await pipeline
+                    .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
+                            model: "large-v3", language: "zh", hints: [], push: false, plan: plan,
+                            onNetworkWait: { [weak self] waiting in
+                                Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
+                            })
+            }
             if let cfg {
                 // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
                 // 这里再标注是纯浪费的整段解码+提声纹。
@@ -1298,7 +1349,7 @@ final class LibraryModel: ObservableObject {
             autoPushVault(p.source == "meeting" ? "rec: 会议录音 \(out.id)" : "rec: 导入 \(p.name)")
             // 录音（meeting）的待转写混音+分轨存在 App Support，成功入库后清掉，避免堆垃圾。
             if p.source == "meeting" {
-                for u in [p.url, p.micURL, p.sysURL, Self.titleSidecar(for: p.url)].compactMap({ $0 }) {
+                for u in [p.url, p.micURL, p.sysURL, Self.titleSidecar(for: p.url), Self.planSidecar(for: p.url)].compactMap({ $0 }) {
                     try? FileManager.default.removeItem(at: u)
                 }
             }
@@ -1311,7 +1362,10 @@ final class LibraryModel: ObservableObject {
         } catch {
             AppLog.error("转写入库失败「\(p.name)」(\(p.url.path))", error)
             setPendingStatus(p.id, .failed)
-            setPendingError(p.id, String(describing: error))
+            let ingested = FileManager.default.fileExists(atPath: planDir.appendingPathComponent("recording.yaml").path)
+            setPendingError(p.id, ingested
+                ? "已入库，索引失败（点重试只补索引，不会重复入库）：\(error)"
+                : String(describing: error))
             // v1：失败重试只保混音——分轨清掉避免堆积（见 dual-track spec「失败重试路径」）
             if p.source == "meeting" {
                 for u in [p.micURL, p.sysURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
@@ -1380,6 +1434,7 @@ final class LibraryModel: ObservableObject {
            FileManager.default.fileExists(atPath: p.url.path) {
             let moved = Self.stashAudio(p.url, into: "failed-recordings")
             try? FileManager.default.removeItem(at: Self.titleSidecar(for: p.url))
+            try? FileManager.default.removeItem(at: Self.planSidecar(for: p.url))
             for u in [p.micURL, p.sysURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
             AppLog.log("🗃️ 已从列表移除录音「\(p.name)」，音频归置到：\(moved.path)")
         }

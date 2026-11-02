@@ -1,5 +1,14 @@
 import Foundation
 
+public enum IngestError: Error, CustomStringConvertible {
+    case alreadyIngested(String)
+    public var description: String {
+        switch self {
+        case .alreadyIngested(let p): return "该音频已入库，拒绝重复写入：\(p)"
+        }
+    }
+}
+
 /// 端到端最小闭环：音频 → 转录 → 按契约写入 vault →（可选）git push。
 public struct IngestPipeline {
     public let vault: Vault
@@ -10,6 +19,27 @@ public struct IngestPipeline {
     public struct Output {
         public let recordingDir: URL
         public let id: String
+        public init(recordingDir: URL, id: String) {
+            self.recordingDir = recordingDir
+            self.id = id
+        }
+    }
+
+    /// The recording id + creation time an ingest of one source audio is bound to. Callers that may
+    /// retry the same audio (app queue: index failure, quit mid-transcription) persist this and pass
+    /// it back, so every attempt writes the same vault dir instead of minting a new timestamped id.
+    public struct Plan: Codable, Equatable {
+        public let id: String
+        public let createdAt: Date
+    }
+
+    public func plan(audioPath: URL, title: String?, source: String, now: Date = Date()) -> Plan {
+        let displayTitle = title ?? defaultTitle(from: audioPath)
+        return Plan(id: makeRecordingID(title: displayTitle, source: source, date: now), createdAt: now)
+    }
+
+    public func recordingDir(for plan: Plan) -> URL {
+        vault.recordingDir(id: plan.id, date: plan.createdAt)
     }
 
     public func ingest(
@@ -23,15 +53,29 @@ public struct IngestPipeline {
         hints: [String] = [],
         maxFallback: Int = 5,
         push: Bool,
+        plan: Plan? = nil,   // resume target: reuse this id/dir (see Plan) instead of a fresh one
         onNetworkWait: ((Bool) -> Void)? = nil,
         log: @escaping (String) -> Void = { print($0) }
     ) async throws -> Output {
         try vault.validate()
 
-        let now = Date()
+        let now = plan?.createdAt ?? Date()
         let displayTitle = title ?? defaultTitle(from: audioPath)
-        let id = makeRecordingID(title: displayTitle, source: source, date: now)
+        let id = plan?.id ?? makeRecordingID(title: displayTitle, source: source, date: now)
         let dir = vault.recordingDir(id: id, date: now)
+        if plan != nil {
+            let fm = FileManager.default
+            // A finished recording must never be written twice; callers check this first.
+            if fm.fileExists(atPath: dir.appendingPathComponent("recording.yaml").path) {
+                throw IngestError.alreadyIngested(dir.path)
+            }
+            // Partial dir from an interrupted attempt: AVAssetExportSession refuses to overwrite, so drop
+            // the outputs about to be re-exported. Track files stay when no new tracks are given —
+            // they may be the only copy left (retries run on the mix only).
+            var stale = ["audio.m4a"]
+            if tracks != nil { stale += ["track-mic.m4a", "track-system.m4a"] }
+            for name in stale { try? fm.removeItem(at: dir.appendingPathComponent(name)) }
+        }
         // 会议日期：标题里的日期 > 音频文件修改时间 > 入库时间。导入旧录音时 now 是「导入时刻」并非会议日，
         // 标题（如「2026-06-10 月度 1on1」）或原文件时间才是真实会议日；录制的会议标题无日期、文件即时写入 ≈ now。
         // 仅用于 recordedAt（排序/详情/Ask 口径）；id/目录仍用 now 保证唯一、不撞目录。

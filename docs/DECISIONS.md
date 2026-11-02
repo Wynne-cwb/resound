@@ -1785,3 +1785,12 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **修**：swift-sdk 解除 `<0.10.2` 上限 → 0.12.1（旧上限只为 Swift 6.0 工具链），适配 `Tool.Content.text` 新增的两个关联值；`MarkdownNative` 显式写 `Markdown.Document`；用 Xcode 27 重新打包 worktree 分支并替换运行中的 App。
 **验证**：用户实测浮窗可拖、Meet 弹窗恢复。**拖动没改任何代码**——旧 SDK 编的二进制在 macOS 27 上拖不动，用新 SDK 重编即恢复（`isMovableByWindowBackground` 原样）。原计划的「显式 performDrag 拖动区」和「AppleScript 失败写日志」两处改动因当时 `python3` 被 Xcode license 拦截**并未写入**，验证通过的包不含它们。
 **教训**：①worktree 分支上的修复不合进 main，用户一重启开主目录的包就「回归」；②Xcode license 未同意时所有 xcrun 垫片都会失败，报错容易被淹没在其他输出里——改完文件要看 diff 确认落盘。
+
+**修「同一场会议出现两条录音」：入库幂等，同一份音频只入库一次（2026-11-02）**
+**现象**：用户反馈偶尔同一场会在 Library 里出现两条。
+**取证**：①vault git：`2026-10-22-1627-account-x-notification-os-迁移流程讨论` 与 `2026-10-23-1730-account-x-…` 两条 recording.yaml 的 `recorded_at`（2026-10-22T16:27:04）、`duration_sec`（1468）、标题完全相同；日志 10-22 16:41:57「转写入库失败…aihubmix.com/v1/embeddings timed out」（`ingest` 已写完 vault，失败在随后的 `indexRecording`）→ 10-23 17:30:52「♻️ 回收 1 条」→ 重试 → 第二条；用户 10-23 18:00 手删旧那条（commit 64135cc）。②`1792567299-…b941c017`（10-21 Tao 1on1）在 vault 有三个目录 15:21 / 15:24 / 18:06，audio.m4a 都是 6022932 字节；日志 15:24:54、15:29:24 两次「回收 1 条」——转写中 App 退出两次，每次重试新建目录，前两个半成品（无 recording.yaml，Library 不显示）残留。③10-30 11:55 MOSS 超时回退 whisper 时 `pending-recordings/1793328891-…-mic.wav`/`-sys.wav` 已不存在、且当天无「回收」日志：唯一会删在途分轨的代码是 `recoverOrphanRecordings`（分轨删除在 pendingImports 守卫之前），它挂在主窗口 `.onAppear`，关窗后从菜单栏重开（`applicationShouldTerminateAfterLastWindowClosed=false`）就会再跑——代码路径排除法推断，未直接复现。
+**根因**：录音 id = `yyyy-MM-dd-HHmm-<slug>`，`now` 取每次入库调用的时刻；`ingestOne` 失败（含 ingest 成功后的索引失败）一律保留占位可重试，重试又铸新 id → 新目录。
+**修**：`IngestPipeline.Plan{id, createdAt}` + `ingest(plan:)`：第一次尝试前就绑定 id/目录；会议录音写 `pending-recordings/<音频>.ingest` sidecar（跨重启），导入项存在内存 `ImportItem.plan`。重试时目标目录已有 recording.yaml → 只补索引；半成品目录 → 原地续写（删旧 audio.m4a 重导；没有新分轨时保留已有 track-*.m4a，它可能是唯一副本）；`ingest(plan:)` 对已完成目录抛 `IngestError.alreadyIngested` 兜底。`recoverOrphanRecordings` 每进程只跑一次，分轨删除跳过在途项，路径比对改 `standardizedFileURL.path`。失败提示区分「已入库，索引失败（重试只补索引）」。未改 vault 数据契约。
+**验证**：`swift build` 通过；临时离线 harness（未提交）6/6：Plan JSON 往返精确、半成品目录续写只落在计划目录且删旧 audio.m4a 留 track、已完成目录抛 alreadyIngested、不带 plan 时新 id 不同（旧 bug 对照）。**未验证**：App 内实机的「索引失败→重试」「转写中退出→回收→重试」「关窗重开不删分轨」三条路径（需重打包 App + 人为制造失败）。
+**已有重复的处理**：10-22/10-23 那对用户已手删；10-21 两个半成品目录经用户同意移到废纸篓（2026-11-02，可恢复；15:21 那个里有 track-mic/track-system.m4a，是该场分轨的唯一副本，完整那条只有混音）。
+
