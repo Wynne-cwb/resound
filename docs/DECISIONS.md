@@ -5,6 +5,38 @@
 
 ---
 
+## 新方向立项：Google Meet 云端摄取 + 管线上云（2026-09-29）
+
+**触发**：用户提出三条需求——①会议主要都用 Google Meet ②想把转录/校对流程承接成 Meet 的插件或 App（不确定 Meet 有什么承接方式）③上云但只上传转录文本、不上传语音。
+
+### 调研：Meet 官方承接方式盘点（2026-09 查证）
+
+- **Meet Add-on（插件）**：只是 UI 容器（侧栏/主舞台），**拿不到音频和字幕流** → 做不了转录承接，不立项。
+- **Meet Media API**（实时音频）：**Developer Preview**，条款禁止用于公开产品 → 不可依赖。
+- **Meet REST API Conference Records**：会后 `transcripts.entries`（说话人+时间戳+语言码），**30 天后过期**；转录 Doc 落组织者 Drive 长期保留 → ✅ 正解。
+- **原生转录**：需 Workspace Business Standard+ / Enterprise / Education Plus / Individual；recurring 会议可预配自动转录；2026-05 起管理员可强制参会者显式同意（默认关）。
+- Chrome 扩展（脆弱）、第三方 bot（音频进第三方）→ 排除。
+
+### 决策（与用户逐条确认）
+
+1. **形态 = 云端摄取服务 + 云端管线 + Web/Slack 入口**，不做 Meet 插件、不做云端 App。
+2. **转录 = Google 原生**：音频不出 Google，天然满足「只传文本不传语音」；Meet 场景下本地音频链路（双路录音/VAD/归一/MOSS/CAM++）整体退役，说话人来自 Google 账号身份。
+3. **质量先 A/B 实测再定**（用户拍板）：Google ASR 可能不如 MOSS（中英混杂术语），拿真实会四维对比（术语错听/说话人归属/时间戳粒度/繁简），可接受才动工。
+4. **团队多用户起步**（用户拍板）：每用户 OAuth（Workspace Internal 应用，免 Marketplace 审核），会议文本进各自知识库；跨人共享库后置。
+5. **Mac App 保留，双轨并行**（用户拍板）：非 Meet 场景 + 历史数据继续走现有链路。
+
+### 关键工程判断
+
+ResoundCore **后半段是纯 Swift + SQLite(FTS5/sqlite-vec)，Linux 云端可直接复用**（ZhConverter/Glossary/TranscriptCorrector/Chunker/ContextualEnricher/EmbeddingClient/Index/Summarizer/QueryPlanner/Reranker/Synthesizer）；**不用搬** macOS/音频部分（AVFoundation/ScreenCaptureKit/WhisperKit/FluidAudio/sherpa-onnx）。新增的只有 Google OAuth + Calendar 会议发现 + Conference Records 拉取。
+
+### 风险
+
+Google ASR 质量（Phase 0 一票裁决）· 同事会议文本出 Google 域的合规（倾向部署公司基础设施）· 30 天窗口要求摄取及时可靠 · Workspace 版本不足则整条路不通。
+
+详见 [spec](../superpowers/specs/2026-09-29-meet-cloud-ingest-design.md)。
+
+---
+
 ## 摘要空白事故：`max_tokens` 被思维链吃光，空结果静默落盘（2026-08-31）
 
 **触发**：用户报告两场会（07-31 Team Sprite / 08-28 A-Frontend）的摘要是空白。查下来 `summary.md` 是 **0 字节**，但 `transcript.json` 正常、无任何报错。

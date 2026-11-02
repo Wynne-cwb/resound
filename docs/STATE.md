@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-09-29（**新方向立项：Google Meet 云端摄取 + 管线上云**。会议都在 Meet → 调研定论：Meet 插件(Add-on)拿不到音频/字幕、Media API 还在 Developer Preview，正解是「Meet 原生转录（音频不出 Google）+ Conference Records API 会后拉文本（30 天窗口）」，云端管线复用 ResoundCore 后半段（纯 Swift+SQLite 可跑 Linux）。与用户确认：团队多用户起步（各自知识库）、质量先 A/B 实测再定、Mac App 保留双轨并行。**下一步 = Phase 0：确认 Workspace 版本支持转录 + 挑一场真实会做 Google 原生 vs MOSS 的 A/B 对比**。详见 [spec](../superpowers/specs/2026-09-29-meet-cloud-ingest-design.md) + DECISIONS 2026-09-29）
 > 最近更新：2026-08-31（**摘要空白事故修复：`max_tokens` 被思维链吃光 + 截断静默落盘**。用户报两场会摘要空白 → `summary.md` 是 0 字节但转录正常、零报错。实测重放坐实：`deepseek-v4-pro`/`-flash` 都是推理模型，DeepSeek 把 reasoning 和正文算进**同一份** `max_tokens`，写死的 3000 被思维链吃满（`finish_reason=length`、`reasoning_tokens=3000`、`content` 0 字），HTTP 仍 200 → 原样落盘。07-31 13:45 换上 3427 字符的新「通用模板」是引爆点。**范围是 17 条不是 2 条**——6 条 0 字节 + 11 条句中硬切断的残缺纪要；`suggestMergedTitle`(60 token) 实测 100% 失败、一直吃 fallback。**修法**：`maxTokens` 改 `Int? = nil` 不发送该字段（实测服务端放行到 8361 token）、新增 `ChatError.truncated` 把 `finish_reason=length`/空正文一律抛错**绝不写盘**、timeout 120→300s（单条实测 105.7s）、`enrichAll` 单 chunk 降级不中断索引；清掉 11 个调用点的估值。**编译全绿 + 单条验证 0B→7578B 结尾完整 + 17 条按原模板批量重跑**。详见 DECISIONS 2026-08-31）
 > 最近更新：2026-07-31（**撤销「说话人名字自动进偏置词表」**：用户判断该特性是累赘——人名无上限堆进 glossary 会顶破 whisper 的 896 字节 prompt 上限（07-03 那次转录全挂就是它引入的回归），截断时挤掉的还是真术语，且污染了手工维护的词表列表。已删 `Glossary.syncSpeakerNames` + `renameSpeakerInRecording` 的同步块与它专用的 `vaultRoot` 参数 + CLI `sync-speaker-names`；`cappedPrompt` 护栏保留。vault `glossary.txt` 110→58 条（移除 52 条人名，靠 `speaker_refs` 取证判定；保留 `Christine = Question`/`Abby = Abi`/`聪哥 = 冲哥` 三条带手写变体的）。**编译全绿 + CLI 验过 + README 双语同步；待 commit**。详见 DECISIONS 2026-07-31）
 > 最近更新：2026-07-29（**MOSS 静默截断：分片阈值 80→30min，推翻 07-28 的决策前提 + 整合外部 PR #1**。评估外部 PR 时全库取证：比对「音频时长 vs 转录末段时间戳」+ 逐条测尾部音量证伪静音尾巴 → **9 条录音确认漏转 12–51% 内容**（37.8–68.3min 区间，最严重 56.4min 只转出 27.5min），全部 `asr_model=moss-...-0.9b` 非 chunked。**截断时 segments 非空、HTTP 200、零报错** → 入库/索引/摘要/问答全照常，看不出异常；79.8% 那条正是 STATE 记着「58min 跑通验证」的那场。07-28「暂不降阈值」的前提（假设 80min 以下安全，依据上游文档的 90min 设计上限）**是没有证据的推断**。已整合 PR 8 项：AVFoundation 切片（删掉 ffmpeg/ffprobe 硬依赖——原 `probeDuration` 用 `try?` 吞错，没装 ffmpeg 会静默退回单发然后被截断）、`MossError.empty`、服务端 `[Sxx]` 降级解析（已离线验证）、在线转录无 key/失败回退本地、MossDeployer 装 fastapi、CLI `index-prune`、bundle 分发 dylib、FluidAudio 锁 <0.15.5（**已验证 v0.15.5 移除了我们在用的 DownloadUtils**）+ `Package.resolved` 移出 .gitignore（原先 clone 下来就编译不过）。保留我们的并发闸/倒挂保护/埋点。**编译通过 + CLI 验过 + README 双语同步；存量 9 条漏转录音用户拍板暂不动**。详见 DECISIONS 2026-07-29）
@@ -35,7 +36,7 @@
 
 ## 一句话现状
 
-CLI 全链路 + macOS App 已通且用户实测过（问答 / Meet 弹窗 / 录音 / 导入 / 摘要 / 说话人识别 / VAD 门控），**仓库已开源公开**。**当前焦点：文档大模块 P1 已端到端打通（M1 后端 + M2 视图模型 + M3 UI 全落地、编译通过）**，待实机验收。
+CLI 全链路 + macOS App 已通且用户实测过（问答 / Meet 弹窗 / 录音 / 导入 / 摘要 / 说话人识别 / VAD 门控），**仓库已开源公开**。**当前焦点：Google Meet 云端摄取新方向已立项（原生转录 + Conference Records API，团队多用户，管线上云）——Phase 0 = 转录质量 A/B 实测，见 [spec](../superpowers/specs/2026-09-29-meet-cloud-ingest-design.md)**。旧焦点（文档模块 P1、摘要空白修复重打包验收等）仍挂账，见下方焦点清单。
 
 ## ✅ 能力总览（细节全在 DECISIONS）
 
@@ -57,6 +58,8 @@ CLI 全链路 + macOS App 已通且用户实测过（问答 / Meet 弹窗 / 录�
 - **⚠️ 待办：重建后先短录测试 mic**；有空重启电脑清掉陈旧 swap。
 
 ## 🎯 当前焦点 / 下一步
+
+- **🆕 Google Meet 云端摄取 + 管线上云（2026-09-29，方向已定，Phase 0 未开始）**：会议都在 Meet → 不做 Meet 插件（Add-on 拿不到音频/字幕），转录改用 **Meet 原生转录**（音频不出 Google，天然满足「只传文本不传语音」），云端经 **Conference Records API** 会后拉文本（30 天窗口），管线复用 ResoundCore 后半段（纯 Swift+SQLite，Linux 可跑），做**团队多用户**（各自知识库）+ Web/Slack 入口；Mac App 保留双轨并行。**下一步 = Phase 0**：①Meet 里确认 Activities → Transcripts 存在（Workspace 版本一票否决点）②挑一场中英混杂真实会，原生转录 + Mac App 照常录，四维 A/B（术语错听/说话人归属/时间戳粒度/繁简）③脚本验通 `transcripts.entries` 拉取。详见 [spec](../superpowers/specs/2026-09-29-meet-cloud-ingest-design.md)。
 
 - **🆕 摘要空白修复（2026-08-31，编译全绿 + 17 条已重跑，待 App 重打包）**：根因=推理模型把思维链和正文算进同一份 `max_tokens`，写死的估值被思考吃光 → 空正文静默落盘。已删掉全部 11 处 `maxTokens` 估值 + 加 `ChatError.truncated` 护栏（[ChatClient.swift](../Sources/ResoundCore/ChatClient.swift)）。**下一步 = `killall Resound && ./scripts/bundle-app.sh release && open build/Resound.app`**——CLI 已是新逻辑，但 **App 里的摘要/问答走的是 App 二进制**，不重打包就还是老的写死值（同 2026-07-23 那个「配置切了但二进制没换」的坑）。验收点：①随便挑一条重跑的录音看摘要有完整结尾（含「行动项」「风险与洞察」板块）②故意断网点「重新生成摘要」→ 应弹失败 toast 而不是变空白 ③合并录音时的标题建议现在应该真能出 AI 标题（此前 60 token 一直静默 fallback）。详见 DECISIONS 2026-08-31。
 
