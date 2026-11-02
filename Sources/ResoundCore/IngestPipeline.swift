@@ -48,10 +48,8 @@ public struct IngestPipeline {
         title: String?,
         source: String,
         tags: [String],
-        model: String,
         language: String? = nil,
         hints: [String] = [],
-        maxFallback: Int = 5,
         push: Bool,
         plan: Plan? = nil,   // resume target: reuse this id/dir (see Plan) instead of a fresh one
         onNetworkWait: ((Bool) -> Void)? = nil,
@@ -110,28 +108,22 @@ public struct IngestPipeline {
         var mossLabels: [String]? = nil   // MOSS 路径：与 result 段一一对应的说话人标签（S01…）
         let tTranscribe = Date()
         // MOSS 优先：端到端「转录+说话人」一次产出（分轨也走混音——MOSS 联合建模本就为混叠多说话人
-        // 设计，分开转两遍会得到两个互不相认的标签空间）。失败回退 whisper 路径，行为同现状。
+        // 设计，分开转两遍会得到两个互不相认的标签空间）。瞬时错误已在 MossTranscriber 内按片重试
+        // （见 runSinglePassRetrying），到这还失败 → 任务显式失败可重试，不再降级到其它后端
+        // （本地 WhisperKit 已整体移除）。
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
                 let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
                                                            onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
                 if tracks != nil { log("   ℹ️ MOSS 模式：按混音整体转写（联合模型自带说话人分离）") }
-            } catch where NetworkWait.isConnectivityError(error) {
-                // Network trouble is not a reason to switch backends: fail as retryable, keep MOSS.
-                AppLog.error("MOSS 网络连不上，不回退 Whisper（可重试）", error)
-                throw error
             } catch {
-                log("   ⚠️ MOSS 转写失败，回退 Whisper：\(error)")
-                AppLog.error("MOSS 转写失败，回退 Whisper", error)
-                result = try await whisperTranscribe(dir: dir, audioOut: audioOut, tracks: tracks,
-                                                     glossary: glossary, model: model, language: language,
-                                                     maxFallback: maxFallback, log: log)
+                AppLog.error("MOSS 转写失败（瞬时错误已自动重试过），任务失败可重试", error)
+                throw error
             }
         } else {
             result = try await whisperTranscribe(dir: dir, audioOut: audioOut, tracks: tracks,
-                                                 glossary: glossary, model: model, language: language,
-                                                 maxFallback: maxFallback, log: log)
+                                                 glossary: glossary, language: language, log: log)
         }
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language) · ⏱ 转录 \(el(tTranscribe))")
 
@@ -201,7 +193,7 @@ public struct IngestPipeline {
     /// 原地重转录（保 id/目录/recording.yaml）：老录音换转写后端（如迁 MOSS）或修转录质量用。
     /// 重写 transcript.json（MOSS 时另写 moss-diar.json）；删旧 diarization.json——它按旧转录
     /// 的时间轴贴的标签，换了转录就作废。重索引/说话人命名/摘要由调用方接着串（CLI retranscribe）。
-    public func retranscribe(recDir: URL, model: String = "large-v3",
+    public func retranscribe(recDir: URL,
                              onNetworkWait: ((Bool) -> Void)? = nil,
                              log: @escaping (String) -> Void = { print($0) }) async throws {
         let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
@@ -227,18 +219,13 @@ public struct IngestPipeline {
                 let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
                                                            onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
-            } catch where NetworkWait.isConnectivityError(error) {
-                throw error   // same policy as ingest: never fall back to whisper over a network problem
             } catch {
-                log("   ⚠️ MOSS 转写失败，回退 Whisper：\(error)")
-                result = try await whisperTranscribe(dir: recDir, audioOut: audioOut, tracks: tracks,
-                                                     glossary: glossary, model: model, language: language,
-                                                     maxFallback: 5, log: log)
+                AppLog.error("MOSS 重转录失败（瞬时错误已自动重试过），任务失败可重试", error)
+                throw error   // 与 ingest 同策略：重试尽、显式失败，不降级
             }
         } else {
             result = try await whisperTranscribe(dir: recDir, audioOut: audioOut, tracks: tracks,
-                                                 glossary: glossary, model: model, language: language,
-                                                 maxFallback: 5, log: log)
+                                                 glossary: glossary, language: language, log: log)
         }
         log("   段数 \(result.transcript.segments.count)，语言 \(result.transcript.language) · ⏱ 转录 \(el(tTranscribe))")
 
@@ -287,17 +274,17 @@ public struct IngestPipeline {
     /// MOSS 未启用或失败时走它，行为与旧版一致（分轨文件的导出已提前到 ingest，本函数只转录）。
     private func whisperTranscribe(
         dir: URL, audioOut: URL, tracks: (mic: URL, sys: URL)?, glossary: Glossary,
-        model: String, language: String?, maxFallback: Int, log: (String) -> Void
+        language: String?, log: (String) -> Void
     ) async throws -> TranscribeResult {
         if let tracks {
             // 分轨转录（dual-track spec）：麦克风轨/系统轨各自 VAD→归一→转录（小声轨不再被大声轨掩盖、
             // 双链路重影不再互相污染），再按时间戳合并 + 去重。
             log("🎙 转录麦克风轨…")
-            let micR = try? await transcribeAudio(tracks.mic, glossary: glossary, model: model,
-                                                  language: language, maxFallback: maxFallback, log: log)
+            let micR = try? await transcribeAudio(tracks.mic, glossary: glossary,
+                                                  language: language, log: log)
             log("🖥 转录系统音频轨…")
-            let sysR = try? await transcribeAudio(tracks.sys, glossary: glossary, model: model,
-                                                  language: language, maxFallback: maxFallback, log: log)
+            let sysR = try? await transcribeAudio(tracks.sys, glossary: glossary,
+                                                  language: language, log: log)
             switch (micR, sysR) {
             case let (m?, s?):
                 let lang = s.transcript.segments.count >= m.transcript.segments.count
@@ -309,17 +296,20 @@ public struct IngestPipeline {
             case let (nil, s?): log("   ⚠️ 麦克风轨转录失败，仅用系统轨"); return s
             case (nil, nil):
                 log("   ⚠️ 两条分轨转录都失败，回退混音转录")
-                return try await transcribeAudio(audioOut, glossary: glossary, model: model,
-                                                 language: language, maxFallback: maxFallback, log: log)
+                return try await transcribeAudio(audioOut, glossary: glossary,
+                                                 language: language, log: log)
             }
         }
-        return try await transcribeAudio(audioOut, glossary: glossary, model: model,
-                                         language: language, maxFallback: maxFallback, log: log)
+        return try await transcribeAudio(audioOut, glossary: glossary,
+                                         language: language, log: log)
     }
 
     /// MOSS 云端转写（端到端转录+说话人）：VAD 门控 → 归一 → submit/poll → 时间戳映射回原轴。
-    /// 成功返回 (转录, 与段一一对应的 S01/S02 说话人标签)；抛错由调用方回退 whisper。
-    /// Connectivity errors are the exception: MossTranscriber waits for the network itself (see
+    /// 成功返回 (转录, 与段一一对应的 S01/S02 说话人标签)；失败直接抛给调用方显式失败，
+    /// 不再回退任何本地模型（本地 WhisperKit 已整体移除——慢、首载竞态、还撞 Apple Metal 栈崩溃）。
+    /// 重试策略在 MossTranscriber 内：瞬时错误（5xx/解析异常）按**单次提交**粒度重试 3 次
+    /// （分片模式只重跑失败的那一片），badConfig/4xx/timeout/empty 直接抛（见 isTransient）。
+    /// Connectivity errors never surface here: MossTranscriber waits for the network itself (see
     /// NetworkWait), and if one still escapes the callers rethrow it instead of falling back.
     private func transcribeMoss(
         _ audio: URL, cfg: Config, glossary: Glossary, onNetworkWait: ((Bool) -> Void)?,
@@ -350,32 +340,17 @@ public struct IngestPipeline {
         return (TranscribeResult(transcript: transcript, modelName: out.result.modelName), out.speakerLabels)
     }
 
-    /// 单个音频的完整转录链路：在线（VAD 门控 → 分窗响度归一 → whisper → 时间戳映射回原轴）或本地 WhisperKit。
-    /// ingest 的混音路径与分轨路径共用。
+    /// 单个音频的完整转录链路：在线 whisper（VAD 门控 → 分窗响度归一 → whisper → 时间戳映射回原轴）。
+    /// ingest 的混音路径与分轨路径共用。本地 WhisperKit 已整体移除：
+    /// 没配 key / 在线失败 → 显式抛错（任务可重试），不再静默降级到慢且不稳的本地模型。
     private func transcribeAudio(
-        _ audio: URL, glossary: Glossary, model: String, language: String?,
-        maxFallback: Int, log: (String) -> Void
+        _ audio: URL, glossary: Glossary, language: String?, log: (String) -> Void
     ) async throws -> TranscribeResult {
-        // 在线转录要 key：没配 key 就直接走本地（此前会裸打端点吃 401）。在线请求失败也回退本地——
-        // MOSS 失败已经回退到这条路了，这里再死整条链路就没有兜底了（转录不该有「必死」分支）。
-        if let cfg = try? Config.load(), cfg.transcribeOnline {
-            guard !cfg.transcribeKey.isEmpty else {
-                log("   ⚠️ 在线转录未配置 API key，改用本地 WhisperKit")
-                return try await localTranscribe(audio, glossary: glossary, model: model,
-                                                 language: language, maxFallback: maxFallback, log: log)
-            }
-            do {
-                return try await onlineTranscribe(audio, cfg: cfg, glossary: glossary,
-                                                  language: language, log: log)
-            } catch {
-                log("   ⚠️ 在线转录失败（\(error)），回退本地 WhisperKit")
-                AppLog.error("在线转录失败，回退本地 WhisperKit", error)
-                return try await localTranscribe(audio, glossary: glossary, model: model,
-                                                 language: language, maxFallback: maxFallback, log: log)
-            }
+        guard let cfg = try? Config.load(), cfg.transcribeOnline, !cfg.transcribeKey.isEmpty else {
+            throw ConfigError.missing("转写后端（配置 MOSS 云端或在线 whisper 的 API key）")
         }
-        return try await localTranscribe(audio, glossary: glossary, model: model,
-                                         language: language, maxFallback: maxFallback, log: log)
+        return try await onlineTranscribe(audio, cfg: cfg, glossary: glossary,
+                                          language: language, log: log)
     }
 
     /// 在线 whisper 单音频链路（VAD 门控 → 分窗响度归一 → 转录 → 时间戳映射回原轴）。
@@ -407,17 +382,6 @@ public struct IngestPipeline {
             }
             return result
         }
-    }
-
-    /// 本地 WhisperKit 单音频链路（在线路径的兜底）。
-    private func localTranscribe(
-        _ audio: URL, glossary: Glossary, model: String, language: String?,
-        maxFallback: Int, log: (String) -> Void
-    ) async throws -> TranscribeResult {
-        log("📝 WhisperKit 本地转录中（模型 \(model)，首次会下载模型）…")
-        return try await Transcriber(model: model, language: language,
-                                     prompt: glossary.promptString, maxFallback: maxFallback)
-            .transcribe(audio: audio)
     }
 
     /// 对 vault 内已有 transcript.json 重新做 繁→简归一 + 别名纠正并改写（免重新转录）。

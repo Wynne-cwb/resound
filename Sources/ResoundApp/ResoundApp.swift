@@ -83,7 +83,7 @@ struct MenuBarContent: View {
         }
         .disabled(rec.isFinishing)   // 只在秒级收尾时禁用；后台转写不再挡下一场录音
 
-        Button("打开 Resound 窗口") { activate() }
+        Button("打开 Resound 窗口") { MainWindow.show(using: openWindow) }
 
         Divider()
 
@@ -97,14 +97,31 @@ struct MenuBarContent: View {
         return "空闲 · 监听中"
     }
 
-    private func activate() {
-        NSApp.setActivationPolicy(.regular)   // 从菜单栏态恢复 Dock
+    private func activate() { MainWindow.show(using: openWindow) }
+}
+
+/// Single entry point that brings the main window back: menu bar item, Dock icon click, `open`.
+/// SwiftUI's default reopen handling does not recreate a closed main window here
+/// (`applicationShouldOpenUntitledFile` returns false), so every path opens it explicitly.
+enum MainWindow {
+    /// Captured from the main window's environment at launch; used when no view-provided action is at hand (reopen).
+    static var openAction: OpenWindowAction?
+
+    /// A minimized window reports `canBecomeMain == false`, so also match SwiftUI's "<scene id>-AppWindow-N" identifier;
+    /// otherwise a minimized main window would be missed and a second one opened.
+    static func isMain(_ w: NSWindow) -> Bool {
+        let isMainScene = w.canBecomeMain || (w.identifier?.rawValue.hasPrefix("main-AppWindow") ?? false)
+        return isMainScene && (w.isVisible || w.isMiniaturized)
+    }
+
+    static func show(using action: OpenWindowAction? = nil) {
+        NSApp.setActivationPolicy(.regular)   // leave menu-bar-only mode, show in Dock again
         NSApp.activate(ignoringOtherApps: true)
-        // 已有可见主窗 → 前置；否则(被关闭)重新打开
-        if let w = NSApp.windows.first(where: { $0.canBecomeMain && $0.isVisible }) {
+        if let w = NSApp.windows.first(where: isMain) {
+            if w.isMiniaturized { w.deminiaturize(nil) }
             w.makeKeyAndOrderFront(nil)
-        } else {
-            openWindow(id: "main")
+        } else if let open = action ?? openAction {
+            open(id: "main")
         }
     }
 }
@@ -113,15 +130,24 @@ struct MenuBarContent: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Dock icon click / `open` on a running app. Handle it ourselves instead of falling back to
+    /// AppKit's "open untitled" path, which SwiftUI declines once the main window is closed.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        MainWindow.show()
+        return false
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NotificationCenter.default.addObserver(self, selector: #selector(windowWillClose(_:)),
                                                name: NSWindow.willCloseNotification, object: nil)
     }
 
     @objc private func windowWillClose(_ note: Notification) {
-        // 关的是主内容窗(非浮动 panel/菜单)；关后若无可见主窗 → 退出 Dock(accessory)
+        // Only the main content window counts: menus and floating panels also post willClose,
+        // and reacting to those could drop the app to accessory while a reopen is in flight.
+        guard let closing = note.object as? NSWindow, closing.canBecomeMain else { return }
         DispatchQueue.main.async {
-            let hasMainWindow = NSApp.windows.contains { $0.canBecomeMain && $0.isVisible }
+            let hasMainWindow = NSApp.windows.contains { $0 !== closing && MainWindow.isMain($0) }
             if !hasMainWindow { NSApp.setActivationPolicy(.accessory) }
         }
     }
@@ -153,6 +179,7 @@ struct WindowConfigurator: NSViewRepresentable {
     var isDark: Bool
     func makeNSView(context: Context) -> NSView {
         let v = NSView()
+        MainWindow.openAction = context.environment.openWindow
         DispatchQueue.main.async { configure(v.window) }
         return v
     }

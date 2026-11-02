@@ -61,7 +61,39 @@ public struct MossTranscriber {
         if dur > Self.chunkThresholdSec {
             return try await transcribeChunked(audio: audio, totalDuration: dur, timeout: timeout, log: log)
         }
-        return try await runSinglePass(audio: audio, timeout: timeout, log: log)
+        return try await runSinglePassRetrying(audio: audio, timeout: timeout, what: "MOSS",
+                                               log: log, passLog: log)
+    }
+
+    /// 瞬时错误才值得重试：HTTP 5xx（容器被 preemption/signal 杀 → 一次 500，重提交基本就过）、
+    /// 响应解析异常、及非连接类的未知网络抖动。其余重试只是白等/白烧额度：
+    /// `badConfig` / 4xx（401/403/404）重试必然同样失败；`timeout` 单次已等满 deadline；
+    /// `empty` 是「无语音」的正常结果不是故障。连接类错误也不在此重试（轮询内部无限等网络）。
+    static func isTransient(_ error: Error) -> Bool {
+        switch error {
+        case MossError.http(let code, _): return code >= 500
+        case MossError.badResponse: return true
+        case is MossError: return false
+        default: return !NetworkWait.isConnectivityError(error)
+        }
+    }
+
+    /// 单次提交的重试封装：仅瞬时错误（见 `isTransient`）重试，最多 3 次（共 4 次尝试，
+    /// 10/20/40s 退避），其余错误直接外抛。分片模式下由 `runChunk` 调用——只重跑失败的那一片，
+    /// 不再整轮重提交所有分片。`log` 收重试进度，`passLog` 收单次提交的内部日志（分片时静音）。
+    private func runSinglePassRetrying(audio: URL, timeout: TimeInterval, what: String,
+                                       log: @escaping (String) -> Void,
+                                       passLog: @escaping (String) -> Void) async throws -> Output {
+        var delay: UInt64 = 10_000_000_000
+        for attempt in 1...3 {
+            do { return try await runSinglePass(audio: audio, timeout: timeout, log: passLog) }
+            catch where Self.isTransient(error) {
+                log("   ⚠️ \(what) 瞬时失败（第 \(attempt) 次：\(error)），\(delay / 1_000_000_000)s 后重试…")
+                try await Task.sleep(nanoseconds: delay)
+                delay *= 2
+            }
+        }
+        return try await runSinglePass(audio: audio, timeout: timeout, log: passLog)   // 第 4 次：错误直接外抛
     }
 
     /// 单次提交：submit → 轮询 → 解析。是标准短音频路径，也被 chunked 分片路径内部复用。
@@ -192,7 +224,8 @@ public struct MossTranscriber {
                           _ log: @escaping (String) -> Void) async throws -> (Int, Output?) {
         log("   ▶︎ 片 P\(index + 1) 上传（\(Int(seconds))s 音频）")
         do {
-            let out = try await runSinglePass(audio: url, timeout: timeout, log: { _ in })
+            let out = try await runSinglePassRetrying(audio: url, timeout: timeout,
+                                                      what: "片 P\(index + 1)", log: log, passLog: { _ in })
             log("   ✓ 片 P\(index + 1) 完成（\(out.result.transcript.segments.count) 段）")
             return (index, out)
         } catch MossError.empty {

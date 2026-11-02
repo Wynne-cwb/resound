@@ -1172,12 +1172,8 @@ final class LibraryModel: ObservableObject {
 
     // MARK: 转写队列（导入 / 录音 / 重试共用）
 
-    /// 转写并发上限：云端后端（MOSS / 在线 whisper）可同时跑 2 条；本地 WhisperKit 串行
-    /// （多条同时推理抢 GPU/ANE 反而更慢）。每次取活时重算，设置里换后端立即生效。
-    private var maxIngestConcurrency: Int {
-        guard let c = cfg() else { return 1 }
-        return (c.mossEnabled || c.transcribeOnline) ? 2 : 1
-    }
+    /// 转写并发上限：后端只剩云端（MOSS / 在线 whisper，本地 WhisperKit 已移除）→ 固定 2 条并行。
+    private var maxIngestConcurrency: Int { 2 }
 
     /// 排进转写队列：立即返回，后台按并发上限自动取活。
     /// 录音（`enqueueRecording`）与导入共用同一条队列 → 录音停了就能马上开下一场，转写在后台排着。
@@ -1330,7 +1326,7 @@ final class LibraryModel: ObservableObject {
             } else {
                 out = try await pipeline
                     .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
-                            model: "large-v3", language: "zh", hints: [], push: false, plan: plan,
+                            language: "zh", hints: [], push: false, plan: plan,
                             onNetworkWait: { [weak self] waiting in
                                 Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
                             })
