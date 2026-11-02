@@ -8,7 +8,7 @@ public final class ZhConverter {
 
     private init() {
         var m: [Character: Character] = [:]
-        if let url = Bundle.module.url(forResource: "TSCharacters", withExtension: "txt"),
+        if let url = Bundle.resoundCore.url(forResource: "TSCharacters", withExtension: "txt"),
            let s = try? String(contentsOf: url, encoding: .utf8) {
             for line in s.split(whereSeparator: \.isNewline) {
                 if line.hasPrefix("#") { continue }

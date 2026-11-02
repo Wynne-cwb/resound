@@ -5,6 +5,9 @@ import ResoundCore
 /// MCP 来源品牌图标加载（打包进 App 资源的 SVG，NSImage 原生矢量渲染，按 kind 缓存）。
 enum MCPIcons {
     private static var cache: [String: NSImage] = [:]
+    /// ResoundApp 的资源包（MCPIcons SVG）。不直接用 Bundle.module——打包进 .app 后
+    /// 它在别人机器上找不到 Contents/Resources 里的资源包（见 ResourceBundle 注释）。
+    private static let resources: Bundle = ResourceBundle.locate("Resound_ResoundApp") { .module }
 
     /// 黑白单色 logo（随主题着色）；彩色 logo 原样渲染。
     static func isMonochrome(_ kind: MCPSourceKind) -> Bool {
@@ -15,7 +18,7 @@ enum MCPIcons {
         let name = kind.rawValue   // notion/atlassian/google/figma/custom → 文件名（custom=mcp.svg）
         let file = kind == .custom ? "mcp" : name
         if let c = cache[file] { return c }
-        guard let url = Bundle.module.url(forResource: file, withExtension: "svg", subdirectory: "MCPIcons"),
+        guard let url = resources.url(forResource: file, withExtension: "svg", subdirectory: "MCPIcons"),
               let img = NSImage(contentsOf: url) else { return nil }
         cache[file] = img
         return img
