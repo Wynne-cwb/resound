@@ -108,15 +108,18 @@ public struct IngestPipeline {
         var mossLabels: [String]? = nil   // MOSS 路径：与 result 段一一对应的说话人标签（S01…）
         let tTranscribe = Date()
         // MOSS 优先：端到端「转录+说话人」一次产出（分轨也走混音——MOSS 联合建模本就为混叠多说话人
-        // 设计，分开转两遍会得到两个互不相认的标签空间）。瞬时错误已在 MossTranscriber 内按片重试
+        // 设计，分开转两遍会得到两个互不相认的标签空间；混音前先做跨轨去重，见 transcribeMoss）。瞬时错误已在 MossTranscriber 内按片重试
         // （见 runSinglePassRetrying），到这还失败 → 任务显式失败可重试，不再降级到其它后端
         // （本地 WhisperKit 已整体移除）。
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
-                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
+                // A retry runs on the mix only, but an earlier attempt may already have archived the tracks here.
+                let archived = (dir.appendingPathComponent("track-mic.m4a"), dir.appendingPathComponent("track-system.m4a"))
+                let dedupTracks = tracks ?? (FileManager.default.fileExists(atPath: archived.0.path)
+                    && FileManager.default.fileExists(atPath: archived.1.path) ? (mic: archived.0, sys: archived.1) : nil)
+                let (r, labels) = try await transcribeMoss(audioOut, tracks: dedupTracks, cfg: cfg, glossary: glossary,
                                                            onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
-                if tracks != nil { log("   ℹ️ MOSS 模式：按混音整体转写（联合模型自带说话人分离）") }
             } catch {
                 AppLog.error("MOSS 转写失败（瞬时错误已自动重试过），任务失败可重试", error)
                 throw error
@@ -216,7 +219,7 @@ public struct IngestPipeline {
         let tTranscribe = Date()
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
-                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
+                let (r, labels) = try await transcribeMoss(audioOut, tracks: tracks, cfg: cfg, glossary: glossary,
                                                            onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
             } catch {
@@ -270,6 +273,17 @@ public struct IngestPipeline {
         }
     }
 
+    /// Debug/eval entry: run the exact MOSS upload chain of ingest (VAD gate → normalize → MOSS) on an
+    /// arbitrary audio file and return the raw result + speaker labels, without touching the vault.
+    public func mossTranscribeRaw(_ audio: URL, tracks: (mic: URL, sys: URL)? = nil,
+                                  log: @escaping (String) -> Void = { print($0) })
+        async throws -> (TranscribeResult, [String]) {
+        let cfg = try Config.load()
+        guard cfg.mossEnabled else { throw ConfigError.missing("MOSS 未启用") }
+        return try await transcribeMoss(audio, tracks: tracks, cfg: cfg, glossary: Glossary.load(vaultRoot: vault.root),
+                                        onNetworkWait: nil, log: log)
+    }
+
     /// whisper 路径（在线/本地 + 分轨转录合并）——原 ingest 内联逻辑原样抽出，
     /// MOSS 未启用或失败时走它，行为与旧版一致（分轨文件的导出已提前到 ingest，本函数只转录）。
     private func whisperTranscribe(
@@ -312,16 +326,34 @@ public struct IngestPipeline {
     /// Connectivity errors never surface here: MossTranscriber waits for the network itself (see
     /// NetworkWait), and if one still escapes the callers rethrow it instead of falling back.
     private func transcribeMoss(
-        _ audio: URL, cfg: Config, glossary: Glossary, onNetworkWait: ((Bool) -> Void)?,
-        log: @escaping (String) -> Void
+        _ audio: URL, tracks: (mic: URL, sys: URL)?, cfg: Config, glossary: Glossary,
+        onNetworkWait: ((Bool) -> Void)?, log: @escaping (String) -> Void
     ) async throws -> (TranscribeResult, [String]) {
         log("🤖 MOSS 云端转写中（转录+说话人一次产出，GPU 推理约音频时长 4 成）…")
         var upload = audio
         var temps: [URL] = []
         var vadSpans: [VADGate.Span] = []
+        // Meeting tracks: one track often carries a delayed copy of the other (room voices echoed back
+        // through Meet, or speaker playback picked up by the mic), which MOSS turns into a phantom second
+        // speaker repeating every sentence. Suppress the copy and remix — upload input only, audio.m4a
+        // stays as recorded; same time axis, so timestamps need no remap. No duplicates / any failure →
+        // keep the plain mix.
+        if let tracks {
+            let tDedup = Date()
+            do {
+                if let d = try TrackDedup.dedupMix(mic: tracks.mic, sys: tracks.sys, log: log) {
+                    upload = d.url; temps.append(d.url)
+                } else {
+                    log("   ℹ️ 分轨未检测到跨轨重复，按原混音转写")
+                }
+            } catch {
+                log("   ⚠️ 分轨去重失败，按原混音转写：\(error)")
+            }
+            log(String(format: "   ⏱ 分轨去重 %.1fs", Date().timeIntervalSince(tDedup)))
+        }
         // 与在线 whisper 同款预处理：VAD 剪静音（顺带省 GPU 秒数=省额度）+ 分窗响度归一（仅上传副本）
         let tVAD = Date()
-        if let r = try? await VADGate.voicedM4A(of: audio, log: log) {
+        if let r = try? await VADGate.voicedM4A(of: upload, log: log) {
             upload = r.url; temps.append(r.url); vadSpans = r.spans
         }
         log(String(format: "   ⏱ VAD 门控 %.1fs", Date().timeIntervalSince(tVAD)))

@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRebuild.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRebuild.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, MossBench.self, TrackDedupCommand.self, Doctor.self]
     )
 }
 
@@ -731,6 +731,73 @@ struct NormalizeAudio: AsyncParsableCommand {
         } else {
             print("✅ 已归一 → \(url.path)")
         }
+    }
+}
+
+/// resound moss-bench <audio> --out x.json —— run ingest's MOSS chain on one file, dump raw segments + labels
+struct MossBench: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "moss-bench",
+        abstract: "调试：对单个音频跑与入库相同的 MOSS 链路（VAD→归一→MOSS），原始段+说话人标签写 JSON，不写 vault")
+
+    @Argument(help: "音频文件路径")
+    var file: String
+
+    @Option(name: .long, help: "vault 根目录（只读：取 glossary 热词）")
+    var vault: String
+
+    @Option(name: .long, help: "输出 JSON 路径")
+    var out: String
+
+    @Option(name: .long, help: "会议麦克风轨（与 --sys 同给时先做跨轨去重，同入库路径）")
+    var mic: String?
+
+    @Option(name: .long, help: "会议系统音频轨")
+    var sys: String?
+
+    func run() async throws {
+        let tracks = mic.flatMap { m in sys.map { (mic: URL(fileURLWithPath: m), sys: URL(fileURLWithPath: $0)) } }
+        let (r, labels) = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
+            .mossTranscribeRaw(URL(fileURLWithPath: file), tracks: tracks)
+        struct Row: Encodable { let start: Double; let end: Double; let speaker: String; let text: String }
+        let rows = zip(r.transcript.segments, labels).map {
+            Row(start: $0.start, end: $0.end, speaker: $1, text: $0.text)
+        }
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+        try enc.encode(rows).write(to: URL(fileURLWithPath: out))
+        print("✅ \(rows.count) 段，\(Set(labels).count) 位说话人 → \(out)")
+    }
+}
+
+/// resound track-dedup <mic> <sys> --out x.wav —— cross-track duplicate suppression + mix (the MOSS upload input)
+struct TrackDedupCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "track-dedup",
+        abstract: "调试：麦克风轨/系统轨去重后混音（与入库送 MOSS 前同一实现），无重复时不输出")
+
+    @Argument(help: "麦克风轨（与系统轨同轴）")
+    var mic: String
+
+    @Argument(help: "系统音频轨")
+    var sys: String
+
+    @Option(name: .long, help: "输出 wav 路径（不给则只检测、不写音频）")
+    var out: String?
+
+    func run() async throws {
+        let t0 = Date()
+        guard let out else {
+            let r = try TrackDedup.detect(mic: URL(fileURLWithPath: mic), sys: URL(fileURLWithPath: sys))
+            print(String(format: "%@（%.1fs）", r?.summary ?? "无跨轨重复", Date().timeIntervalSince(t0)))
+            return
+        }
+        guard let r = try TrackDedup.dedupMix(mic: URL(fileURLWithPath: mic), sys: URL(fileURLWithPath: sys),
+                                              log: { print($0) }) else {
+            print(String(format: "ℹ️ 未检测到跨轨重复（%.1fs），入库会直接用原混音", Date().timeIntervalSince(t0)))
+            return
+        }
+        let dst = URL(fileURLWithPath: out)
+        try? FileManager.default.removeItem(at: dst)
+        try FileManager.default.moveItem(at: r.url, to: dst)
+        print(String(format: "✅ %@ → %@（%.1fs）", r.report.summary, out, Date().timeIntervalSince(t0)))
     }
 }
 
