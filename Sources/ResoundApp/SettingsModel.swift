@@ -168,7 +168,7 @@ final class SettingsModel: ObservableObject {
         permRows = [
             PermRow(label: "麦克风", desc: "录制会议中你自己的声音。", granted: mic),
             PermRow(label: "屏幕录制", desc: "采集屏幕中其他参会者的声音。", granted: screen),
-            PermRow(label: "自动化 · Chrome", desc: "检测浏览器中开始的 Google Meet 会议。", granted: true),
+            PermRow(label: "自动化 · \(DefaultBrowser.detect().name)", desc: "检测浏览器中开始的 Google Meet 会议。", granted: true),
         ]
         needsAttention = permRows.contains { !$0.granted }
     }

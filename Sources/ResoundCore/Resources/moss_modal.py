@@ -92,7 +92,10 @@ def _check_auth(request: fastapi.Request):
 
 @app.cls(
     image=image,
-    gpu="L4",
+    # 按优先级给备选卡型：只写 L4 在容量紧张时会排队 10min+ 甚至被抢占（2026-10-31 实测）。
+    # ⚠️ 不能加 T4（16GB）：权重虽小，但长音频（25min 分片）的激活/KV cache 会把显存顶到
+    # 14GB+ 直接 CUDA OOM（2026-10-31 实测 HTTP 500），必须 24GB 级的卡。
+    gpu=["L4", "A10G"],
     volumes={"/models": vol},
     scaledown_window=180,
     timeout=3600,

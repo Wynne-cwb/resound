@@ -1,8 +1,41 @@
 import Foundation
+import AppKit
 import CoreAudio
 
-/// Google Meet 检测：轮询 Chrome 标签 URL(找会议室链接) + 麦克风占用确认在通话。
-/// 不需 Chrome 扩展，只需自动化权限(首次弹 TCC：Resound 想控制 Google Chrome)。
+/// 系统默认浏览器（会议检测的目标）。团队成员不都用 Chrome，检测跟着默认浏览器走。
+/// Chromium 系（Chrome/Edge/Brave/Vivaldi/Arc）与 Safari 的 AppleScript 方言略有差异；
+/// Firefox 等不开放 AppleScript 读标签 → `.unsupported`（会议检测不可用，手动录音不受影响）。
+public struct DefaultBrowser: Sendable {
+    public enum Kind: Sendable { case chromium, safari, unsupported }
+    public let bundleID: String
+    public let name: String      // 展示名（权限卡/设置页用）
+    public let kind: Kind
+
+    /// 以「https 链接默认由谁打开」为准；探测不到时回退 Chrome（老行为）。
+    public static func detect() -> DefaultBrowser {
+        let fallback = DefaultBrowser(bundleID: "com.google.Chrome", name: "Google Chrome", kind: .chromium)
+        guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://meet.google.com")!),
+              let bundle = Bundle(url: appURL), let id = bundle.bundleIdentifier else { return fallback }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? appURL.deletingPathExtension().lastPathComponent
+        let lower = id.lowercased()
+        let chromiumPrefixes = ["com.google.chrome", "com.microsoft.edgemac", "com.brave.browser",
+                                "com.vivaldi.vivaldi", "org.chromium.chromium",
+                                "company.thebrowser.browser",   // Arc
+                                "company.thebrowser.dia"]       // Dia（2026-11-01 实测支持 Chrome AppleScript 方言）
+        if chromiumPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return DefaultBrowser(bundleID: id, name: name, kind: .chromium)
+        }
+        if lower == "com.apple.safari" {
+            return DefaultBrowser(bundleID: id, name: name, kind: .safari)
+        }
+        return DefaultBrowser(bundleID: id, name: name, kind: .unsupported)
+    }
+}
+
+/// Google Meet 检测：轮询默认浏览器标签 URL(找会议室链接) + 麦克风占用确认在通话。
+/// 不需浏览器扩展，只需自动化权限(首次弹 TCC：Resound 想控制 <浏览器>)。
 public final class MeetWatcher: @unchecked Sendable {
 
     public enum Event {
@@ -10,21 +43,31 @@ public final class MeetWatcher: @unchecked Sendable {
         case ended
     }
 
-    public init() {}
+    public let browser: DefaultBrowser
 
-    // MARK: Chrome 标签轮询（AppleScript / Apple Events）
+    public init(browser: DefaultBrowser = .detect()) { self.browser = browser }
 
-    /// 返回当前打开的某个 Meet 会议室的 (URL, 会议名)。会议名取自 Chrome 标签标题
-    /// (日历预订的会议标题通常会出现在标签页标题里)；无会议返回 nil。
-    public func chromeMeeting() -> (url: String, title: String?)? {
+    // MARK: 浏览器标签轮询（AppleScript / Apple Events）
+
+    /// 返回当前打开的某个 Meet 会议室的 (URL, 会议名)。会议名取自浏览器标签标题
+    /// (日历预订的会议标题通常会出现在标签页标题里)；无会议/浏览器不支持返回 nil。
+    public func browserMeeting() -> (url: String, title: String?)? {
+        guard browser.kind != .unsupported else { return nil }
+        // Safari 的标签标题属性叫 name，Chromium 系叫 title；URL/标题可能是 missing value
+        // （about:blank 等），直接拼接会让整段脚本报错 → 先落地成空串。
+        let titleProp = browser.kind == .safari ? "name" : "title"
         // 每个标签输出 "URL\t标题"，用换行分隔。
         let script = """
-        if application "Google Chrome" is running then
+        if application id "\(browser.bundleID)" is running then
             set out to ""
-            tell application "Google Chrome"
+            tell application id "\(browser.bundleID)"
                 repeat with w in windows
                     repeat with t in tabs of w
-                        set out to out & (URL of t) & "\t" & (title of t) & "\n"
+                        set u to URL of t
+                        if u is missing value then set u to ""
+                        set n to \(titleProp) of t
+                        if n is missing value then set n to ""
+                        set out to out & u & "\t" & n & "\n"
                     end repeat
                 end repeat
             end tell
@@ -71,7 +114,7 @@ public final class MeetWatcher: @unchecked Sendable {
         var errorDict: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return nil }
         let result = script.executeAndReturnError(&errorDict)
-        if errorDict != nil { return nil }   // 无权限/Chrome 未开/脚本错 → 当作没有会议
+        if errorDict != nil { return nil }   // 无权限/浏览器未开/脚本错 → 当作没有会议
         return result.stringValue
     }
 
@@ -102,14 +145,14 @@ public final class MeetWatcher: @unchecked Sendable {
 
     /// 持续轮询，进入/离开会议时回调。requireMic=true 时需"会议室 URL + 麦克风占用"才算在通话。
     /// 一直跑到 Task 被取消。
-    /// - endConfirmations: 连续多少次「非会议」才判定为结束（防抖）。Chrome 标签轮询偶发读不到 /
+    /// - endConfirmations: 连续多少次「非会议」才判定为结束（防抖）。浏览器标签轮询偶发读不到 /
     ///   麦克风瞬时释放会误判结束——自动停录依赖 `.ended`，误触发会把录音中途掐掉，故需连续确认。
     public func watch(intervalSec: Double = 4, requireMic: Bool = true, endConfirmations: Int = 1,
                       onEvent: @escaping (Event) -> Void) async {
         var inMeeting = false
         var inactiveStreak = 0
         while !Task.isCancelled {
-            let meeting = chromeMeeting()
+            let meeting = browserMeeting()
             let active = (meeting != nil) && (!requireMic || micInUse())
             if active {
                 inactiveStreak = 0

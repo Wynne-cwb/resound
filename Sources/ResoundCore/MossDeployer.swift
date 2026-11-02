@@ -88,7 +88,7 @@ public enum MossDeployer {
 
         // ⑤ 部署（首次构建云端镜像约 3 分钟；重部署秒级）
         log("⑤ 部署 MOSS 服务（首次约 3 分钟）…")
-        guard let script = Bundle.module.url(forResource: "moss_modal", withExtension: "py") else {
+        guard let script = Bundle.resoundCore.url(forResource: "moss_modal", withExtension: "py") else {
             throw DeployError.step("内置脚本", "app bundle 里没找到 moss_modal.py")
         }
         let localScript = supportDir.appendingPathComponent("moss_modal.py")

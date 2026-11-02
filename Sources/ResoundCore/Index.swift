@@ -84,12 +84,36 @@ public final class Index {
         create table if not exists documents(id text primary key, title text, imported_at text);
         create table if not exists doc_links(doc_id text, recording_id text);
         """)
+        // 向量表维度自适应：建库时机可能早于维度探测（onboarding 自动验证是异步的，
+        // App 启动即建库 → 先按默认 4096 建了表），真实模型维度不同（如 gemini 3072）
+        // 时后续插入必报维度不匹配、且 create-if-not-exists 永远不会自己修好。
+        // 发现 DDL 里的维度 ≠ 当前配置 → 重建向量表并清掉 chunks/FTS（索引是派生物，
+        // 重建索引即恢复；embedding_cache 按模型分键不受影响）。
+        if let existing = vecTableDim(), existing != dim {
+            try exec("""
+            drop table if exists chunks_vec;
+            delete from chunks;
+            delete from chunks_fts;
+            create virtual table chunks_vec using vec0(embedding float[\(dim)]);
+            """)
+        }
         // 增量迁移（旧库 create-if-not-exists 不会加新列）。
         addColumnIfMissing(table: "chunks", column: "recording_date", decl: "text")
         addColumnIfMissing(table: "chunks", column: "source_kind", decl: "text default 'recording'")
         addColumnIfMissing(table: "chunks", column: "doc_id", decl: "text")
         addColumnIfMissing(table: "recordings", column: "summary", decl: "text")
         addColumnIfMissing(table: "recordings", column: "summary_template", decl: "text")
+    }
+
+    /// 读 chunks_vec 的建表 DDL 里的维度；表不存在/解析不出返回 nil。
+    private func vecTableDim() -> Int? {
+        var st: OpaquePointer?
+        sqlite3_prepare_v2(db, "select sql from sqlite_master where name='chunks_vec'", -1, &st, nil)
+        defer { sqlite3_finalize(st) }
+        guard sqlite3_step(st) == SQLITE_ROW, let c = sqlite3_column_text(st, 0) else { return nil }
+        let sql = String(cString: c)
+        guard let r = sql.range(of: #"float\[(\d+)\]"#, options: .regularExpression) else { return nil }
+        return Int(sql[r].dropFirst("float[".count).dropLast(1))
     }
 
     /// 若列不存在则 ALTER TABLE 加上（幂等，便于旧索引平滑升级）。
