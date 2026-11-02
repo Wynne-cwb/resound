@@ -1124,17 +1124,11 @@ struct Transcribe: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签，空格分隔")
     var tags: [String] = []
 
-    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
-    var model: String = "large-v3"
-
     @Option(name: .long, help: "语言代码（如 zh / en），留空自动检测；中英混杂建议填 zh")
     var language: String?
 
     @Option(name: .long, parsing: .upToNextOption, help: "临时词表偏置词（叠加 vault 的 glossary.txt）")
     var hint: [String] = []
-
-    @Option(name: .long, help: "温度回退次数（默认 5；调低提速、质量略降）")
-    var maxFallback: Int = 5
 
     @Flag(name: .long, help: "完成后 git commit + push 回 vault")
     var push = false
@@ -1146,10 +1140,8 @@ struct Transcribe: AsyncParsableCommand {
                 title: title,
                 source: source,
                 tags: tags,
-                model: model,
                 language: language,
                 hints: hint,
-                maxFallback: maxFallback,
                 push: push
             )
         print("✅ 完成：\(out.id)")
@@ -1204,9 +1196,6 @@ struct RecordMeeting: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签")
     var tags: [String] = []
 
-    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
-    var model: String = "large-v3"
-
     @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")
     var maxSeconds: Double?
 
@@ -1224,7 +1213,7 @@ struct RecordMeeting: AsyncParsableCommand {
         let tracks: (mic: URL, sys: URL)? = { if let m = cap.mic, let s = cap.sys { return (m, s) }; return nil }()
         let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
             .ingest(audioPath: cap.mixed, tracks: tracks, title: title, source: source, tags: tags,
-                    model: model, language: language, hints: hint, push: push)
+                    language: language, hints: hint, push: push)
         for u in [cap.mixed, cap.mic, cap.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
         print("✅ 完成：\(out.id)")
     }
@@ -1263,7 +1252,7 @@ struct RecoverMeeting: AsyncParsableCommand {
         let tracks: (mic: URL, sys: URL)? = { if let m = r.mic, let s = r.sys { return (m, s) }; return nil }()
         let out = try await IngestPipeline(vaultRoot: URL(fileURLWithPath: vault))
             .ingest(audioPath: r.mixed, tracks: tracks, title: title, source: "meeting", tags: [],
-                    model: "large-v3", language: language, hints: [], push: false)
+                    language: language, hints: [], push: false)
         for u in [r.mixed, r.mic, r.sys].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
         print("✅ 抢救完成并入库：\(out.id)")
     }
@@ -1287,9 +1276,6 @@ struct Record: AsyncParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "标签")
     var tags: [String] = []
 
-    @Option(name: .long, help: "（遗留参数，本地 WhisperKit 已移除，仅占位兼容）")
-    var model: String = "large-v3"
-
     @Option(name: .long, help: "最长录音秒数（默认无限，按 Enter 停止）")
     var maxSeconds: Double?
 
@@ -1310,7 +1296,6 @@ struct Record: AsyncParsableCommand {
                 title: title,
                 source: source,
                 tags: tags,
-                model: model,
                 language: language,
                 hints: hint,
                 push: push

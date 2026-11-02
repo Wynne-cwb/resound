@@ -1326,7 +1326,7 @@ final class LibraryModel: ObservableObject {
             } else {
                 out = try await pipeline
                     .ingest(audioPath: p.url, tracks: tracks, title: p.title, source: p.source, tags: [],
-                            model: "large-v3", language: "zh", hints: [], push: false, plan: plan,
+                            language: "zh", hints: [], push: false, plan: plan,
                             onNetworkWait: { [weak self] waiting in
                                 Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
                             })

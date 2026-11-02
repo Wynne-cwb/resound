@@ -68,5 +68,10 @@ let package = Package(
             resources: [.copy("Resources/MCPIcons")],   // MCP 来源品牌图标（SVG，NSImage 原生渲染）
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "ResoundCoreTests",
+            dependencies: ["ResoundCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

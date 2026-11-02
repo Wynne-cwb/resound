@@ -33,7 +33,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 ## 功能特性
 
 - **会议录音** — 一键录制麦克风 + Google Meet 对方声音（ScreenCaptureKit 双路捕获；两轨按真实起点对齐后混音存档，且**分轨同时保留**——各自独立转录再按时间合并去重，现场+线上混合会里同一句话走两条链路的「重影」不会污染转录）；检测到 Meet 自动弹屏级提示，可设为**会议开始自动开录 / 结束自动停录**（或弹一键确认窗），全程无需手动。录音时屏幕上常驻一颗**可拖动的小浮窗**（脉冲红点 + 计时 + 停止按钮），悬浮在其它 App 之上，让你随时知道正在录音、一键即可停——即使主窗口已隐藏也看得到。可在**设置 › 通用 › 录音浮窗**里开关。停止录音只花「对齐混音」那几秒，**转写随后在后台排队进行**（云端后端最多两条并行，本地一条一条来），所以一场会刚录完就能**立刻开始录下一场**，不必等上一场转完。排队/转写进度显示在录音库顶部；排队途中退出 App 也不丢音频——下次启动自动捞回，一键重试——重试会续写到同一条录音，同一场会不会入库两次。
-- **转录** — 三种后端：**MOSS 云端（推荐）**、在线 whisper、本地 WhisperKit。MOSS（[MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize)，Apache-2.0）是端到端「转录+说话人」联合模型——谁说了什么一次产出、说话人归属显著强于拼接式方案，设置里**一键部署到你自己的 Modal 账号**（免费额度内基本零成本），MOSS 服务失败自动回退 whisper——但**断网不回退**：网络断开时任务暂停（显示「等待网络」），恢复后继续走 MOSS，能续上服务端同一个任务就不重提交。whisper 路径默认在线 `whisper-large-v3-turbo`（快），本地 WhisperKit 作离线兜底；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做**分窗自适应响度归一**（整条小声、前小后大都能救）。会议录音**两条分轨各自独立转录**再按时间戳合并去重——现场+线上混合会里同一句话走两条链路的「重影」不再互相污染。转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
+- **转录** — 两种云端后端：**MOSS（推荐）**、在线 whisper。MOSS（[MOSS-Transcribe-Diarize](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize)，Apache-2.0）是端到端「转录+说话人」联合模型——谁说了什么一次产出、说话人归属显著强于拼接式方案，设置里**一键部署到你自己的 Modal 账号**（免费额度内基本零成本）。云端瞬时故障（5xx / 响应异常）**按单次提交自动重试**（最多 3 次退避重试；分片模式只重跑失败的那一片），仍失败则任务**显式失败、可一键重试**——绝不静默降级成质量差一截的转录。断网也不会让任务失败：暂停（显示「等待网络」），恢复后续上服务端同一个任务。whisper 路径默认在线 `whisper-large-v3-turbo`（快）；上传前用 silero VAD **剪掉长静音/噪声**（减 whisper「谢谢观看」类幻觉、省 token，时间戳映射回原始轴）再做**分窗自适应响度归一**（整条小声、前小后大都能救）。会议录音**两条分轨各自独立转录**再按时间戳合并去重——现场+线上混合会里同一句话走两条链路的「重影」不再互相污染。转录后繁→简归一 + 词表纠错 + **LLM 校对**（修同音错字、英文专名错听）。
 - **说话人识别** — Sortformer 神经分割（跑 Apple Neural Engine）→ silero VAD 去静音 → CAM++ 声纹 → 注册库匹配真名；声纹相近时按簇合并 + 命名互斥防误配。命名一次即记住声纹，跨录音自动认人，标得越多越准。
 - **AI 会议纪要** — 模板化摘要（通用 / 一对一 / 团队会 / 头脑风暴），写入可检索索引；录音若有**关联文档**，会自动把文档全文当背景一起喂给模型（带字数上限），让纪要也吸收 PRD/议程/会议材料。**Templates 页**可增删改模板（占位符含 `{documents}`）、AI 协助生成 / 润色提示词、设默认。
 - **检索与问答** — FTS5 关键词 + 向量召回 + RRF 融合 + LLM 重排 + 综合，答案**带引用、带日期**。规划器读懂每个问题并路由到合适的形状：精准事实、**汇总**（「这个月聊了啥」）、**时间线**（「迁移策略怎么一步步演变的」）、**对比**（「这周和上周的一对一差在哪」）。过滤条件可自由组合——按时间、**按说话人**（「我和 Jerry 都聊过什么」）、按来源——「最新/现状」类问题还会**近因加权**让最近的讨论优先。跨大范围的回顾会**检索整段历史**（量大走 map-reduce），不再只取零星几段；过滤到空时**自动放宽**而非直接挡死。引用**区分来源**——一段答案里可同时混引 🎙️ 录音和 📄 文档，各自可点（录音跳到时间点，文档打开并高亮被引段落）。也可**针对单条录音**提问（检索会连同它的**关联文档**一起纳入，让回答也吸收挂着的 PRD/议程/会议材料）或**针对单篇文档**提问（严格限定该篇文档）。
@@ -41,7 +41,7 @@ Resound 帮你录下会议与一对一谈话，自动转成带说话人、带时
 - **录音库** — 搜索、文件夹分组、⌘F 查找替换（修转录错字）、逐句点跳播放、说话人试听；反复改同一个错词会**自动建议加入词表**，一键确认。新录音还会**智能推算文件夹**——LLM 读摘要挑最合适的现有文件夹（或提议新建），以列表角标给出，你确认或忽略（不点头绝不擅自移动）。还能**合并录音**——多选 2 条以上，按创建时间首尾相接成一条新录音并重新完整转录（新标题由 AI 建议、可改）；被合并的原录音移到归档（可恢复，不删）。
 - **外部知识接入（消费 MCP）** — 接入 Notion、Jira / Confluence，或任意 MCP 服务器（内置 OAuth 2.1 + PKCE + 动态客户端注册，或 API Token；令牌存 Keychain）。然后**把文档链接粘贴到某场录音上**——Resound 经 MCP 取回正文、入库到同一知识库，和录音 + 本地文档一起参与检索、问答、纪要。取不全时智能降级：来源未连接 → 提示去连接；授权过期 → 自动刷新令牌，刷新被拒则把来源标为「已过期」并提示一键重新授权；无法识别 / 内网地址 / 无权限 → 存成可跳转的**仅链接**引用。自定义来源支持远程（HTTP）或**本地 stdio**（起子进程，如 `npx -y @org/mcp-server`，环境变量只留本机）。在 **设置 › 外部 MCP 接入** 配置。
 - **Resound 作为 MCP 服务器（提供 MCP）** — 把你的会议知识库作为本地 stdio MCP 服务器暴露给编码助手（**Claude Code / Codex**），让它们查询你的会议与文档——全程在本机。一键安装会替你写好助手配置（附手动命令兜底）；全局**内容策略**（完整 / 摘要+链接 / 仅链接）控制对外提供多少**外部来源**文档内容（你自己的录音转录始终完整提供）。在 **设置 › Resound MCP** 配置。
-- **自带 Provider 配置** — 接入任意 OpenAI 兼容服务（OpenAI / Claude / DeepSeek / Groq / AIHUBMIX / 本地 Ollama / 自定义）：对话、向量、转写三种能力分别配置，一键「测试连接」实时验证（验证状态持久化，改 Key/模型自动失效）；首次启动有引导，转写不配则自动兜底本地 Whisper。录音库路径 / git 自动推送也在应用内配，改完即时生效、无需重编。
+- **自带 Provider 配置** — 接入任意 OpenAI 兼容服务（OpenAI / Claude / DeepSeek / Groq / AIHUBMIX / 本地 Ollama / 自定义）：对话、向量、转写三种能力分别配置，一键「测试连接」实时验证（验证状态持久化，改 Key/模型自动失效）；首次启动有引导，对话、向量、转写后端（MOSS 云端或在线 whisper）三项均为必填。录音库路径 / git 自动推送也在应用内配，改完即时生效、无需重编。
 - **菜单栏驻留** — 关掉主窗口不退出，常驻菜单栏随时开录；浅 / 深双主题。
 
 ## 架构边界
@@ -115,7 +115,7 @@ scripts/build-sherpa-onnx.sh
 
 # 2. 配置密钥：在仓库根目录创建 .env（见下方「配置」表）
 
-# 3. 编译（首次会拉 WhisperKit / FluidAudio / swift-markdown 等依赖）
+# 3. 编译（首次会拉 FluidAudio / swift-markdown 等依赖）
 swift build
 ```
 
@@ -140,7 +140,7 @@ open build/Resound.app
 
 ## 配置
 
-**普通用户（应用内）**：首次启动按引导，在 **设置 › AI 服务** 里选服务商预设（或自定义）、填 Base URL / API Key / 模型，「测试连接」通过即用。至少需一个**对话模型** + 一个**向量模型**（可来自不同服务商）；转写可留空走本地 Whisper。配置存本机 `~/Library/Application Support/Resound/providers.json`，密钥不出本机，可导入导出，改完即时生效。
+**普通用户（应用内）**：首次启动按引导，在 **设置 › AI 服务** 里选服务商预设（或自定义）、填 Base URL / API Key / 模型，「测试连接」通过即用。需要一个**对话模型**、一个**向量模型**（可来自不同服务商）和一个**转写后端**（MOSS 云端或在线 whisper）。配置存本机 `~/Library/Application Support/Resound/providers.json`，密钥不出本机，可导入导出，改完即时生效。
 
 **CLI / 进阶**：也可用仓库根目录 `.env`（已 gitignore，**绝不提交**），接口均为 OpenAI 兼容。App 优先读 `providers.json`、缺失时回退 `.env`（已有 `.env` 的老用户首启会自动迁移）。下表为 `.env` 变量：
 
@@ -149,9 +149,9 @@ open build/Resound.app
 | `AIHUBMIX_API_KEY` / `AIHUBMIX_BASE_URL` | Embedding（向量），缺省也用于在线转录 |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 向量模型与维度 |
 | `CHAT_API_KEY` / `CHAT_BASE_URL` | LLM（DeepSeek 官方，OpenAI 兼容） |
-| `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | 在线转录开关与模型（关则走本地 WhisperKit） |
+| `TRANSCRIBE_ONLINE` / `TRANSCRIBE_MODEL` | 在线 whisper 转录开关与模型 |
 | `TRANSCRIBE_API_KEY` / `TRANSCRIBE_BASE_URL` | 转录端点，缺省同 Embedding |
-| `TRANSCRIBE_BACKEND` | `moss` = 优先 MOSS 云端转写（服务失败回退 whisper；断网则等待恢复，不回退） |
+| `TRANSCRIBE_BACKEND` | `moss` = MOSS 云端转写（瞬时故障自动重试，仍失败则任务显式失败；断网暂停、恢复续跑） |
 | `MOSS_SUBMIT_URL` / `MOSS_RESULT_URL` / `MOSS_API_KEY` | MOSS 服务端点与密钥（应用内一键部署自动写入） |
 | `CONTEXT_MODEL` | 逐 chunk contextual 增强（高频，默认 flash） |
 | `CORRECT_MODEL` | 转录 AI 校对（默认 flash） |
@@ -195,7 +195,7 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 ## 工作原理
 
 ```
-录音 ─► VAD 门控(剪静音/噪声) ─► 转录(MOSS 云端·转录+说话人一体 / 在线 whisper / 本地 WhisperKit) ─► 繁简归一 + 词表纠错 + LLM 校对
+录音 ─► VAD 门控(剪静音/噪声) ─► 转录(MOSS 云端·转录+说话人一体 / 在线 whisper) ─► 繁简归一 + 词表纠错 + LLM 校对
    └─► 说话人识别(MOSS: 标签→CAM++ 声纹命名；whisper: Sortformer 分割@ANE → VAD → CAM++ 声纹 → 注册匹配)
                           │
 切块 ─► contextual 增强 ─► embedding ─► SQLite(FTS5 + sqlite-vec)
@@ -206,8 +206,8 @@ App 运行时会把根目录 `.env` 复制到 `~/Library/Application Support/Res
 
 ## 技术栈
 
-- **本地**：AVAudioEngine · ScreenCaptureKit · WhisperKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
-- **依赖**：[WhisperKit](https://github.com/argmaxinc/WhisperKit) · [FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown](https://github.com/apple/swift-markdown)（仅解析；渲染是自研原生 SwiftUI 渲染器） · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
+- **本地**：AVAudioEngine · ScreenCaptureKit · FluidAudio（Sortformer 分割 / silero VAD）· sherpa-onnx（CAM++ 声纹）· SQLite（FTS5 + sqlite-vec）
+- **依赖**：[FluidAudio](https://github.com/FluidInference/FluidAudio) · [swift-markdown](https://github.com/apple/swift-markdown)（仅解析；渲染是自研原生 SwiftUI 渲染器） · [swift-argument-parser](https://github.com/apple/swift-argument-parser)
 - **API**：任意 OpenAI 兼容服务——对话 / 向量 / 转写三种能力可分别指派给不同服务商
 
 ## 项目结构

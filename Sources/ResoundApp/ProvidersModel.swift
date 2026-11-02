@@ -17,10 +17,11 @@ final class ProvidersModel: ObservableObject {
             switch self {
             case .chat: return "问答、摘要、AI 校对都用它。必填。"
             case .embedding: return "把文稿切块向量化以供检索。必填。"
-            case .transcribe: return "把录音转成文字。推荐 MOSS 云端（转录+说话人一次产出），或配在线 whisper。"
+            case .transcribe: return "把录音转成文字。必填：推荐 MOSS 云端（转录+说话人一次产出），或配在线 whisper。"
             }
         }
-        var required: Bool { self != .transcribe }
+        // 本地 WhisperKit 已移除，转写不配就是每条录音必失败 → 三项全部必填
+        var required: Bool { true }
     }
 
     enum ProbeState: Equatable { case idle, running, ok(String), fail(String) }
@@ -113,14 +114,12 @@ final class ProvidersModel: ObservableObject {
         commit(c)
     }
 
-    // useLocalTranscribe 已移除（本地 WhisperKit 整体下线，转写只剩 MOSS/在线两种云后端）
-
     // MARK: MOSS 云端转写（端到端转录+说话人，自部署 Modal）
 
-    enum TranscribeBackendChoice { case moss, online, local }
+    enum TranscribeBackendChoice { case moss, online, unconfigured }
     var transcribeBackendChoice: TranscribeBackendChoice {
         if config.transcribeBackend == "moss" { return .moss }
-        return config.transcribe != nil ? .online : .local
+        return config.transcribe != nil ? .online : .unconfigured
     }
     /// MOSS endpoint 已配置（部署过）。选没选 MOSS 看 transcribeBackendChoice。
     var mossDeployed: Bool {

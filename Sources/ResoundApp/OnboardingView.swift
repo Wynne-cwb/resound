@@ -1,8 +1,8 @@
 import SwiftUI
 import ResoundCore
 
-/// 首次启动引导：必须先配好「对话模型 + 向量模型」（各自验证通过）才能进主界面；
-/// 转写后端二选一（MOSS 云端 / 在线 whisper，本地 Whisper 已移除）。复用 CapabilityCard，与设置页同一套交互。
+/// 首次启动引导：必须配好「对话模型 + 向量模型 +（二选一的）转写后端」才能进主界面。
+/// 转写后端 = MOSS 云端（部署完成）或在线 whisper（验证通过）。复用 CapabilityCard，与设置页同一套交互。
 struct OnboardingView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var providers: ProvidersModel
@@ -10,7 +10,12 @@ struct OnboardingView: View {
 
     private var chatOK: Bool { if case .ok = providers.probe[.chat] { return true } else { return false } }
     private var embeddingOK: Bool { if case .ok = providers.probe[.embedding] { return true } else { return false } }
-    private var canEnter: Bool { chatOK && embeddingOK && app.vaultReady }
+    /// 转写就绪：选 MOSS 则看部署完成，选在线 whisper 则看验证通过。没有本地兜底，必须二选一。
+    private var transcribeOK: Bool {
+        if providers.transcribeBackendChoice == .moss { return providers.mossDeployed }
+        if case .ok = providers.probe[.transcribe] { return true } else { return false }
+    }
+    private var canEnter: Bool { chatOK && embeddingOK && transcribeOK && app.vaultReady }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,7 +46,7 @@ struct OnboardingView: View {
                     Text("你的本地会议 wiki：录音 → 转录 → 检索问答").font(.system(size: 13)).foregroundStyle(pal.text2)
                 }
             }
-            Text("Resound 自己不带模型，请接入任意 OpenAI 兼容的 AI 服务。最少需要一个**对话模型**和一个**向量模型**——可以来自同一个服务商，也可以分开。所有密钥只存在这台 Mac 上。")
+            Text("Resound 自己不带模型，请接入任意 OpenAI 兼容的 AI 服务。需要一个**对话模型**、一个**向量模型**和一个**转写后端**——可以来自同一个服务商，也可以分开。所有密钥只存在这台 Mac 上。")
                 .font(.system(size: 13)).foregroundStyle(pal.text2).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -72,6 +77,7 @@ struct OnboardingView: View {
             stepDot("录音库", ok: app.vaultReady)
             stepDot("对话模型", ok: chatOK)
             stepDot("向量模型", ok: embeddingOK)
+            stepDot("转写后端", ok: transcribeOK)
         }
     }
 

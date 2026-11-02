@@ -18,7 +18,6 @@ struct CapabilityCard: View {
     @State private var baseURL = ""
     @State private var apiKey = ""
     @State private var model = ""
-    @State private var useLocal = false
     @State private var useMoss = false
     @State private var keyVisible = false
     @State private var seeded = false
@@ -44,7 +43,6 @@ struct CapabilityCard: View {
         if cap == .transcribe && useMoss {
             return providers.mossDeployed ? "MOSS 云端 · 转录+说话人一体（已部署）" : "MOSS 云端 · 待部署"
         }
-        if cap == .transcribe && useLocal { return "未配置转写后端" }
         if let p = providers.provider(cap) {
             let name = p.presetId.flatMap { pid in ProviderPreset.all.first { $0.id == pid }?.name } ?? "自定义"
             let m = providers.model(cap)
@@ -106,7 +104,7 @@ struct CapabilityCard: View {
         case .running: pill(pal.text2, pal.inset) { Spinner(size: 10, color: pal.text2); Text("测试中") }
         case .ok:      pill(pal.ok, pal.ok.opacity(0.13)) { Image(systemName: "checkmark").font(.system(size: 9, weight: .black)); Text("已验证") }
         case .fail:    pill(pal.rec, pal.recSoft) { Image(systemName: "xmark").font(.system(size: 9, weight: .black)); Text("验证失败") }
-        case .idle:    if !model.isEmpty && !(cap == .transcribe && (useLocal || useMoss)) { pill(pal.text3, pal.inset) { Text("未验证") } }
+        case .idle:    if !model.isEmpty && !(cap == .transcribe && useMoss) { pill(pal.text3, pal.inset) { Text("未验证") } }
         }
     }
     @ViewBuilder private func pill<C: View>(_ fg: Color, _ bg: Color, @ViewBuilder _ content: () -> C) -> some View {
@@ -165,8 +163,8 @@ struct CapabilityCard: View {
 
     private var transcribeModeSwitch: some View {
         HStack(spacing: 4) {
-            segButton("MOSS 云端 ★", active: useMoss) { useMoss = true; useLocal = false; providers.useMossBackend() }
-            segButton("在线 Whisper", active: !useMoss) { useMoss = false; useLocal = false; providers.useWhisperBackend(); flush() }
+            segButton("MOSS 云端 ★", active: useMoss) { useMoss = true; providers.useMossBackend() }
+            segButton("在线 Whisper", active: !useMoss) { useMoss = false; providers.useWhisperBackend(); flush() }
         }
         .padding(3).background(pal.inset, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
@@ -279,8 +277,6 @@ struct CapabilityCard: View {
                 .stroke(active ? pal.border : .clear, corner: 7)
         }.buttonStyle(.plainHit).hoverCursor()
     }
-
-    // 本地 Whisper 卡片已移除（2026-11-01：本地 WhisperKit 整体下线，转写只有 MOSS/在线两种云后端）
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -443,19 +439,16 @@ struct CapabilityCard: View {
         if cap == .transcribe {
             // 已选 MOSS → MOSS 面板；首启引导（collapsible=false）里未配置任何转写 → 默认推荐 MOSS
             useMoss = providers.transcribeBackendChoice == .moss
-                || (!collapsible && providers.transcribeBackendChoice == .local && !providers.mossDeployed)
+                || (!collapsible && providers.transcribeBackendChoice == .unconfigured && !providers.mossDeployed)
         }
         if let p = providers.provider(cap) {
-            presetId = p.presetId; baseURL = p.baseURL; apiKey = p.apiKey; model = providers.model(cap); useLocal = false
+            presetId = p.presetId; baseURL = p.baseURL; apiKey = p.apiKey; model = providers.model(cap)
         } else if cap == .transcribe {
-            useLocal = false   // 本地 Whisper 已下线：未配置时直接露出在线 whisper 表单
+            // 未配置时直接露出在线 whisper 表单
             presetId = "openai"; baseURL = ProviderPreset.all.first { $0.id == "openai" }!.baseURL; model = "gpt-4o-transcribe"
-        } else {
-            useLocal = false
         }
     }
     private func flush() {
-        guard !(cap == .transcribe && useLocal) else { return }
         providers.set(cap, baseURL: baseURL, apiKey: apiKey, model: model, presetId: presetId)
     }
     private func testNow() {

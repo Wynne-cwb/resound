@@ -29,7 +29,7 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
     public var embedding: ModelRef?
     public var embeddingDim: Int?            // 验证 embedding 时自动探测，建索引用
     public var transcribe: ModelRef?         // nil = 未配置（本地 WhisperKit 已移除）
-    // MOSS 云端转写（端到端转录+说话人）："moss" 则优先走 MOSS（失败回退 whisper 在线/本地）。
+    // MOSS 云端转写（端到端转录+说话人）："moss" 则走 MOSS（失败显式报错，不降级）。
     // 三项由设置页「一键部署」写回；旧 providers.json 无这些键 → 全 nil，行为不变。
     public var transcribeBackend: String?    // nil/"whisper" | "moss"
     public var mossSubmitURL: String?
@@ -64,10 +64,21 @@ public struct ProvidersConfig: Codable, Equatable, Sendable {
 
     public func provider(_ id: String) -> AIProvider? { providers.first { $0.id == id } }
 
-    /// chat + embedding 都指到一个存在的 Provider 才算配齐（可被 `Config.load()` 解析）。
+    /// chat + embedding 都指到一个存在的 Provider，且转写后端已配置才算配齐。
+    /// 本地 WhisperKit 已移除：转写不再有「不配也能跑」的兜底，没配就是每条录音必失败，
+    /// 所以升级上来的老用户（原走本地、transcribe == nil）会重新进入引导页补配，而不是静默全挂。
     public var isComplete: Bool {
         guard let c = chat, let e = embedding else { return false }
-        return provider(c.providerId) != nil && provider(e.providerId) != nil
+        guard provider(c.providerId) != nil && provider(e.providerId) != nil else { return false }
+        return transcribeConfigured
+    }
+
+    /// 转写后端已配置：MOSS（一键部署写回的 endpoint 存在）或在线 whisper（指派存在且可解析）。
+    public var transcribeConfigured: Bool {
+        if transcribeBackend == "moss",
+           !(mossSubmitURL ?? "").isEmpty, !(mossResultURL ?? "").isEmpty { return true }
+        if let t = transcribe, provider(t.providerId) != nil { return true }
+        return false
     }
 
     /// 把 provider 指派解析成运行时 `Config`。非 provider 项（vault/词表模型等）从既有 .env 取。
