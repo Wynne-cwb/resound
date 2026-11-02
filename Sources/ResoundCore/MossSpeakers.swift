@@ -61,12 +61,15 @@ public func nameSpeakersFromMossDiarization(
     for s in staging { byLabel[s.speaker, default: []].append(s) }
     func labelDur(_ segs: [SpeakerSeg]) -> Double { segs.reduce(0) { $0 + ($1.end - $1.start) } }
     var centroid: [String: [Float]] = [:]
+    var evidence: [String: Double] = [:]   // voiced seconds behind each label's centroid
     for (label, segs) in byLabel {
         let top = segs.sorted { ($0.end - $0.start) > ($1.end - $1.start) }.prefix(6)
         var embs: [[Float]] = []
         for s in top {
             let sl = voicedSlice(s.start, s.end)
-            if sl.count >= 8000, let e = embedder.embed(sl) { embs.append(e) }
+            if sl.count >= 8000, let e = embedder.embed(sl) {
+                embs.append(e); evidence[label, default: 0] += Double(sl.count) / 16000
+            }
         }
         guard !embs.isEmpty else { continue }
         var c = [Float](repeating: 0, count: embs[0].count)
@@ -109,15 +112,23 @@ public func nameSpeakersFromMossDiarization(
         if var cc = c { l2normalize(&cc); mergedCentroid[rep] = cc }
     }
 
-    // 注册库双门匹配 + 互斥消歧（一个注册者只认领一个标签簇；同款阈值 0.5，宁匿名不误配）
-    let matcher = SpeakerMatcher(tauAbs: 0.5)
+    // 注册库双门匹配 + 互斥消歧（一个注册者只认领一个标签簇；门限见 SpeakerMatchPolicy，宁匿名不误配）
+    let matcher = SpeakerMatchPolicy.matcher()
     if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
     let order = mergedSegs.sorted { labelDur($0.value) > labelDur($1.value) }.map { $0.key }
+    var mergedEvidence: [String: Double] = [:]
+    for l in labels { mergedEvidence[find(l), default: 0] += evidence[l] ?? 0 }
     var bestName: [String: String] = [:], bestScore: [String: Float] = [:]
     for rep in order {
         guard let c = mergedCentroid[rep], !matcher.refs.isEmpty else { continue }
+        let ev = mergedEvidence[rep] ?? 0
+        guard ev >= SpeakerMatchPolicy.minEvidenceSec else {
+            log(String(format: "   %@ 有声证据仅 %.1fs < %.0fs，不自动命名", rep, ev, SpeakerMatchPolicy.minEvidenceSec))
+            continue
+        }
         let m = matcher.match(c)
         if let name = m.name { bestName[rep] = name; bestScore[rep] = m.score }
+        else if m.score > 0 { log(String(format: "   %@ 最像者 cos=%.2f / margin=%.2f 未过门，留匿名", rep, m.score, m.margin)) }
     }
     var winnerOf: [String: String] = [:]
     for rep in order {

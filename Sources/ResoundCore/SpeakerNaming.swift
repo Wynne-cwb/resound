@@ -20,7 +20,7 @@ public func reidentifySpeakers(_ rec: RecordingSummary, model: String,
     let (clusters, windows) = try await clusterRecording(
         audio: rec.audioURL, asrJSON: rec.transcriptURL, model: model, clusterThreshold: clusterThreshold)
 
-    let matcher = SpeakerMatcher()
+    let matcher = SpeakerMatchPolicy.matcher()
     if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
 
     // 每个堆：匹配已记住的人 → 真名（重复堆共享同名即合并）；否则匿名
@@ -130,8 +130,8 @@ public func reassignBySpeakerprint(
     matcher: SpeakerMatcher,
     voiced: [(start: Double, end: Double)] = [],
     minDur: Double = 2.0,
-    minScore: Float = 0.6,
-    minMargin: Float = 0.10,
+    minScore: Float = SpeakerMatchPolicy.tauAbs,
+    minMargin: Float = SpeakerMatchPolicy.tauMargin,
     maxDur: Double = 15,
     log: (String) -> Void = { _ in }
 ) -> [SpeakerSeg] {
@@ -191,7 +191,9 @@ public func identifySpeakers(_ rec: RecordingSummary, model: String,
     let samples = try AudioConverter().resampleAudioFile(rec.audioURL)
     let windows = mergeASRSegments(t.segments.map { (start: $0.start, end: $0.end) }, targetDur: targetDur)
 
-    let matcher = SpeakerMatcher()
+    // Same gate as cluster-level naming: a single 4–15s window at 0.70/0.10 had 0% false accepts in the
+    // 2026-11-02 calibration (old default 0.35 mislabeled unenrolled people in non-MOSS recordings).
+    let matcher = SpeakerMatchPolicy.matcher()
     if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
 
     // 逐窗提声纹：匹中已注册库 → 真名；没匹中 → 留待聚类（库里没有的新人）。

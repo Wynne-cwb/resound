@@ -5,6 +5,36 @@
 
 ---
 
+## 说话人识别三问题诊断 + 声纹库第二次清空（2026-11-02）
+
+**用户反馈**：①短时间多人接话被并进一个片段、归为一人 ②未标注的人基本会被标成某个已识别的人 ③仍有认错人，疑阈值没调好。
+
+**取证（真实数据，未改代码）**：
+- **声纹库（②③主因）**：`speaker_refs` 58 人，两两 1653 对里 cos>0.5 有 184 对、>0.6 有 59 对；每人与「最像的他人」cos **中位 0.65**，而 MOSS 命名门 `SpeakerMatcher(tauAbs: 0.5)`、`tauMargin=0`（[MossSpeakers.swift:113](../Sources/ResoundCore/MossSpeakers.swift)）。开集识别下库越大，陌生声音越容易在某人身上过 0.5。Ben–GGBond 0.736（即 06-23 的 Ben→GGBond 误配）；库里还有 `CR`（代码里 `speakerFix` 已注明 CR=GGbond 误标），10/22 EU region 评审被它认领 1203s。半数以上的人只有 5 个样本。**07-24 清过一次库，3 个月后又回到同等污染度**→光清库不够，流程本身会再污染。
+- **短标签硬配名**：命名不看证据量，6–19s 的 MOSS 标签照样按 0.5 配名（10/30 Team Sprite P2_S07 12s→Boyd、P1_S03 19s→Leeyo；10/22 评审 P1_S07 6s→Fate）。
+- **注册卫生**：改名「记住声音」不做 VAD 去静音；`mergeASRSegments` 只按 gap<1s 拼该人的段，会把中间别人的短插话一起拼进样本；增量守门 `mergeGuard=0.45` 偏松。
+- **①是 MOSS 自身**：4 场录音核对 moss-diar / transcript / diarization 三者 1:1 对齐，下游把不同标签误并成同一人导致相邻段合并仅 1/103、1/180、2/82、0/198。MOSS 片段 p50≈5s、p90≈14s、max 24s；>30min 分片后每片独立标签。MOSS 无词级时间戳，切长段只能「CAM++ 滑窗检测换人 + 就近句末标点 + 按字数估时」，误差约 0.5–1s。
+
+**本次动作（用户拍板「先清库重标，复查后再下结论」）**：`.dump speaker_refs` 备份到 `experiments/moss-eval/speaker_refs.backup-20261102-100034.sql`（gitignored），校验 58=58 且还原到临时库成功后 `DELETE FROM speaker_refs`（只动此表，chunks 5991 行未动；各录音 diarization.json 里的旧名字保留）。生成重标参考文档（按 App 列表的文件夹顺序 + 组内时间升序，每人时长/首次出现/最长 3 段原文+时间点，<20s 标 ⚠️）。
+
+**同日续：用 1 on 1 重建声纹库（用户：「1 on 1 基本准，直接做」）**：
+- 新增 CLI `speaker-rebuild`（[SpeakerRebuild.swift](../Sources/ResoundCore/SpeakerRebuild.swift)）：plan JSON 给录音 id + 「diarization 标签→真名」；取样只在同一说话人连续 run 内、其自身分段区间的 VAD 有声部分（不跨别人插话拼窗），3–10s 窗、每录音每人最长 8 窗；每录音每人先求录音级质心，跨录音 leave-one-out cos < 0.5 整条剔除；输出 genuine/impostor 分布与参考两两相似度；`--dry-run` 只报告。
+- plan：6 个「1 on 1 with X」文件夹 59 条，Wynne→Wynne、其余最长标签→文件夹对应人（HRBP=Abby，用户告知）；两处纠正：10-30 Jerry 1on1 对方旧标 `Lex`→Jerry，HRBP 场 `说话人1`→Abby。
+- 结果：**59 条全部通过一致性，0 剔除**（LOO 最低 0.63/Hydra，Wynne 59 条 min 0.77）。写入 7 人：Wynne 472 / Jerry 128 / GGBond 96 / Tao 88 / Ben 74 / Hydra 62 / Abby 8 窗。
+- **阈值标定（录音级质心，即 MOSS 命名同口径）**：本人 genuine n=116 min 0.63 / p5 0.76 / 中位 0.86；他人 impostor n=702 中位 0.41 / p95 0.58 / max 0.70。干净库下 Ben–GGBond 参考仍 0.703、Tao–Wynne 0.617 → **0.5 门放过 >5% 的他人；且同性别相近嗓音仅靠绝对门分不开，必须加 margin 门**。注意 impostor 只覆盖库内 7 人互比，未注册陌生人的分布要拿多人会再测。
+- 已知限制：CAM++ 在本录音链路下不同人可到 0.70（可能有同一麦克风/房间的信道成分）。
+
+**同日续 2：收紧匹配（用户拍板「收紧」）**：
+- `speaker-rebuild --dry-run` 加「匹配规则模拟」：对每条 1 on 1 的录音级质心，closed-set（参考质心排除本条）看认对/认错/拒识，open-set（参考排除本人＝模拟未注册者）看误认；证据取 8/2/1 窗。结果（证据 8 窗）：0.50/0 → 未注册误认 **70.4%**；0.60/0 → 20.0%；0.60/0.10 → 13.0%；0.65/0.10 → 7.0%（认对 99.1%）；**0.70/0.10 → 0.9%（认对 98.3%、拒识 1.7%、认错 0%）**。证据 1 窗时 0.70/0.10 拒识升到 6.1%、误认 0%。
+- **决策：簇/标签级命名统一用 `SpeakerMatchPolicy`（[SpeakerID.swift](../Sources/ResoundCore/SpeakerID.swift)）= tauAbs 0.70 + tauMargin 0.10 + 有声证据 ≥6s 才自动命名**。依据=上面模拟 + 「质量>速度 / 宁匿名不误配」。接入：MOSS 标签命名、diar 簇命名、`reidentifySpeakers` 堆命名（原来默认 0.35！）、`reassignBySpeakerprint` 第二票（原 0.6/0.10）。逐窗路径（`identifySpeakers` 0.35、IndexPipeline 逐窗标注）粒度不同、未标定，**未改**。MOSS 命名对未过门/证据不足的标签打日志（最像者 cos / margin）。
+- **验证**（临时 vault + 索引副本跑 `speaker-identify`，真实数据未动）：1 on 1 三条全对（Tao 0.91 / Abby 0.97 / Jerry 0.74——10-30 那条旧标 Lex 自动纠正）；EU region 评审 11 人全落匿名（旧标 CR/Fate/Neo/Boyd… 全是库里的错配，最像者 cos 0.25–0.59）；Platform 周会只认出 Wynne（0.72），主讲 Mason 未注册→匿名；Team Sprite 只认出 Wynne（0.87），旧标 Jerry 的 P2_S03（27s）cos 0.65/margin 0.33 未过门→匿名（多人会房间声学下本人分数偏低，代价可接受，命名一次后库会补上该声学条件）。
+
+**同日续 3：旧多人会重置（用户：「备份后重置」，并会全部手动重标）**：
+- 备份 `~/Library/Application Support/Resound/backups/speaker-reset-20261102-112207`（83 个 diarization.json，cmp 逐字节一致；`chunks-person.csv` 4238 行；`ids.json`）。参数化 `update chunks set person_id=NULL where recording_id=?` 清掉 83 条的 4065 个旧名（1 on 1 的 1452 段未动）→ 新 CLI `speaker-identify --id` 逐条重命名，0 失败。
+- **踩坑**：5 条非 MOSS 录音走 diar 路径，其中 4 条「合并后仍 4 簇」回退**逐窗法**，逐窗 `SpeakerMatcher()` 默认 0.35 → 又冒出 Abby/Hydra/Jerry 4003s 等误配。**修**：逐窗路径也改用 `SpeakerMatchPolicy`（单窗 0.70/0.10 在标定中误认 0%），清掉这 5 条的 290 个 chunk 名后重跑 → 只剩 Wynne/Ben 两处高置信命名。代价：这几条 whisper 回退录音里 Wynne 本人也多落匿名（逐窗短证据 + whisper 碎段），可接受，或日后用 MOSS 重转录。
+- 结果：83 条里 45 条带自动名字，只有 Wynne 43 / GGBond 7 / Ben 4 / Tao 3 / Jerry 3，其余全部「说话人N」。
+
+**待复查后定的候选修法**：①收紧匹配：提 tauAbs + 加 margin 门 + 证据时长下限（不足不自动命名）②注册卫生：VAD + 只取本人连续段 + 收紧守门 ③阈值用用户确认过的录音标定 genuine/impostor 分布再定 ④长段滑窗切分（单独做，先拿用户例子验）。
 ## 新方向立项：Google Meet 云端摄取 + 管线上云（2026-09-29）
 
 **触发**：用户提出三条需求——①会议主要都用 Google Meet ②想把转录/校对流程承接成 Meet 的插件或 App（不确定 Meet 有什么承接方式）③上云但只上传转录文本、不上传语音。

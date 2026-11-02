@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRebuild.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
     )
 }
 
@@ -392,6 +392,42 @@ struct SpeakerEnroll: AsyncParsableCommand {
                 audio: URL(fileURLWithPath: audio), labels: URL(fileURLWithPath: labels),
                 indexPath: indexURL, embeddingDim: cfg.embeddingDim, model: spk, per: per))
         }
+    }
+}
+
+/// resound speaker-rebuild —— 从标注可信的录音重建声纹库（防污染取样 + 跨录音一致性剔除 + 阈值标定报告）
+struct SpeakerRebuild: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "speaker-rebuild",
+        abstract: "从标注可信的录音重建声纹库：plan JSON 列出录音 id 与「标签→真名」，先 --dry-run 看一致性与阈值标定")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "plan JSON：[{\"id\": 录音id, \"map\": {diarization 标签: 真名}}]")
+    var plan: String
+
+    @Option(name: .long, help: "索引文件路径（默认 App Support）")
+    var index: String?
+
+    @Option(name: .long, help: "跨录音 leave-one-out 一致性门限，低于则整条剔除（默认 0.5）")
+    var minConsistency: Float = 0.5
+
+    @Option(name: .long, help: "每条录音每人取最长几个窗口（默认 8）")
+    var per: Int = 8
+
+    @Flag(name: .long, help: "只出报告，不写声纹库")
+    var dryRun = false
+
+    func run() async throws {
+        let cfg = try Config.load()
+        guard let model = cfg.speakerModel else { throw ConfigError.missing("SPEAKER_MODEL") }
+        let items = try JSONDecoder().decode([SpeakerRebuildItem].self,
+                                             from: Data(contentsOf: URL(fileURLWithPath: plan)))
+        try await rebuildSpeakerRefs(
+            vaultRoot: URL(fileURLWithPath: vault), plan: items, model: model,
+            indexPath: index.map { URL(fileURLWithPath: $0) } ?? defaultIndexPath(),
+            embeddingDim: cfg.embeddingDim, minConsistency: minConsistency, perRecording: per,
+            dryRun: dryRun)
     }
 }
 

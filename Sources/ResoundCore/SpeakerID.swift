@@ -30,6 +30,20 @@ public func mergeASRSegments(_ segs: [(start: Double, end: Double)],
 
 // MARK: - 参考声纹 + 匹配（双门拒识）
 
+/// 簇/标签级命名的匹配门（MOSS 标签、diar 簇、重识别堆、声纹重验第二票共用）。
+/// 2026-11-02 用 59 条 1 on 1 录音标定（`resound speaker-rebuild --dry-run` 的规则模拟）：
+///   旧门 tauAbs 0.5 / margin 0 → 未注册的人 70% 被误认成库里某人；
+///   0.70 / 0.10 → 误认 0.9%，已注册的人认对 98.3%（其余落匿名，可一键命名），认错 0%。
+/// 证据不足的标签声纹不可信（几秒的附和照样能凑出 0.6+），直接不自动命名。
+public enum SpeakerMatchPolicy {
+    public static let tauAbs: Float = 0.70
+    public static let tauMargin: Float = 0.10
+    /// 参与质心的有声时长下限（秒）。
+    public static let minEvidenceSec: Double = 6
+    public static func matcher() -> SpeakerMatcher { SpeakerMatcher(tauAbs: tauAbs, tauMargin: tauMargin) }
+}
+
+
 public struct SpeakerRef: Codable {
     public var name: String
     public var centroid: [Float]   // 已 L2 归一
