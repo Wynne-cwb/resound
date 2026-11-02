@@ -1794,3 +1794,14 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **验证**：`swift build` 通过；临时离线 harness（未提交）6/6：Plan JSON 往返精确、半成品目录续写只落在计划目录且删旧 audio.m4a 留 track、已完成目录抛 alreadyIngested、不带 plan 时新 id 不同（旧 bug 对照）。**未验证**：App 内实机的「索引失败→重试」「转写中退出→回收→重试」「关窗重开不删分轨」三条路径（需重打包 App + 人为制造失败）。
 **已有重复的处理**：10-22/10-23 那对用户已手删；10-21 两个半成品目录经用户同意移到废纸篓（2026-11-02，可恢复；15:21 那个里有 track-mic/track-system.m4a，是该场分轨的唯一副本，完整那条只有混音）。
 
+
+**主窗口关闭后打不开：Dock / `open` 重开不建窗（2026-11-02，macOS 27.2 + Xcode 27.1）**
+**现象**：关掉主窗口后，点 Dock 图标、`open Resound.app` 都不出窗口，只能重启 App；菜单栏「打开 Resound 窗口」在一个跑了一阵的实例上也失败过一次。
+**取证**（无辅助功能权限，全程用 lldb 附加进程：`performClose:` 关窗、`performActionForItemAtIndex:` 点菜单项、断点跟踪）：
+- Dock / `open` 都是 reopen Apple Event：`_handleAEReopen:` → SwiftUI 的 `AppDelegate.applicationShouldHandleReopen`（`hasVisibleWindows=0`）→ 转发给我们的 delegate（没实现）→ 返回 YES → AppKit `_doOpenUntitled` → SwiftUI `applicationShouldOpenUntitledFile` 的闭包返回 false（它数的可开场景列表为空）→ `applicationOpenUntitledFile` 从不调用 → 不建窗。新起的实例关窗后 100% 复现。
+- 排除项（各自实测仍失败）：不切 `.accessory`（lldb 拦掉 setActivationPolicy）、去掉 `CommandGroup(replacing: .newItem)`、把 `RootView` 换成 Text、跳过整个 onAppear（环境变量开关的临时包）。对照：最小 SwiftUI App（WindowGroup+MenuBarExtra、同样的 delegate/`hiddenTitleBar`/`contentMinSize`/`.newItem`/onOpenURL/`WindowConfigurator`、`-target macos14.0`）在同一系统上关窗后 reopen **正常**——Resound 里具体哪一处让 SwiftUI 认为「无可开场景」**未定位**（剩 StateObject 初始化、环境对象、菜单栏 content、SwiftPM 链接等未二分）。
+- 菜单栏路径：干净实例上关窗→菜单、关窗→reopen 失败→菜单都能出窗（`openWindow(id:)` 本身可用）。旧实例那次失败没能在新实例复现；当时还观察到 `windowWillClose` 被非主窗（菜单/状态栏窗）触发后把 App 切回 `.accessory`。
+**修**（[ResoundApp.swift](../Sources/ResoundApp/ResoundApp.swift)）：①`MainWindow.show()` 统一入口：切 `.regular` + activate → 有主窗（含最小化，最小化时 `canBecomeMain` 为 false，故兼认 SwiftUI 的 `main-AppWindow-N` 标识）就前置，否则 `openWindow(id:"main")`；②`AppDelegate.applicationShouldHandleReopen` 调它并返回 false，不再走 SwiftUI 的「打开无标题」路径；`openWindow` 在 `WindowConfigurator.makeNSView` 从主窗环境捕获；③菜单「打开窗口」「开始录音」同走 `MainWindow.show(using:)`；④`windowWillClose` 只响应 `canBecomeMain` 的主窗，避免菜单/浮窗关闭时误切 accessory。
+**验证**（lldb 驱动，release 包）：关窗→`open` 连续 3 轮都出窗；关窗→菜单出窗；窗口可见时 reopen 不多开；最小化→reopen 复原同一窗口不多开；每次关窗后 policy=accessory（Dock 隐藏行为不变）。
+**未决**：通过 `openWindow` 新建的窗口关闭后，窗口服务器里残留同尺寸 onscreen 窗口（进程内已无对应 NSWindow）；菜单原有路径同样出现，非本修复引入，但可能是 lldb 暂停打断关闭动画的假象——用户手动验收（⌘W/红点关窗 + 菜单/Dock/`open` 重开）确认屏幕上无残影，判定为 lldb 暂停打断关闭动画的假象。
+**附**：lldb 驱动脚本、最小 App 对照在会话 scratchpad，未入库。

@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-11-02（**修「主窗口关掉后再也打不开」**：Dock 点击 / `open` 重开在 macOS 27 必现失效——SwiftUI 默认 reopen 走 AppKit「打开无标题」路径，`applicationShouldOpenUntitledFile` 返回 false，不建窗口。修=`AppDelegate.applicationShouldHandleReopen` + 菜单共用 `MainWindow.show()`（找已有/最小化主窗，否则 `openWindow`），willClose 只认主窗。lldb 驱动实测三条路径都恢复、关窗仍隐藏 Dock；用户手动验收通过、无残影窗口，已 commit，见 [DECISIONS](DECISIONS.md) 2026-11-02「主窗口关闭后打不开」）
 > 最近更新：2026-11-02（**修「同一场会议出现两条录音」**：根因=录音 id 按每次入库的当前时间生成，重试同一份音频就铸新 id → ①索引失败（10-22 embedding 超时）后重试 → 第二条完整录音（10-23 用户手删了旧那条）；②转写中退出 App → 启动回收 → 重试 → 每次一个半成品目录（10-21 Tao 1on1 三个目录）；③主窗口 onAppear 重开会重跑回收、删掉在途录音分轨（10-30 找不到 -mic.wav）。修=`IngestPipeline.Plan` 绑定 id + `.ingest` sidecar 持久化 + 已入库只补索引 + 回收每进程一次。编译过 + 离线 harness 6/6，**App 未重打包、未 commit**，见 [DECISIONS](DECISIONS.md) 2026-11-02）
 > 最近更新：2026-10-30（**macOS 27.2 / Xcode 27.1 升级适配**：升级后浮窗拖不动 + Meet 检测不到，根因=用户开的是 main 的 10-10 旧包（分支修复未合并）+ 旧 SDK 编的二进制在新系统拖不动。swift-sdk 升 0.12.1、`Markdown.Document` 消歧，Xcode 27 重打包后用户实测两项恢复。详见 DECISIONS 2026-10-30）
 > 最近更新：2026-10-22（**Notion 链接识别不到 + 授权过期误报「无权限」两修**：①Notion 迁到 `app.notion.com`，内置来源 hostPatterns 补 `notion.com`；②401 统一走「强制刷新 token→重试→仍失败标 `.expired`」，设置页出重新授权横幅、关联弹窗提示重新授权、成功后自愈。CLI 验证 + 用户重新授权后实机取回成功。详见 DECISIONS 2026-10-22 两条）
