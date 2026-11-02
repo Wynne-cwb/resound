@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-10-30（**macOS 27.2 / Xcode 27.1 升级适配**：升级后浮窗拖不动 + Meet 检测不到，根因=用户开的是 main 的 10-10 旧包（分支修复未合并）+ 旧 SDK 编的二进制在新系统拖不动。swift-sdk 升 0.12.1、`Markdown.Document` 消歧，Xcode 27 重打包后用户实测两项恢复。详见 DECISIONS 2026-10-30）
 > 最近更新：2026-10-22（**Notion 链接识别不到 + 授权过期误报「无权限」两修**：①Notion 迁到 `app.notion.com`，内置来源 hostPatterns 补 `notion.com`；②401 统一走「强制刷新 token→重试→仍失败标 `.expired`」，设置页出重新授权横幅、关联弹窗提示重新授权、成功后自愈。CLI 验证 + 用户重新授权后实机取回成功。详见 DECISIONS 2026-10-22 两条）
 > 最近更新：2026-10-21（**修 Meet 会议检测静默失效**：Chrome 标签 URL 变成 `meet.google.com/meet/xxx-xxxx-xxx`，[MeetWatcher](../Sources/ResoundCore/MeetWatcher.swift) 正则要求会议码紧跟域名 → 整场检测不到、不弹窗。正则放宽为允许路径段前缀，9 条 URL 用例全过 + 编译通过 + 已重打包重启（15:29），对着用户正在开的 `/meet/` 会议 3s 内弹窗出现在内置屏右上角。**待 commit**。详见 DECISIONS 2026-10-21「Meet 会议检测静默失效」）
 > 最近更新：2026-10-21（**修单屏/多屏切换后录音浮窗、会议弹窗看不到**：两个浮窗都没处理屏幕变化——录音浮窗只首次恢复记忆坐标（实测残留外接屏坐标），会议弹窗用 `NSScreen.main`。新增 [FloatingPanelPlacement](../Sources/ResoundApp/FloatingPanelPlacement.swift)：目标屏取鼠标所在屏，每次显示 + 屏幕参数变化时校验在屏内。**编译通过 + 已重打包重启（15:24，跑的是 worktree 的 build/Resound.app）；用户已实机验收浮窗正常显示**。详见 DECISIONS 2026-10-21）

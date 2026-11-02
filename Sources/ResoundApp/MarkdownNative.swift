@@ -11,11 +11,11 @@ struct MarkdownNative: View {
     let pal: Palette
 
     // 解析缓存：按原文缓存 Document，切页/重建视图不重跑 cmark 解析。
-    private static var cache: [String: Document] = [:]
-    private static func parse(_ s: String) -> Document {
+    private static var cache: [String: Markdown.Document] = [:]
+    private static func parse(_ s: String) -> Markdown.Document {
         if let d = cache[s] { return d }
         if cache.count > 48 { cache.removeAll() }
-        let d = Document(parsing: s)
+        let d = Markdown.Document(parsing: s)
         cache[s] = d
         return d
     }

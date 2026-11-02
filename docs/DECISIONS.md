@@ -1746,3 +1746,10 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **根因**：① swift-sdk `HTTPClientTransport` 把 HTTP 401 抛成 `MCPError.internalError("Authentication required")`，而 resolver 把所有非 MCPClientError 都归成 noPermission → 授权过期被误报成「无权限」；② `validAccessToken` 只在**本地** `expiresAt` 判过期时才刷新——服务端先吊销/token 无 expiresAt 时永远不刷新；③ 没有任何路径把来源标成 `.expired`，所以设置页已有的「重新授权」横幅从来不出现。
 **修**：`MCPOAuth.forceRefresh`（无视本地过期时间强制刷新）+ `ExternalLinkResolver.fetch`（401 → 刷新一次重试 → 仍 401/无法刷新抛 `MCPClientError.authExpired`），粘贴链接与 `MCPIngest.resync` 共用；新增 `LinkResolution.authExpired`，App 把来源标 `.expired`（设置页出横幅）并在关联弹窗显示「授权已过期 · 重新授权」，重新授权后自动重解析；取回成功会把 expired 来源自愈回 connected；`.expired` 来源仍会尝试取回（刷新可能成功）。401 判定集中在 `MCPClientError.isAuthFailure`；403 仍归无权限。
 **验证**：`resound mcp fetch <app.notion.com URL>` → 日志「token 刷新失败 → token 获取失败」（Notion 拒绝了 refresh token）→ 输出「授权已过期」→ `mcp sources` 显示 `[expired] Notion`。用户在 App 里重新授权 Notion 后，该 `app.notion.com` 链接成功取回正文（实机验收通过）。
+
+**macOS 27.2 升级后：录音浮窗拖不动 + Meet 检测不到 + 打包失败（2026-10-30）**
+**现象**：系统升到 macOS 27.2 后，录音药丸能点停止但拖不动；Google Meet 不再弹「开始录音」。
+**取证**：①运行中的 App 是**主仓库 `main` 在 10-10 打的旧包**（`/Users/.../Resound/build/Resound.app`），Meet `/meet/` 链接修复（f2b6aad）与多屏浮窗修复（8e1a734）只在 worktree 分支、**未合进 main** → 升级重启后开的是旧包，`/meet/<code>` 链接检测不到；②Xcode 同时升到 27.1（Swift 6.4）：许可协议需重新同意（未同意前 `swift`/`git`/`python3` 等 xcrun 垫片全报 license 错，可临时 `DEVELOPER_DIR=/Library/Developer/CommandLineTools` 跑 git）；swift-sdk 0.10.1 在 Swift 6.4 下编译报 data race 错误；新 SDK 的 SwiftUI 出了 `Document` 类型，与 swift-markdown 冲突；CLT 的 Swift 没有 `SwiftUIMacros` 插件（`@State` 宏），App 只能用 Xcode 编。
+**修**：swift-sdk 解除 `<0.10.2` 上限 → 0.12.1（旧上限只为 Swift 6.0 工具链），适配 `Tool.Content.text` 新增的两个关联值；`MarkdownNative` 显式写 `Markdown.Document`；用 Xcode 27 重新打包 worktree 分支并替换运行中的 App。
+**验证**：用户实测浮窗可拖、Meet 弹窗恢复。**拖动没改任何代码**——旧 SDK 编的二进制在 macOS 27 上拖不动，用新 SDK 重编即恢复（`isMovableByWindowBackground` 原样）。原计划的「显式 performDrag 拖动区」和「AppleScript 失败写日志」两处改动因当时 `python3` 被 Xcode license 拦截**并未写入**，验证通过的包不含它们。
+**教训**：①worktree 分支上的修复不合进 main，用户一重启开主目录的包就「回归」；②Xcode license 未同意时所有 xcrun 垫片都会失败，报错容易被淹没在其他输出里——改完文件要看 diff 确认落盘。

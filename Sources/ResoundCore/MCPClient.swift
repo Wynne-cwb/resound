@@ -74,7 +74,7 @@ public actor MCPClientSession {
     public func callToolText(_ name: String, arguments: [String: Value]) async throws -> String {
         let (content, isError) = try await client.callTool(name: name, arguments: arguments)
         if isError == true { throw MCPClientError.toolError(name) }
-        return content.compactMap { if case .text(let s) = $0 { return s } else { return nil } }
+        return content.compactMap { if case .text(let s, _, _) = $0 { return s } else { return nil } }
             .joined(separator: "\n")
     }
 

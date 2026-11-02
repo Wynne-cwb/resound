@@ -17,9 +17,9 @@ let package = Package(
         // 干净机器 clone 后必编译失败。上界卡在 0.15.5 而非 exact，patch 修复仍能进来。
         .package(url: "https://github.com/FluidInference/FluidAudio.git", "0.15.0"..<"0.15.5"),
         .package(url: "https://github.com/apple/swift-markdown.git", from: "0.4.0"),
-        // 锁 <0.10.2：0.10.2 起需 swift-tools-version 6.1（用了 6.1 才有的 withThrowingTaskGroup 无 of: 重载），
-        // 当前工具链 Swift 6.0.3 编不过。0.10.1 是最后一个 swift-tools 6.0 兼容版。
-        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", "0.9.0"..<"0.10.2"),
+        // >=0.10.2: Swift 6.4 (Xcode 27) rejects 0.10.1's NetworkTransport with data-race errors.
+        // The old <0.10.2 cap only existed for the Swift 6.0 toolchain, which is gone.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", "0.10.2"..<"1.0.0"),
         // 自定义 stdio 子进程 Transport 需符合 swift-sdk 的 Transport 协议（logger: Logging.Logger）。
         // swift-sdk 已传递依赖 swift-log；这里显式声明以便 ResoundCore `import Logging`。
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
