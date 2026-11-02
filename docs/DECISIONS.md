@@ -1710,3 +1710,78 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **生效路径**：改动只在**新写入**时套开放 ACL，旧 item 不会自己变。让用户打开新打包 App → 设置›外部 MCP 把 Notion **断开重连一次**（走一次 save = delete 旧 item + add 开放 ACL）→ 之后重 build/重启/续 token 都不再弹。
 
 **验证**：编译通过、`bundle-app.sh` 打包 `Resound Dev` 签名完成。真机「重连后不再弹」待用户确认。README 双语无需改（"tokens live in the Keychain / 令牌存 Keychain" 仍成立，未新增/改动用户可见能力）。**待 commit。**
+
+
+## 10/08 DeepSeek ~655 次请求溯源 + 断网不回退 Whisper + LLM 用量账本（2026-10-10）
+
+**溯源（代码逐点核算，无请求级日志）**：10/08 入库 4 场会——每场 = AI 校对 ⌈段数/40⌉ 批 + contextual 增强每 chunk 1 次（整篇转录做前缀）+ 摘要 1 + 文件夹建议 ≤1。合计 ≈455：校对 19+16+10+**81**、增强 52+91+39+**141**。**Platform 周会一场 ~222 次**：19:31:58 断网（`-1009`）→ MOSS submit 失败 → 回退 whisper 双轨 → 3218 段 2.6s 碎句（mic 1369 + system 1849）→ 校对批次 ×5、chunk 也更多；且该场摘要缺失。余下 ~200 次本地无从归因：ChatClient 无重试；Claude Code 会话里 0 次 `search_meetings`（MCP 检索 `rerank:true` 每次 = 1 次 DeepSeek，Codex/Desktop 调用未覆盖）。**教训**：没有请求级账本就只能事后反推——这正是补 LLMUsageLog 的原因。
+
+**决策 1：网络类失败不回退 Whisper**（用户 10/10 拍板）。依据：断网是瞬时状态，回退 whisper 质量更差（碎句、无说话人联合建模）且 LLM 调用暴涨。实现：
+- `NetworkWait.isConnectivityError`：URLError 的断网/DNS/连不上主机/超时/TLS 失败；服务端 HTTP 错误不算。
+- `ConnectivityPatience`：系统路径离线 → `NWPathMonitor` 无限期等待恢复（不计次）；路径在线却连不上 → 15s→2min 退避，12 次（约 20min）后抛原错。
+- MOSS submit：等网后重提交；poll：**保留 call_id 续轮询**（服务端 GPU 照跑），离线时长顺延 deadline。
+- `ingest`/`retranscribe`：网络类错误 rethrow（队列项失败可重试，音频在 pending-recordings 不丢），**不回退**；其它 MOSS 错误仍回退 whisper（建议默认，未改）。
+- App：`ImportItem.Status.waitingNetwork`，行内显示「网络已断开，等待恢复后继续 MOSS 转写…」。
+- 已知边界：MossDeployer 部署自检也走同一 patience（端点不可达时最长 ~20min 才报错）；Modal call 结果保留期未核实，超长断网后 poll 若拿到 HTTP 错误会按服务端错误回退 whisper。
+
+**决策 2：先埋点再降耗**（遵循「性能优化先埋点」）。`ChatClient` 每次请求（含失败/断网）写 `llm-usage.jsonl`：purpose（correct/context/summary/rerank/plan/answer/classify/tidy/merge-title/template-assist）、`prompt_cache_hit/miss_tokens`、`completion_tokens`、`reasoning_tokens`、耗时；只记计数不记内容。CLI `resound llm-usage [--day]` 按用途汇总。写入用 `queue.sync`——`async` 时 CLI 进程退出前来不及落盘（冒烟时实测漏记）。
+
+**决策 3：contextual 增强缓存预热**（零质量影响）。DeepSeek V4 磁盘缓存规则（官方 kv_cache 文档）：缓存单元需**完整匹配**；公共前缀要在**两个请求完成后**才被识别持久化。原实现一上来 4 并发 → 前 4 次整篇转录全价。改为前 2 条串行、其余 4 并发。
+
+**新发现（待拍板，未改）**：
+- DeepSeek 思维模式**默认开启**（effort=high），且思维模式下 **`temperature` 被忽略**——校对的 0.3、其它的 0 都不生效。冒烟：classify 输出 193 token 中 169 是思维链（88%）。可对机械任务传 `{"thinking":{"type":"disabled"}}`（增强/分类/合并标题/rerank/plan），校对是否关需 A/B。
+- contextual 增强成本 = chunk 数 × 整篇转录；最大杠杆是**一次请求处理 K 个 chunk**（请求数与输入 token 均 ÷K），有轻微质量风险。
+- 校对按固定 40 段分批对 whisper 碎句极不划算，可改按字数分批。
+
+
+## LLM 降耗三项落地 + A/B 结论（2026-10-10，接上条「待拍板」）
+
+用户拍板「都做」，按「质量>速度」每项先用 `resound llm-bench` 拿真实录音 A/B，再决定上不上：
+
+| 项 | A/B 证据 | 结论 |
+|---|---|---|
+| contextual 增强：8 chunk/请求 + 关思维链 | 1738 迁移会 16 chunk：请求 16→2，输出 7876→480 token（旧 89% 是思维链），输入 103k→15k。初版批量 prompt 丢了全局背景（「继续讨论…」），加「每条自带整篇大背景、即使重复也写全」后与逐条版对齐 | **上线**。生产路径（scratch 索引）39 chunk=5 请求、缓存命中≈80%、9.1s、39/39 有上下文；批内缺失的单条补跑 |
+| 校对：按 2000 字/≤120 段分批（原固定 40 段） | MOSS 200 段：5→3 批，改动质量相当；whisper 碎句 300 段：8→3 批，改动 11→20 且更准（WhatsApp/拉齐/确实/QA），每批上下文更多 | **上线**（13→6 请求，输出 108.7k→68.7k） |
+| 校对关思维链 | MOSS 改 0 段、whisper 改 1 段——几乎不纠错 | **不上**，保留思维链 |
+| 查询规划关思维链 | 「上周」（今天周六 10-10）解析成本周 10-05~11（应为 09-28~10-04）；「昨天那场会」shape/source 判错 | **不上** |
+| 重排关思维链 | 「老客户迁移时间节点」top5 只重合 3/5，丢了带具体日期的片段、换进无关 action item | **不上** |
+| 分类（文件夹）关思维链 | Working Group 会被提议新建「知识库建设」，用户实际归在「AI-Native Delivery」；开思维链 2/2 判对 | **不上**（tag 关后 3/3 稳定且同结果，但单次调用省得少，统一不动） |
+| 合并标题关思维链 | 低频、未 A/B | **不动** |
+
+**原则沉淀**：思维链对「判断类」任务（时间换算、相关度、归类、错听纠正）是真有用的；只对「复述/概括类」高频任务（contextual 增强）关掉。`ChatClient(thinking:)` 只在 DeepSeek 端点发送（严格 OpenAI 兼容服务会拒未知字段）；账本里关思维链的请求记为 `<purpose>/nothink` 便于对比。
+**新坑**：思维模式下 `temperature` 被服务端忽略——AutoClassifier 注释里「temp 0 仍有采样方差」的真因就是它。
+
+## 踩坑：单屏/多屏切换后录音浮窗、会议弹窗看不到（2026-10-21）
+
+**现象**：用户在单屏/外接多屏之间来回切换，录音浮窗和 Meet 检测弹窗有时都看不到。
+**根因**（两个浮窗都没处理屏幕变化）：①录音浮窗每次 App 运行只在首次 `setFrameUsingName` 恢复一次记忆坐标、之后不再校验——defaults 里实测留着外接屏时代的坐标（y=1941，屏在内置屏上方），拔屏后落在不存在的屏上；**borderless NSPanel 不会被 AppKit 拉回屏内**。②会议弹窗用 `NSScreen.main` 定位，后台 App 的 main screen 可能是用户没在看/刚拔掉/休眠的那块屏。
+**修**：新增 [FloatingPanelPlacement](../Sources/ResoundApp/FloatingPanelPlacement.swift)——目标屏取**鼠标所在屏**（回退 main/首屏）；`isOnScreen` 要求浮窗 ≥50% 面积落在某屏 visibleFrame 内。录音浮窗每次 show + `didChangeScreenParametersNotification` 都校验，不在屏上就贴目标屏右上角；会议弹窗每次 show 贴鼠标所在屏、屏幕变化时若正显示则重定位。
+**验证**：编译通过；判定逻辑对旧外接屏坐标返回 false、当前内置屏坐标返回 true。用户实机验收（2026-10-21）：浮窗正常显示。
+**附**：worktree 编译需 `Vendor/sherpa-onnx`（gitignored 派生物）→ 软链到主仓库那份，并加进 `.git/info/exclude`（`.gitignore` 的 `Vendor/sherpa-onnx/` 带斜杠匹配不到软链）。
+
+## 踩坑：Meet 会议检测静默失效——URL 多了 `/meet/` 路径段（2026-10-21）
+
+**现象**：修完浮窗多屏问题后，用户开着 Google Meet 会议，仍不弹「开始录音」。
+**取证**：Chrome 标签 URL 实为 `https://meet.google.com/meet/qzq-ityb-ztv`；麦克风 `DeviceIsRunningSomewhere=1`（通话条件满足）。[MeetWatcher.isMeetingRoom](../Sources/ResoundCore/MeetWatcher.swift) 的正则 `meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}` 要求会议码紧跟域名 → 多一段 `/meet/` 就整场匹配不上，**零报错、零提示**。用户感知为「浮窗看不到」，实际是检测根本没触发（与上条浮窗定位 bug 症状相同、根因不同）。
+**修**：正则改为允许任意路径段前缀 `meet\.google\.com/(?:[A-Za-z0-9_-]+/)*[a-z]{3}-[a-z]{4}-[a-z]{3}(?![a-z])`；尾部负向前瞻防误吞更长的串。
+**验证**：9 条 URL 用例全过（含 `/meet/`、`/lookup/`、带 query 的会议码为真；`/`、`/landing`、`/new`、超长码为假）；release 编译通过；重打包重启后对着真实 `/meet/` 会议 3s 内弹窗上屏（CGWindowList 取证：内置屏右上角 348×160）。
+**教训**：外部 URL 格式是会变的，检测失败要可见——目前 `chromeMeeting()` 匹配不上时无任何日志，下次同类问题仍只能靠人肉取证。
+
+**Notion 新域名 `app.notion.com` 识别不到（2026-10-22）**
+**现象**：粘贴 `https://app.notion.com/p/<workspace>/<slug>-<id>` 关联链接，Resound 不认作 Notion（落到「无法识别来源」）。
+**根因**：Notion 已迁到 `app.notion.com`（`notion-fetch` 返回的 canonical URL 也是这个域名），而内置来源 [MCPSource.swift](../Sources/ResoundCore/MCPSource.swift) 的 `hostPatterns` 只有 `notion.so`/`notion.site` → host 路由匹配失败，根本没走到取回。
+**修**：`hostPatterns` 加 `notion.com`（`MCPSourceStore.load()` 对内置来源以预设覆盖 hostPatterns，老用户的 `mcp-sources.json` 无需迁移）。
+**验证**：`resound mcp sources` 显示 hosts 含 notion.com；`resound mcp fetch <app.notion.com URL>` 已路由到 Notion（不再是 unknown）；用 Notion MCP 直接 `notion-fetch` 该 URL 能取回全文，证明 server 端接受新域名、无需改写 URL。CLI 取回报 `Authentication required`——Keychain 里 Notion token 自 2026-10-13 起未刷新，属另一问题（token 过期/刷新失败），需在 App 里实测或重连。
+
+**外部来源授权过期：401 → 强制刷新 → 仍失败标 expired（2026-10-22）**
+**现象**：修完域名后 Notion 链接仍取不回，App 提示「无权访问」，来源却一直显示「已连接」。新旧域名链接都报 `[-32603] Internal error: Authentication required`。
+**根因**：① swift-sdk `HTTPClientTransport` 把 HTTP 401 抛成 `MCPError.internalError("Authentication required")`，而 resolver 把所有非 MCPClientError 都归成 noPermission → 授权过期被误报成「无权限」；② `validAccessToken` 只在**本地** `expiresAt` 判过期时才刷新——服务端先吊销/token 无 expiresAt 时永远不刷新；③ 没有任何路径把来源标成 `.expired`，所以设置页已有的「重新授权」横幅从来不出现。
+**修**：`MCPOAuth.forceRefresh`（无视本地过期时间强制刷新）+ `ExternalLinkResolver.fetch`（401 → 刷新一次重试 → 仍 401/无法刷新抛 `MCPClientError.authExpired`），粘贴链接与 `MCPIngest.resync` 共用；新增 `LinkResolution.authExpired`，App 把来源标 `.expired`（设置页出横幅）并在关联弹窗显示「授权已过期 · 重新授权」，重新授权后自动重解析；取回成功会把 expired 来源自愈回 connected；`.expired` 来源仍会尝试取回（刷新可能成功）。401 判定集中在 `MCPClientError.isAuthFailure`；403 仍归无权限。
+**验证**：`resound mcp fetch <app.notion.com URL>` → 日志「token 刷新失败 → token 获取失败」（Notion 拒绝了 refresh token）→ 输出「授权已过期」→ `mcp sources` 显示 `[expired] Notion`。用户在 App 里重新授权 Notion 后，该 `app.notion.com` 链接成功取回正文（实机验收通过）。
+
+**macOS 27.2 升级后：录音浮窗拖不动 + Meet 检测不到 + 打包失败（2026-10-30）**
+**现象**：系统升到 macOS 27.2 后，录音药丸能点停止但拖不动；Google Meet 不再弹「开始录音」。
+**取证**：①运行中的 App 是**主仓库 `main` 在 10-10 打的旧包**（`/Users/.../Resound/build/Resound.app`），Meet `/meet/` 链接修复（f2b6aad）与多屏浮窗修复（8e1a734）只在 worktree 分支、**未合进 main** → 升级重启后开的是旧包，`/meet/<code>` 链接检测不到；②Xcode 同时升到 27.1（Swift 6.4）：许可协议需重新同意（未同意前 `swift`/`git`/`python3` 等 xcrun 垫片全报 license 错，可临时 `DEVELOPER_DIR=/Library/Developer/CommandLineTools` 跑 git）；swift-sdk 0.10.1 在 Swift 6.4 下编译报 data race 错误；新 SDK 的 SwiftUI 出了 `Document` 类型，与 swift-markdown 冲突；CLT 的 Swift 没有 `SwiftUIMacros` 插件（`@State` 宏），App 只能用 Xcode 编。
+**修**：swift-sdk 解除 `<0.10.2` 上限 → 0.12.1（旧上限只为 Swift 6.0 工具链），适配 `Tool.Content.text` 新增的两个关联值；`MarkdownNative` 显式写 `Markdown.Document`；用 Xcode 27 重新打包 worktree 分支并替换运行中的 App。
+**验证**：用户实测浮窗可拖、Meet 弹窗恢复。**拖动没改任何代码**——旧 SDK 编的二进制在 macOS 27 上拖不动，用新 SDK 重编即恢复（`isMovableByWindowBackground` 原样）。原计划的「显式 performDrag 拖动区」和「AppleScript 失败写日志」两处改动因当时 `python3` 被 Xcode license 拦截**并未写入**，验证通过的包不含它们。
+**教训**：①worktree 分支上的修复不合进 main，用户一重启开主目录的包就「回归」；②Xcode license 未同意时所有 xcrun 垫片都会失败，报错容易被淹没在其他输出里——改完文件要看 diff 确认落盘。

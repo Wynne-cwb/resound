@@ -38,6 +38,10 @@ final class RecBadgePanelController {
         app.$isDark.dropFirst()
             .sink { [weak self] _ in if self?.panel?.isVisible == true { self?.rebuildContent() } }
             .store(in: &cancellables)
+        // Display plugged/unplugged/rearranged: pull the badge back if it ended up off-screen.
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.ensureOnScreen() }.store(in: &cancellables)
     }
 
     private var badgeEnabled: Bool {
@@ -59,10 +63,17 @@ final class RecBadgePanelController {
             if !panel.setFrameUsingName(Self.frameKey) { placeDefault(panel) }
             panel.setFrameAutosaveName(Self.frameKey)   // 之后拖动自动记忆
         }
+        ensureOnScreen()
         panel.orderFrontRegardless()
     }
 
     private func hide() { panel?.orderOut(nil) }
+
+    /// The remembered frame may belong to a display that is no longer connected; re-place it if so.
+    private func ensureOnScreen() {
+        guard let panel, !FloatingPanelPlacement.isOnScreen(panel.frame) else { return }
+        placeDefault(panel)
+    }
 
     private func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 160, height: 80),
@@ -91,12 +102,9 @@ final class RecBadgePanelController {
         panel.contentView = host
     }
 
-    /// 无记忆位置时（首次）贴主屏右上角（含 14pt 透明留白即视觉边距；visibleFrame 已排除菜单栏）。
+    /// 无记忆位置（或记忆位置已不在任何屏上）时贴鼠标所在屏右上角（含 14pt 透明留白即视觉边距；visibleFrame 已排除菜单栏）。
     private func placeDefault(_ panel: NSPanel) {
-        guard let screen = NSScreen.main else { return }
-        let vf = screen.visibleFrame
-        let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width, y: vf.maxY - size.height))
+        FloatingPanelPlacement.placeTopRight(panel)
     }
 }
 

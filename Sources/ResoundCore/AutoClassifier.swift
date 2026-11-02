@@ -10,7 +10,7 @@ public struct AutoClassifier {
     let maxContentChars: Int
 
     public init(config: Config, model: String? = nil, maxContentChars: Int = 16000) {
-        self.chat = ChatClient(config: config, modelOverride: model ?? config.correctModel)
+        self.chat = ChatClient(config: config, modelOverride: model ?? config.correctModel, purpose: "classify")
         self.maxContentChars = maxContentChars
     }
 

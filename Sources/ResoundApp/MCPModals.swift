@@ -274,6 +274,17 @@ struct MCPModalsHost: View {
                     primaryBtn("去连接 \(r.sourceName)") { mcp.connectThenLink() }
                 }.padding(.top, 18)
             }
+        case .expired:
+            if let r = lf.result {
+                warnCard(title: "\(r.sourceName) 授权已过期",
+                         desc: "Resound 已尝试自动刷新授权但被拒绝。重新授权 \(r.sourceName) 后会自动重新取回这条内容；否则只能作为「仅链接」保存。", r: r)
+                HStack(spacing: 9) {
+                    Button { mcp.saveLinkOnly() } label: { Text("仍以仅链接保存").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(pal.text2) }.buttonStyle(.plainHit).hoverCursor()
+                    Spacer()
+                    secondaryBtn("取消") { mcp.cancelLink() }
+                    primaryBtn("重新授权 \(r.sourceName)") { mcp.connectThenLink() }
+                }.padding(.top, 18)
+            }
         case .unknown:
             unknownCard()
             HStack(spacing: 9) { Spacer()

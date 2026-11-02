@@ -74,7 +74,7 @@ public actor MCPClientSession {
     public func callToolText(_ name: String, arguments: [String: Value]) async throws -> String {
         let (content, isError) = try await client.callTool(name: name, arguments: arguments)
         if isError == true { throw MCPClientError.toolError(name) }
-        return content.compactMap { if case .text(let s) = $0 { return s } else { return nil } }
+        return content.compactMap { if case .text(let s, _, _) = $0 { return s } else { return nil } }
             .joined(separator: "\n")
     }
 
@@ -90,6 +90,7 @@ public enum MCPClientError: Error, CustomStringConvertible, LocalizedError {
     case noContent
     case noFetchTool
     case notConnected
+    case authExpired
     public var errorDescription: String? { description }
     public var description: String {
         switch self {
@@ -97,7 +98,17 @@ public enum MCPClientError: Error, CustomStringConvertible, LocalizedError {
         case .noContent: return "未取到内容"
         case .noFetchTool: return "该来源未提供按链接取回文档的工具"
         case .notConnected: return "来源未连接"
+        case .authExpired: return "授权已过期，请重新授权"
         }
+    }
+
+    /// swift-sdk's HTTPClientTransport reports HTTP 401 as `MCPError.internalError("Authentication required")`.
+    public static func isAuthFailure(_ error: Error) -> Bool {
+        if case .authExpired? = error as? MCPClientError { return true }
+        if case .internalError(let msg)? = error as? MCPError {
+            return msg?.localizedCaseInsensitiveContains("authentication required") == true
+        }
+        return false
     }
 }
 
@@ -199,30 +210,62 @@ public enum LinkResolution: Sendable {
     case unconnected(MCPSource)
     case unknown
     case noPermission(MCPSource)
+    case authExpired(MCPSource)   // 401 persisted after a token refresh: the user must re-authorize
 }
 
 /// URL 路由：host → 来源 → 取回/降级。`bearer` 由 OAuth/Keychain 提供（Wave 2 OAuth / Wave 3 触发）。
 public enum ExternalLinkResolver {
+    /// Default refresh hook: only remote OAuth sources can refresh their token.
+    public static func defaultRefresh(_ src: MCPSource) async -> String? {
+        guard src.transport == .remote, src.auth == .oauth else { return nil }
+        return await MCPOAuth.forceRefresh(sourceId: src.id, clientId: src.clientId)
+    }
+
+    /// Connect and fetch one URL. On 401, refresh the token once and retry;
+    /// throws `MCPClientError.authExpired` when the retry is still unauthorized or no refresh is possible.
+    public static func fetch(url: String, source src: MCPSource,
+                             bearer: (MCPSource) async -> String?,
+                             refresh: (MCPSource) async -> String? = defaultRefresh) async throws -> FetchedExternalDoc {
+        do {
+            return try await fetchOnce(url: url, source: src, token: await bearer(src))
+        } catch where MCPClientError.isAuthFailure(error) {
+            guard let fresh = await refresh(src) else { throw MCPClientError.authExpired }
+            do {
+                return try await fetchOnce(url: url, source: src, token: fresh)
+            } catch where MCPClientError.isAuthFailure(error) {
+                throw MCPClientError.authExpired
+            }
+        }
+    }
+
+    private static func fetchOnce(url: String, source src: MCPSource, token: String?) async throws -> FetchedExternalDoc {
+        guard let session = MCPClientSession.make(for: src, bearer: token) else { throw MCPClientError.notConnected }
+        try await session.connect()
+        defer { Task { await session.disconnect() } }
+        return try await SourceAdapter.fetchContent(url: url, kind: src.kind, session: session)
+    }
+
     public static func resolve(url: String, sources: [MCPSource]? = nil,
-                               bearer: (MCPSource) async -> String?) async -> LinkResolution {
+                               bearer: (MCPSource) async -> String?,
+                               refresh: (MCPSource) async -> String? = defaultRefresh) async -> LinkResolution {
         let all = sources ?? MCPSourceStore.load()
         guard let src = MCPSourceStore.source(forURL: url, in: all) else { return .unknown }
-        guard src.status == .connected else { return .unconnected(src) }
-        let token = await bearer(src)
-        guard let session = MCPClientSession.make(for: src, bearer: token) else { return .unknown }
+        // An expired source still gets a try: the refresh may succeed and heal it.
+        guard src.status != .disconnected else { return .unconnected(src) }
         do {
-            try await session.connect()
-            defer { Task { await session.disconnect() } }
-            let doc = try await SourceAdapter.fetchContent(url: url, kind: src.kind, session: session)
+            let doc = try await fetch(url: url, source: src, bearer: bearer, refresh: refresh)
             return .imported(doc, source: src)
         } catch {
             // 真实原因落盘便于排查（GUI 的 print 不进系统日志）。
             AppLog.log("MCP 取回失败 [\(src.kind.rawValue)] \(url) → \(error)")
-            // 没有取回工具 / 取到空 → 不是权限问题，归为「无法取回」(unknown)；其余（连上但工具报错）→ 多半权限。
             if let e = error as? MCPClientError {
-                switch e { case .noFetchTool, .noContent: return .unknown; default: break }
+                switch e {
+                case .authExpired: return .authExpired(src)
+                case .noFetchTool, .noContent, .notConnected: return .unknown   // 不是权限问题，归为「无法取回」
+                default: break
+                }
             }
-            return .noPermission(src)
+            return .noPermission(src)   // 连上但工具报错 → 多半权限
         }
     }
 }

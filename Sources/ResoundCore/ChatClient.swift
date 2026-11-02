@@ -20,12 +20,27 @@ public struct ChatClient {
     let baseURL: String
     let key: String
     public let model: String
+    /// Label written to the usage ledger (LLMUsageLog), e.g. "correct", "context", "summary".
+    public let purpose: String
+    /// DeepSeek thinking-mode switch. nil = send nothing (server default: thinking ON, effort high).
+    /// false = `{"thinking":{"type":"disabled"}}` for mechanical tasks: measured 2026-10-10, a classify
+    /// call spent 169 of 193 output tokens on chain-of-thought. Also note thinking mode silently ignores
+    /// `temperature`, so per-call temperatures only take effect when thinking is off.
+    public let thinking: Bool?
 
-    public init(config: Config, modelOverride: String? = nil) {
+    public init(config: Config, modelOverride: String? = nil, purpose: String = "chat", thinking: Bool? = nil) {
         self.baseURL = config.chatBaseURL
         self.key = config.chatKey
         self.model = modelOverride ?? config.chatModel
+        self.purpose = purpose
+        self.thinking = thinking
     }
+
+    /// `thinking` is a DeepSeek extension; strict OpenAI-compatible servers reject unknown fields,
+    /// so it is only sent to DeepSeek endpoints.
+    var sendsThinkingFlag: Bool { thinking != nil && baseURL.lowercased().contains("deepseek") }
+    /// Ledger label, suffixed with "/nothink" when thinking was turned off, so A/B runs are comparable.
+    var ledgerPurpose: String { sendsThinkingFlag && thinking == false ? purpose + "/nothink" : purpose }
 
     /// - Parameter maxTokens: 输出 token 上限。默认 nil＝**不发送该字段**，由服务端按模型上限放行。
     ///   千万别按「这个任务大概输出多长」去估它：推理模型把思维链和正文算进**同一份**预算，
@@ -48,10 +63,21 @@ public struct ChatClient {
             "model": model, "messages": messages, "temperature": temperature,
         ]
         if let maxTokens { payload["max_tokens"] = maxTokens }
+        if sendsThinkingFlag, let thinking {
+            payload["thinking"] = ["type": thinking ? "enabled" : "disabled"]
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let started = Date()
+        let data: Data, resp: URLResponse
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch {
+            LLMUsageLog.record(purpose: ledgerPurpose, model: model, status: -1, usage: nil, started: started)
+            throw error
+        }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        let usage = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["usage"] as? [String: Any]
+        LLMUsageLog.record(purpose: ledgerPurpose, model: model, status: code, usage: usage, started: started)
         guard code == 200 else { throw ChatError.http(code, String(data: data, encoding: .utf8) ?? "") }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = obj["choices"] as? [[String: Any]],

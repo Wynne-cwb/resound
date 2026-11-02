@@ -23,6 +23,7 @@ public struct IngestPipeline {
         hints: [String] = [],
         maxFallback: Int = 5,
         push: Bool,
+        onNetworkWait: ((Bool) -> Void)? = nil,
         log: @escaping (String) -> Void = { print($0) }
     ) async throws -> Output {
         try vault.validate()
@@ -68,9 +69,14 @@ public struct IngestPipeline {
         // 设计，分开转两遍会得到两个互不相认的标签空间）。失败回退 whisper 路径，行为同现状。
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
-                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary, log: log)
+                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
+                                                           onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
                 if tracks != nil { log("   ℹ️ MOSS 模式：按混音整体转写（联合模型自带说话人分离）") }
+            } catch where NetworkWait.isConnectivityError(error) {
+                // Network trouble is not a reason to switch backends: fail as retryable, keep MOSS.
+                AppLog.error("MOSS 网络连不上，不回退 Whisper（可重试）", error)
+                throw error
             } catch {
                 log("   ⚠️ MOSS 转写失败，回退 Whisper：\(error)")
                 AppLog.error("MOSS 转写失败，回退 Whisper", error)
@@ -95,7 +101,7 @@ public struct IngestPipeline {
                 log("🧠 AI 校对转录（\(cfg.correctModel)，保持原意纠错别字/术语）…")
                 let tCorrect = Date()
                 let corrector = TranscriptCorrector(
-                    chat: ChatClient(config: cfg, modelOverride: cfg.correctModel), glossaryTerms: glossary.terms,
+                    chat: ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: "correct"), glossaryTerms: glossary.terms,
                     mishearExamples: CorrectionLearner.mishearExamples())
                 let (fixed, n) = try await corrector.correct(finalTranscript, log: log)
                 finalTranscript = fixed
@@ -152,6 +158,7 @@ public struct IngestPipeline {
     /// 重写 transcript.json（MOSS 时另写 moss-diar.json）；删旧 diarization.json——它按旧转录
     /// 的时间轴贴的标签，换了转录就作废。重索引/说话人命名/摘要由调用方接着串（CLI retranscribe）。
     public func retranscribe(recDir: URL, model: String = "large-v3",
+                             onNetworkWait: ((Bool) -> Void)? = nil,
                              log: @escaping (String) -> Void = { print($0) }) async throws {
         let manifest = try parseManifest(recDir.appendingPathComponent("recording.yaml"))
         let audioOut = recDir.appendingPathComponent(manifest.audioFile)
@@ -173,8 +180,11 @@ public struct IngestPipeline {
         let tTranscribe = Date()
         if let cfg = try? Config.load(), cfg.mossEnabled {
             do {
-                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary, log: log)
+                let (r, labels) = try await transcribeMoss(audioOut, cfg: cfg, glossary: glossary,
+                                                           onNetworkWait: onNetworkWait, log: log)
                 result = r; mossLabels = labels
+            } catch where NetworkWait.isConnectivityError(error) {
+                throw error   // same policy as ingest: never fall back to whisper over a network problem
             } catch {
                 log("   ⚠️ MOSS 转写失败，回退 Whisper：\(error)")
                 result = try await whisperTranscribe(dir: recDir, audioOut: audioOut, tracks: tracks,
@@ -198,7 +208,7 @@ public struct IngestPipeline {
                 log("🧠 AI 校对转录（\(cfg.correctModel)）…")
                 let tCorrect = Date()
                 let corrector = TranscriptCorrector(
-                    chat: ChatClient(config: cfg, modelOverride: cfg.correctModel), glossaryTerms: glossary.terms,
+                    chat: ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: "correct"), glossaryTerms: glossary.terms,
                     mishearExamples: CorrectionLearner.mishearExamples())
                 let (fixed, n) = try await corrector.correct(finalTranscript, log: log)
                 finalTranscript = fixed
@@ -265,8 +275,11 @@ public struct IngestPipeline {
 
     /// MOSS 云端转写（端到端转录+说话人）：VAD 门控 → 归一 → submit/poll → 时间戳映射回原轴。
     /// 成功返回 (转录, 与段一一对应的 S01/S02 说话人标签)；抛错由调用方回退 whisper。
+    /// Connectivity errors are the exception: MossTranscriber waits for the network itself (see
+    /// NetworkWait), and if one still escapes the callers rethrow it instead of falling back.
     private func transcribeMoss(
-        _ audio: URL, cfg: Config, glossary: Glossary, log: @escaping (String) -> Void
+        _ audio: URL, cfg: Config, glossary: Glossary, onNetworkWait: ((Bool) -> Void)?,
+        log: @escaping (String) -> Void
     ) async throws -> (TranscribeResult, [String]) {
         log("🤖 MOSS 云端转写中（转录+说话人一次产出，GPU 推理约音频时长 4 成）…")
         var upload = audio
@@ -284,7 +297,7 @@ public struct IngestPipeline {
             log(String(format: "   🔊 已响度归一（仅上传转录用）· ⏱ %.1fs", Date().timeIntervalSince(tNorm)))
         }
         defer { for u in temps { try? FileManager.default.removeItem(at: u) } }
-        let out = try await MossTranscriber(config: cfg, hotwords: glossary.terms)
+        let out = try await MossTranscriber(config: cfg, hotwords: glossary.terms, onNetworkWait: onNetworkWait)
             .transcribe(audio: upload, log: log)
         var transcript = out.result.transcript
         if !vadSpans.isEmpty {
@@ -386,7 +399,7 @@ public struct IngestPipeline {
         let cfg = try Config.load()
         let glossary = Glossary.load(vaultRoot: vault.root)
         let corrector = TranscriptCorrector(
-            chat: ChatClient(config: cfg, modelOverride: cfg.correctModel), glossaryTerms: glossary.terms,
+            chat: ChatClient(config: cfg, modelOverride: cfg.correctModel, purpose: "correct"), glossaryTerms: glossary.terms,
             mishearExamples: CorrectionLearner.mishearExamples())
         var recs = 0, segs = 0
         for dir in findRecordings(vault.root) {

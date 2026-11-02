@@ -60,9 +60,10 @@ public final class MeetWatcher: @unchecked Sendable {
         return (t.isEmpty || t == "Meet" || t == "Google Meet") ? nil : t
     }
 
-    /// 会议室 URL 模式：meet.google.com/三-四-三 小写字母（排除落地页 meet.google.com/、/landing 等）。
+    /// 会议室 URL 模式：meet.google.com/[可选路径段/]三-四-三 小写字母（排除落地页 meet.google.com/、/landing 等）。
+    /// Google 会给会议码前加路径段，如 meet.google.com/meet/qzq-ityb-ztv，必须容忍，否则整场会静默检测不到。
     static func isMeetingRoom(_ url: String) -> Bool {
-        guard let re = try? NSRegularExpression(pattern: "meet\\.google\\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}") else { return false }
+        guard let re = try? NSRegularExpression(pattern: "meet\\.google\\.com/(?:[A-Za-z0-9_-]+/)*[a-z]{3}-[a-z]{4}-[a-z]{3}(?![a-z])") else { return false }
         return re.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil
     }
 

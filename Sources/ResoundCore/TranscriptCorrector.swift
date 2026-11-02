@@ -12,14 +12,38 @@ public struct TranscriptCorrector {
     /// 已确认的「软更正」错听例子（错→对）。来自 [CorrectionLearner]：那些太短/模糊、不适合做
     /// 确定性子串替换的更正，改用上下文判断在这里 few-shot 提示模型。
     let mishearExamples: [(wrong: String, right: String)]
-    let batchSize: Int
+    /// Batches are cut by text length, not segment count: a fixed 40 segments meant ~560 chars per call
+    /// for whisper's 2-3s fragments (81 calls for one 87-min meeting) vs ~1900 for MOSS sentences.
+    /// ~2000 chars keeps MOSS batches about where they were and stops fragment transcripts from
+    /// multiplying the request count; the segment cap bounds how many lines one answer must echo back.
+    let maxBatchChars: Int
+    let maxBatchSegments: Int
 
     public init(chat: ChatClient, glossaryTerms: [String] = [],
-                mishearExamples: [(wrong: String, right: String)] = [], batchSize: Int = 40) {
+                mishearExamples: [(wrong: String, right: String)] = [],
+                maxBatchChars: Int = 2000, maxBatchSegments: Int = 120) {
         self.chat = chat
         self.glossaryTerms = glossaryTerms
         self.mishearExamples = mishearExamples
-        self.batchSize = batchSize
+        self.maxBatchChars = maxBatchChars
+        self.maxBatchSegments = maxBatchSegments
+    }
+
+    /// Splits segments into consecutive batches of at most `maxBatchChars` text / `maxBatchSegments` lines
+    /// (a single over-long segment still forms its own batch).
+    public func makeBatches(_ segs: [Transcript.Segment]) -> [[Transcript.Segment]] {
+        var batches: [[Transcript.Segment]] = []
+        var cur: [Transcript.Segment] = []
+        var chars = 0
+        for seg in segs {
+            let n = seg.text.count
+            if !cur.isEmpty && (chars + n > maxBatchChars || cur.count >= maxBatchSegments) {
+                batches.append(cur); cur = []; chars = 0
+            }
+            cur.append(seg); chars += n
+        }
+        if !cur.isEmpty { batches.append(cur) }
+        return batches
     }
 
     /// 返回校对后的 transcript 与改动段数。失败的批次静默回退原文。
@@ -28,8 +52,7 @@ public struct TranscriptCorrector {
                         log: (String) -> Void = { print($0) }) async throws -> (transcript: Transcript, changed: Int) {
         let segs = transcript.segments
         guard !segs.isEmpty else { return (transcript, 0) }
-        let batches = stride(from: 0, to: segs.count, by: batchSize)
-            .map { Array(segs[$0..<min($0 + batchSize, segs.count)]) }
+        let batches = makeBatches(segs)
 
         // 限流并发：每个批次返回 (批次号, 修正映射)，失败批次给空映射（回退原文）。
         var maps = [Int: [Int: String]]()

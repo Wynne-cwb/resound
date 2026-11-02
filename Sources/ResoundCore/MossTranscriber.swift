@@ -13,6 +13,9 @@ public struct MossTranscriber {
     /// glossary 偏置词。实测热词列表过长会稀释注意力反而无效（DECISIONS 2026-07-22），
     /// 只取前 `maxHotwords` 个拼进 prompt；术语兜底仍靠下游 glossary 替换 + AI 校对。
     public let hotwords: [String]
+    /// Called with true when transcription pauses because the Mac went offline, false when it resumes
+    /// (lets the App show "waiting for network" instead of a spinner that never moves).
+    public var onNetworkWait: ((Bool) -> Void)?
 
     static let maxHotwords = 24
     static let pollInterval: UInt64 = 10 * 1_000_000_000   // 10s
@@ -31,7 +34,7 @@ public struct MossTranscriber {
     /// 分片提交并发上限。Modal 按调用自动扩容，但免费额度有限、且并发过高会限流，故设闸。
     static let chunkConcurrency = 5
 
-    public init(config: Config, hotwords: [String] = []) throws {
+    public init(config: Config, hotwords: [String] = [], onNetworkWait: ((Bool) -> Void)? = nil) throws {
         guard let s = URL(string: config.mossSubmitURL), let r = URL(string: config.mossResultURL) else {
             throw MossError.badConfig("MOSS endpoint 未配置或不是合法 URL")
         }
@@ -39,6 +42,7 @@ public struct MossTranscriber {
         self.resultURL = r
         self.apiKey = config.mossKey
         self.hotwords = hotwords
+        self.onNetworkWait = onNetworkWait
     }
 
     public struct Output {
@@ -62,15 +66,23 @@ public struct MossTranscriber {
 
     /// 单次提交：submit → 轮询 → 解析。是标准短音频路径，也被 chunked 分片路径内部复用。
     private func runSinglePass(audio: URL, timeout: TimeInterval,
-                               log: (String) -> Void) async throws -> Output {
+                               log: @escaping (String) -> Void) async throws -> Output {
         // 耗时埋点：上传（本地压缩+网络出口）与 GPU 排队/推理（服务端）是两种性质的等待，分开计时才能定位瓶颈。
         let tUpload = Date()
-        let callId = try await submit(audio: audio)
+        // Connectivity failures never escape as "MOSS failed": offline → wait for the network, then
+        // resubmit (see ConnectivityPatience). Only server-side errors propagate to the whisper fallback.
+        var patience = ConnectivityPatience(what: "MOSS 上传", log: log, onNetworkWait: onNetworkWait)
+        var callId = ""
+        while true {
+            do { callId = try await submit(audio: audio); break }
+            catch where NetworkWait.isConnectivityError(error) { _ = try await patience.absorb(error) }
+        }
         let uploadSec = Date().timeIntervalSince(tUpload)
         let sizeMB = Double((try? FileManager.default.attributesOfItem(atPath: audio.path)[.size] as? Int) ?? 0) / 1_048_576
         log(String(format: "   ☁️ MOSS 已提交（%@），⏱ 上传 %.1fs（%.1fMB）→ GPU 推理中…", callId, uploadSec, sizeMB))
         let tGPU = Date()
-        let deadline = Date().addingTimeInterval(timeout)
+        var deadline = Date().addingTimeInterval(timeout)
+        var pollPatience = ConnectivityPatience(what: "MOSS 结果轮询", log: log, onNetworkWait: onNetworkWait)
         var transientErrors = 0
         var polls = 0
         while Date() < deadline {
@@ -85,6 +97,11 @@ public struct MossTranscriber {
                 }
             } catch let e as MossError {
                 throw e   // 服务端明确失败：不重试
+            } catch where NetworkWait.isConnectivityError(error) {
+                // Keep the same call_id: the GPU job keeps running server-side while we are offline,
+                // so resume polling instead of resubmitting. Time spent offline does not eat the deadline.
+                deadline += try await pollPatience.absorb(error)
+                continue
             } catch {
                 transientErrors += 1   // 网络抖动：容忍连续 6 次（1 分钟）
                 if transientErrors >= 6 { throw error }

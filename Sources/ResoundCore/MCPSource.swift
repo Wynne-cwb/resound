@@ -76,7 +76,7 @@ public enum MCPSourcePresets {
         [
             MCPSource(id: "src_notion", kind: .notion, name: "Notion",
                       url: "https://mcp.notion.com/mcp", auth: .oauth,
-                      scope: "Notion 工作区", hostPatterns: ["notion.so", "notion.site"], builtin: true),
+                      scope: "Notion 工作区", hostPatterns: ["notion.so", "notion.site", "notion.com"], builtin: true),   // notion.com covers the new app.notion.com domain
             MCPSource(id: "src_atlassian", kind: .atlassian, name: "Jira / Confluence",
                       url: "https://mcp.atlassian.com/v1/mcp", auth: .oauth,
                       scope: "Jira + Confluence", hostPatterns: ["atlassian.net"], builtin: true),

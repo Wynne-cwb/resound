@@ -367,8 +367,8 @@ struct OverlayHost: View {
     }
 
     private func importRow(_ f: LibraryModel.ImportItem) -> some View {
-        let labels: [LibraryModel.ImportItem.Status: String] = [.queued: "等待中", .transcribing: "转写中…", .identifying: "识别说话人…", .done: "完成", .failed: "失败"]
-        let working = f.status == .transcribing || f.status == .identifying
+        let labels: [LibraryModel.ImportItem.Status: String] = [.queued: "等待中", .transcribing: "转写中…", .waitingNetwork: "等待网络…", .identifying: "识别说话人…", .done: "完成", .failed: "失败"]
+        let working = f.status == .transcribing || f.status == .waitingNetwork || f.status == .identifying
         return HStack(spacing: 11) {
             ZStack { RoundedRectangle(cornerRadius: 8, style: .continuous).fill(pal.accentSoft); WaveMark(pal: pal, height: 12) }.frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 2) { Text(f.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(pal.text).lineLimit(1) }
