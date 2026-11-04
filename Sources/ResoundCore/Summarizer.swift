@@ -1,8 +1,9 @@
 import Foundation
 
 /// 一个可自定义的摘要模板：不同会议场景用不同 prompt（1-on-1 / 团队会 / 头脑风暴 / 通用）。
-/// prompt 支持占位符：{date} {weekday} {title} {speakers} {transcript} {documents}
+/// prompt 支持占位符：{date} {weekday} {title} {speakers} {transcript} {documents} {meeting}
 /// {documents}=本场关联文档全文（作背景）；模板不写它、但本场有关联文档时，会自动注入到 {transcript} 之前。
+/// {meeting}=关联的日历日程（标题、组织者、参会人、议程描述）；同样不写也会在有日程时自动注入。
 public struct SummaryTemplate: Codable, Identifiable, Hashable {
     public var id: String
     public var name: String
@@ -128,6 +129,24 @@ public func buildReferenceDocsBlock(_ docs: [(title: String, text: String)],
     return out
 }
 
+/// 组装「会议日程」块（来自关联的日历日程，作背景）。描述过长截断。
+public func buildMeetingBlock(_ cal: CalendarRecord, maxDescriptionChars: Int = 2000) -> String {
+    let e = cal.event
+    let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
+    let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+    var out = "## 会议日程（来自日历，仅作背景：邀请名单 ≠ 实际发言人，纪要以转录为准）\n"
+    out += "日程：\(e.title)（\(df.string(from: e.start))–\(tf.string(from: e.end))\(e.seriesId != nil ? "，重复会议" : "")）\n"
+    if let o = e.organizer, !o.name.isEmpty { out += "组织者：\(o.name)\n" }
+    let names = e.attendees.map { $0.name.isEmpty ? $0.email : $0.name }.filter { !$0.isEmpty }
+    if !names.isEmpty { out += "邀请的参会人（\(names.count)）：\(names.joined(separator: "；"))\n" }
+    if !e.description.isEmpty {
+        let d = e.description.count > maxDescriptionChars
+            ? String(e.description.prefix(maxDescriptionChars)) + "\n（描述过长，已截断）" : e.description
+        out += "议程描述：\n\(d)\n"
+    }
+    return out
+}
+
 /// 生成会议摘要：把转录 + 录音时间（作锚点）+ 模板 + 关联文档（背景）交给 LLM。
 public struct Summarizer {
     let chat: ChatClient
@@ -137,8 +156,10 @@ public struct Summarizer {
         public let title: String
         public let recordedAt: String   // ISO8601
         public let speakers: [String]
-        public init(title: String, recordedAt: String, speakers: [String]) {
-            self.title = title; self.recordedAt = recordedAt; self.speakers = speakers
+        /// 关联日程块（buildMeetingBlock）；未关联为空串。
+        public let meeting: String
+        public init(title: String, recordedAt: String, speakers: [String], meeting: String = "") {
+            self.title = title; self.recordedAt = recordedAt; self.speakers = speakers; self.meeting = meeting
         }
     }
 
@@ -159,12 +180,21 @@ public struct Summarizer {
                 promptText += "\n\n{documents}"
             }
         }
+        // 日程：同 {documents} 的兜底，不写占位符但本场关联了日程 → 注入到 {transcript} 之前。
+        if !promptText.contains("{meeting}"), !meta.meeting.isEmpty {
+            if let r = promptText.range(of: "{transcript}") {
+                promptText.replaceSubrange(r, with: "{meeting}\n\n{transcript}")
+            } else {
+                promptText += "\n\n{meeting}"
+            }
+        }
         let filled = promptText
             .replacingOccurrences(of: "{date}", with: date)
             .replacingOccurrences(of: "{weekday}", with: weekday)
             .replacingOccurrences(of: "{title}", with: meta.title.isEmpty ? "（无标题）" : meta.title)
             .replacingOccurrences(of: "{speakers}", with: speakers)
             .replacingOccurrences(of: "{documents}", with: docsBlock)
+            .replacingOccurrences(of: "{meeting}", with: meta.meeting)
             .replacingOccurrences(of: "{transcript}", with: transcript)
         return try await chat.complete(
             system: """

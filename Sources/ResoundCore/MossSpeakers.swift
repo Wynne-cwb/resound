@@ -113,8 +113,7 @@ public func nameSpeakersFromMossDiarization(
     }
 
     // 注册库双门匹配 + 互斥消歧（一个注册者只认领一个标签簇；门限见 SpeakerMatchPolicy，宁匿名不误配）
-    let matcher = SpeakerMatchPolicy.matcher()
-    if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
+    let matcher = SpeakerMatchPolicy.matcher(indexPath: indexPath, embeddingDim: embeddingDim, recordingDir: rec.dir, log: log)
     let order = mergedSegs.sorted { labelDur($0.value) > labelDur($1.value) }.map { $0.key }
     var mergedEvidence: [String: Double] = [:]
     for l in labels { mergedEvidence[find(l), default: 0] += evidence[l] ?? 0 }
@@ -127,7 +126,11 @@ public func nameSpeakersFromMossDiarization(
             continue
         }
         let m = matcher.match(c)
-        if let name = m.name { bestName[rep] = name; bestScore[rep] = m.score }
+        if let name = m.name {
+            bestName[rep] = name; bestScore[rep] = m.score
+            if m.resolvedByAttendance { log(String(format: "   %@ → %@ 靠参会人消歧（第二像的人未受邀，margin 按受邀者算 %.2f）", rep, name, m.margin)) }
+        }
+        else if m.rejectedAsOutsider { log(String(format: "   %@ 最像者 cos=%.2f 不在邀请名单、未达 %.2f，留匿名", rep, m.score, SpeakerMatchPolicy.outsiderTauAbs)) }
         else if m.score > 0 { log(String(format: "   %@ 最像者 cos=%.2f / margin=%.2f 未过门，留匿名", rep, m.score, m.margin)) }
     }
     var winnerOf: [String: String] = [:]

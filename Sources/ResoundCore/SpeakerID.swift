@@ -40,7 +40,28 @@ public enum SpeakerMatchPolicy {
     public static let tauMargin: Float = 0.10
     /// 参与质心的有声时长下限（秒）。
     public static let minEvidenceSec: Double = 6
+    /// 录音关联了日程时，**不在邀请名单里**的人要更高的相似度才自动命名（2026-11-03 用户定：参会人作参考，
+    /// 避免认成会外的人）。0.80 ≈ 11-02 标定里「他人」最高分 0.79 之上；本人中位 0.85，多数仍能认出。
+    /// 不直接排除：实测约 25% 已标说话人不在邀请里（转发链接、会议室设备入会）。
+    public static let outsiderTauAbs: Float = 0.80
+    /// 参会人消歧（第二像的人未受邀时不让它卡 margin）的最低分。2026-11-04 回放：22 次消歧里唯一认错的一次
+    /// 分数 0.70（Carlos 被认成 Brent），其余多在 0.78 以上——留 0.05 余量，宁匿名不误配。
+    public static let attendanceTieBreakMin: Float = 0.75
     public static func matcher() -> SpeakerMatcher { SpeakerMatcher(tauAbs: tauAbs, tauMargin: tauMargin) }
+
+    /// 命名用的标准匹配器：加载注册声纹；录音关联了日程时再挂上参会人门（见 outsiderTauAbs）。
+    public static func matcher(indexPath: URL?, embeddingDim: Int, recordingDir: URL,
+                               log: (String) -> Void = { _ in }) -> SpeakerMatcher {
+        let m = matcher()
+        if let indexPath { m.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
+        if let attending = CalendarAttendance.attendingRefs(dir: recordingDir, refNames: m.refs.map(\.name)) {
+            m.attendees = attending
+            m.outsiderTauAbs = outsiderTauAbs
+            m.tieBreakMinScore = attendanceTieBreakMin
+            log("   📅 关联日程：声纹库里 \(attending.count) 人在邀请名单（\(attending.sorted().joined(separator: "/"))），其余需 cos≥\(outsiderTauAbs)")
+        }
+        return m
+    }
 }
 
 
@@ -54,6 +75,10 @@ public struct MatchResult {
     public let name: String?       // nil = unknown（未过门）
     public let score: Float        // 最近邻 cosine
     public let margin: Float       // s1 - s2
+    /// 过了常规双门、但此人不在本场邀请名单且分数不够 outsiderTauAbs 而被拒。
+    public var rejectedAsOutsider = false
+    /// 常规 margin 不够，但第二像的人不在邀请名单（且自己也够不上 outsiderTauAbs），按参会人消歧后命名。
+    public var resolvedByAttendance = false
 }
 
 /// 注册式说话人匹配器。参数默认值来自业界最佳实践调研（见 docs/DECISIONS.md 工程参数速查）。
@@ -62,6 +87,12 @@ public final class SpeakerMatcher {
     public var tauAbs: Float       // 绝对拒识门：最近邻 cosine 低于此 → unknown
     public var tauMargin: Float    // 相对门：s1-s2 低于此 → 模糊/unknown
     public var mergeGuard: Float   // 增量更新守门：新样本与旧质心 cosine 低于此则拒绝并入
+    /// 本场邀请名单里的注册名（nil = 录音没关联日程，不启用参会人门）。
+    public var attendees: Set<String>? = nil
+    /// 不在 attendees 里的人需要的绝对门（默认不可达 = 不启用）。margin 仍在全库上算，不缩小候选集。
+    public var outsiderTauAbs: Float = 1.01
+    /// 参会人消歧允许的最低分（默认不可达 = 不消歧）。
+    public var tieBreakMinScore: Float = 1.01
 
     public init(tauAbs: Float = 0.35, tauMargin: Float = 0.0, mergeGuard: Float = 0.45) {
         self.tauAbs = tauAbs
@@ -127,7 +158,21 @@ public final class SpeakerMatcher {
         let s2 = scored.count > 1 ? scored[1].s : -1
         let margin = s1 - max(s2, 0)
         if s1 < tauAbs { return MatchResult(name: nil, score: s1, margin: margin) }
-        if scored.count > 1 && margin < tauMargin { return MatchResult(name: nil, score: s1, margin: margin) }
+        if scored.count > 1 && margin < tauMargin {
+            // Invited top candidate: an uninvited runner-up only counts as a rival if it could be named on its
+            // own (≥ outsiderTauAbs). Otherwise the margin is taken against the best rival that does count.
+            if let att = attendees, att.contains(scored[0].name), s1 >= tieBreakMinScore {
+                let rival = scored.dropFirst().first { att.contains($0.name) || $0.s >= outsiderTauAbs }
+                let m2 = s1 - max(rival?.s ?? -1, 0)
+                if m2 >= tauMargin {
+                    return MatchResult(name: scored[0].name, score: s1, margin: m2, resolvedByAttendance: true)
+                }
+            }
+            return MatchResult(name: nil, score: s1, margin: margin)
+        }
+        if let att = attendees, !att.contains(scored[0].name), s1 < outsiderTauAbs {
+            return MatchResult(name: nil, score: s1, margin: margin, rejectedAsOutsider: true)
+        }
         return MatchResult(name: scored[0].name, score: s1, margin: margin)
     }
 }

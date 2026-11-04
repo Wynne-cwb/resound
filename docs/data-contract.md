@@ -81,6 +81,7 @@ resound-vault/
 │           ├── track-system.m4a      # 〔可选〕会议分轨：系统音频（线上侧），同上
 │           ├── transcript.json       # 词级时间戳转录（昂贵可修正）
 │           ├── diarization.json      # 说话人时间分段（昂贵可修正）
+│           ├── calendar.json         # 〔可选〕关联的日历日程快照（标题/参会人/描述/链接，见 §3.10）
 │           └── labels.json           # spk_N → person_id 映射（用户确认，最珍贵的事实）
 ├── notes/
 │   └── 2026-06-18-架构讨论.md         # 自由 markdown 笔记（带 frontmatter）
@@ -147,6 +148,7 @@ source: meeting                   # meeting | memo | call | lecture | ...
 language: zh
 tags: [work, standup]
 audio_file: audio.m4a
+meet_code: ayn-krbe-sad           # 〔可选〕Google Meet 会议码：录音时从浏览器取，用来精确关联日程（§3.10）
 
 # 溯源：用什么模型生成的，重建/对账用
 provenance:
@@ -274,6 +276,36 @@ links: [recording:2026-06-18-1430-standup]   # 关联录音（与 notes 同款 r
   - **PDF/图片 OCR 排版整理**：这两类提取后排版乱，导入时再过一道 `MarkdownTidier`（默认快速模型 correctModel，保语义重排：合并拆行、删重复页眉页脚、重建表格），`content.md` 存的是整理后的版本。整理失败/异常一律回退原始提取文本（不丢内容）。仅作用于 pdf/image。旧文档可用 CLI `retidy-doc <docDir>` 就地补整理 + 重建索引。
 - `links` 是**关联的事实源**（双向关联两端都以此为准）；Index 的 `doc_links` 表只是它的检索镜像。改关联只重写本文件 + 刷镜像，**不重新 embedding**。
 - 文档无时间轴/说话人，故切块 `start/end=0`、不参与"时间范围"问答过滤；但和录音一样进全局检索/问答，引用区分 📄文档 / 🎙️录音。
+
+### 3.10 `calendar.json`（关联日程 —— resound.calendar/1）
+
+会议录音关联到的系统日历（EventKit，公司 Google 账号同步而来）日程快照。只有 `source: meeting` 的录音会有；没有该文件 = 未关联。
+
+```json
+{
+  "schema": "resound.calendar/1",
+  "match": "exact",                       // exact=会议码 / time=时间+标题+说话人兜底 / manual=CLI --pick
+  "linked_at": "2026-11-03T18:00:00+08:00",
+  "event": {
+    "id": "<externalId>@<开始时间>",       // 本次发生的唯一 id
+    "series_id": "<externalId>",          // 重复会议的系列 id；单次会议无此键
+    "title": "Team Sprite Weekly Meeting",
+    "start": "2026-10-30T17:15:00+08:00", "end": "2026-10-30T18:15:00+08:00",
+    "calendar": "wb.chen@aftership.com",
+    "meet_code": "ayn-krbe-sad",
+    "organizer": {"name": "…", "email": "…"},
+    "attendees": [{"name": "Jie Cong Yang, Jerry", "email": "…", "status": "accepted"}],
+    "description": "去掉 Google 入会说明后的描述",
+    "links": ["https://www.notion.so/…"]  // 描述里除 Meet/电话入会外的链接，去重
+  }
+}
+```
+
+规则：
+- **快照不是同步**：关联时拍一次，日程后来改了不跟（要更新用 `calendar-link --id <id> --force`）。
+- 参会人已滤掉会议室/设备资源；**含同事邮箱**，会随 vault 一起 git 推送（用户 2026-11-03 确认可以）。MCP 对外默认只给名字。
+- 删掉本文件 + `recording.yaml` 的 `meet_code` 行 = 完全撤销关联；老代码不读它，零兼容风险。
+- 匹配细则（会议码优先；时间兜底用「停录时刻 − 时长」区间、标题/录音 id 里的原标题、已命名说话人是否都在邀请里）见 [设计文档](superpowers/specs/2026-11-03-calendar-link-design.md)。
 
 ---
 

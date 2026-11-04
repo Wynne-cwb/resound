@@ -124,8 +124,7 @@ public func identifySpeakersByDiarization(
 
     // 6) 合并簇 → 匹配注册库（先各自取最佳匹配，再做互斥消歧）
     //    门限见 SpeakerMatchPolicy（逐窗回退路径同门）：宁可让没注册的人落匿名「说话人N」（用户一键命名），也不要把陌生人误配成已注册者。
-    let matcher = SpeakerMatchPolicy.matcher()
-    if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
+    let matcher = SpeakerMatchPolicy.matcher(indexPath: indexPath, embeddingDim: embeddingDim, recordingDir: rec.dir, log: log)
     let order = mergedSegs.sorted(by: { clusterDur($0.value) > clusterDur($1.value) }).map { $0.key }
     var bestName: [String: String] = [:]   // 簇 → 命中的注册名（仅供互斥前的初判）
     var bestScore: [String: Float] = [:]

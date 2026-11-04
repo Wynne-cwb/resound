@@ -89,17 +89,19 @@ public struct MCPServerRunner: Sendable {
                     "source": ["type": "string", "description": "可选：限定来源", "enum": ["recording", "document"]],
                     "date_from": ["type": "string", "description": "可选：录音日期下界 yyyy-MM-dd"],
                     "date_to": ["type": "string", "description": "可选：录音日期上界 yyyy-MM-dd"],
+                    "attendee": ["type": "string", "description": "可选：只看这位参会人（日程参会人名字/邮箱子串，不区分大小写）参加的会议录音"],
                     "top_k": ["type": "integer", "description": "返回条数（默认 8）"],
                 ],
                 "required": ["query"],
              ]),
         Tool(name: "get_recording",
-             description: "按 id 取一场录音的全文（摘要 / 逐句转录 / 两者）。id 来自 search_meetings 或 list_recordings。",
+             description: "按 id 取一场录音的全文（摘要 / 逐句转录 / 两者）；关联了日历日程的，开头附会议信息（组织者、参会人、议程描述、链接）。id 来自 search_meetings 或 list_recordings。",
              inputSchema: [
                 "type": "object",
                 "properties": [
                     "id": ["type": "string", "description": "录音 id"],
                     "include": ["type": "string", "description": "返回哪部分（默认 both）", "enum": ["transcript", "summary", "both"]],
+                    "include_emails": ["type": "boolean", "description": "会议信息里是否附参会人邮箱（默认 false）"],
                 ],
                 "required": ["id"],
              ]),
@@ -111,13 +113,15 @@ public struct MCPServerRunner: Sendable {
                 "required": ["id"],
              ]),
         Tool(name: "list_recordings",
-             description: "列出全部会议录音（最新在前），可选按日期范围过滤。用于浏览与拿 id。",
+             description: "列出全部会议录音（最新在前），可选按日期范围 / 参会人过滤。关联了日历日程的附 meeting（日程标题、系列、参会人）。用于浏览与拿 id。",
              inputSchema: [
                 "type": "object",
                 "properties": [
                     "date_from": ["type": "string", "description": "可选 yyyy-MM-dd"],
                     "date_to": ["type": "string", "description": "可选 yyyy-MM-dd"],
                     "limit": ["type": "integer", "description": "最多返回条数（默认 50）"],
+                    "attendee": ["type": "string", "description": "可选：只列这位参会人（名字/邮箱子串，不区分大小写）参加的会议"],
+                    "include_emails": ["type": "boolean", "description": "meeting.attendees 是否带邮箱（默认 false，只给名字）"],
                 ],
              ]),
     ]
@@ -138,8 +142,14 @@ public struct MCPServerRunner: Sendable {
             filters.dateRange = (from: from ?? "0000-01-01", to: to ?? "9999-12-31")
         }
 
-        let hits = try await IndexPipeline(config: config).search(
-            query: query, indexPath: indexPath, topK: topK, rerank: true, filters: filters)
+        let attendee = args["attendee"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        let calendars = recordingCalendars()
+        var hits = try await IndexPipeline(config: config).search(
+            query: query, indexPath: indexPath, topK: attendee == nil ? topK : topK * 4, rerank: true, filters: filters)
+        if let attendee {
+            // Calendar data lives in the vault, not the index: over-fetch, then keep this person's meetings.
+            hits = Array(hits.filter { !$0.isDocument && Self.attended(calendars[$0.recordingId], attendee) }.prefix(topK))
+        }
 
         // 录音命中补标题（一次批量查）。
         let recIds = Array(Set(hits.filter { !$0.isDocument }.map { $0.recordingId }))
@@ -163,6 +173,7 @@ public struct MCPServerRunner: Sendable {
                 if let d = h.recordingDate { o["date"] = d }
                 if let p = h.personId { o["speaker"] = p }
                 o["time"] = "\(fmtTime(h.start))-\(fmtTime(h.end))"
+                if let c = calendars[h.recordingId] { o["meeting_title"] = c.event.title }
             }
             return o
         }
@@ -177,6 +188,9 @@ public struct MCPServerRunner: Sendable {
             throw MCPServerError.notFound("录音 \(id)")
         }
         var parts: [String] = ["# \(rec.title)", "日期：\(String(rec.recordedAt.prefix(10)))  时长：\(rec.durationSec)s"]
+        if let cal = CalendarLinker.load(dir: rec.dir) {
+            parts.append(Self.renderMeeting(cal, emails: args["include_emails"]?.boolValue ?? false))
+        }
         if include != "transcript" {
             if let s = try? String(contentsOf: rec.dir.appendingPathComponent("summary.md"), encoding: .utf8),
                !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -214,13 +228,62 @@ public struct MCPServerRunner: Sendable {
             let lo = from ?? "0000-01-01", hi = to ?? "9999-12-31"
             recs = recs.filter { let d = String($0.recordedAt.prefix(10)); return d >= lo && d <= hi }
         }
-        let out: [[String: Any]] = recs.prefix(limit).map {
-            ["id": $0.id, "title": $0.title, "date": String($0.recordedAt.prefix(10)), "duration_sec": $0.durationSec]
+        let emails = args["include_emails"]?.boolValue ?? false
+        var rows: [(RecordingSummary, CalendarRecord?)] = recs.map { ($0, CalendarLinker.load(dir: $0.dir)) }
+        if let who = args["attendee"]?.stringValue, !who.isEmpty {
+            rows = rows.filter { Self.attended($0.1, who) }
+        }
+        let out: [[String: Any]] = rows.prefix(limit).map { rec, cal in
+            var o: [String: Any] = ["id": rec.id, "title": rec.title, "date": String(rec.recordedAt.prefix(10)),
+                                    "duration_sec": rec.durationSec]
+            if let cal { o["meeting"] = Self.meetingJSON(cal, emails: emails) }
+            return o
         }
         return jsonString(["count": out.count, "recordings": out])
     }
 
     // MARK: helpers
+
+    /// 录音 id → calendar.json（只读 vault；没设 vault 时为空，检索照常）。
+    private func recordingCalendars() -> [String: CalendarRecord] {
+        guard let vault = try? vaultURL() else { return [:] }
+        var out: [String: CalendarRecord] = [:]
+        for r in listRecordings(vaultRoot: vault) { if let c = CalendarLinker.load(dir: r.dir) { out[r.id] = c } }
+        return out
+    }
+
+    static func attended(_ cal: CalendarRecord?, _ who: String) -> Bool {
+        guard let cal else { return false }
+        let q = who.lowercased()
+        return (cal.event.attendees + [cal.event.organizer].compactMap { $0 })
+            .contains { $0.name.lowercased().contains(q) || $0.email.lowercased().contains(q) }
+    }
+
+    static func meetingJSON(_ cal: CalendarRecord, emails: Bool) -> [String: Any] {
+        var o: [String: Any] = [
+            "title": cal.event.title, "start": iso8601(cal.event.start), "end": iso8601(cal.event.end),
+            "match": cal.match,
+            "attendees": cal.event.attendees.map { p -> Any in emails ? ["name": p.name, "email": p.email] : p.name },
+        ]
+        if let s = cal.event.seriesId { o["series_id"] = s }
+        return o
+    }
+
+    static func renderMeeting(_ cal: CalendarRecord, emails: Bool) -> String {
+        let e = cal.event
+        let hf = DateFormatter(); hf.dateFormat = "yyyy-MM-dd HH:mm"
+        let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+        func who(_ p: CalendarEvent.Person) -> String {
+            let n = p.name.isEmpty ? p.email : p.name
+            return emails && !p.email.isEmpty && !p.name.isEmpty ? "\(n) <\(p.email)>" : n
+        }
+        var lines = ["## 会议信息", "日程：\(e.title)（\(hf.string(from: e.start))–\(tf.string(from: e.end))\(e.seriesId != nil ? "，重复会议" : "")）"]
+        if let o = e.organizer { lines.append("组织者：\(who(o))") }
+        if !e.attendees.isEmpty { lines.append("参会人（\(e.attendees.count)）：" + e.attendees.map(who).joined(separator: "、")) }
+        if !e.links.isEmpty { lines.append("日程链接：\n" + e.links.map { "- \($0)" }.joined(separator: "\n")) }
+        if !e.description.isEmpty { lines.append("日程描述：\n\(e.description)") }
+        return lines.joined(separator: "\n")
+    }
 
     private func vaultURL() throws -> URL {
         guard let v = config.vaultPath, !v.isEmpty else { throw MCPServerError.noVault }

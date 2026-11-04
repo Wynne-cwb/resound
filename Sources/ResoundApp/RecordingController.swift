@@ -20,6 +20,8 @@ final class RecordingController: ObservableObject {
     @Published var watching = false
     @Published var recSeconds = 0
     @Published var meetingTitle: String? // 检测到的会议名（取自 Chrome 标签标题），用作录音标题
+    /// 检测到的 Meet 会议码：入库后用它精确关联日历日程（见 CalendarLink.swift）。
+    private var meetCode: String?
     @Published var promptStop = false     // 会议结束、未开自动停录时：弹「停止录音？」一键弹窗（录音仍在继续）
 
     /// toast 走 AppModel（全局），录音引擎只负责发消息。
@@ -58,6 +60,7 @@ final class RecordingController: ObservableObject {
                         // 关了「自动检测会议」→ 既不提示也不录。
                         guard d.object(forKey: Self.autoDetectKey) as? Bool ?? true else { return }
                         self.meetingTitle = title
+                        self.meetCode = MeetWatcher.meetingCode(from: url)
                         // 开了「自动开始录音」→ 直接开录(无需确认)；否则弹检测提示由用户决定。
                         if d.bool(forKey: Self.autoStartKey) {
                             self.startRecording(fromMeeting: true)
@@ -66,7 +69,7 @@ final class RecordingController: ObservableObject {
                         }
                     case .ended:
                         if case .meetingDetected = self.phase {
-                            self.phase = .idle; self.meetingTitle = nil
+                            self.phase = .idle; self.meetingTitle = nil; self.meetCode = nil
                         } else if self.phase == .recording, self.recordingFromMeeting {
                             // 仅对「会议触发的录音」处理结束（手动录音不受影响）。
                             if UserDefaults.standard.bool(forKey: Self.autoStopKey) {
@@ -93,7 +96,7 @@ final class RecordingController: ObservableObject {
 
     func stopWatching() { watchTask?.cancel(); watchTask = nil; watching = false }
 
-    func ignorePrompt() { if case .meetingDetected = phase { phase = .idle; meetingTitle = nil } }
+    func ignorePrompt() { if case .meetingDetected = phase { phase = .idle; meetingTitle = nil; meetCode = nil } }
 
     /// 菜单栏「模拟检测到会议」。
     func simulateMeeting() {
@@ -121,6 +124,13 @@ final class RecordingController: ObservableObject {
         recSeconds = 0
         recStart = Date()
         startRecTimer()
+        // Manual recording during a Meet: look the room up once so the calendar link can still be exact.
+        if meetCode == nil {
+            Task.detached(priority: .utility) {
+                guard let url = MeetWatcher().browserMeeting()?.url, let code = MeetWatcher.meetingCode(from: url) else { return }
+                await MainActor.run { if self.phase == .recording, self.meetCode == nil { self.meetCode = code } }
+            }
+        }
         Task {
             do {
                 try await rec.startCapture { _ in }
@@ -143,6 +153,7 @@ final class RecordingController: ObservableObject {
         stopRecTimer()
         phase = .finishing
         let title = meetingTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let code = meetCode
         Task {
             // 录音收尾（对齐混音+分轨落盘）。这一步失败=没有音频可救，只能报错。
             let cap: MeetingRecorder.Capture
@@ -152,7 +163,7 @@ final class RecordingController: ObservableObject {
                 await MainActor.run {
                     AppLog.error("录音收尾(混音)失败", error)
                     self.app?.toast("录音收尾失败：\(error)")
-                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
+                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil; self.meetCode = nil
                 }
                 return
             }
@@ -162,12 +173,12 @@ final class RecordingController: ObservableObject {
                 guard let lib = self.library else {
                     AppLog.log("⚠️ library 未挂载，录音临时文件：\(cap.mixed.path)")
                     self.app?.toast("无法加入录音库，音频保留在：\(cap.mixed.path)")
-                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
+                    self.phase = .idle; self.recorder = nil; self.meetingTitle = nil; self.meetCode = nil
                     return
                 }
-                lib.enqueueRecording(mixed: cap.mixed, mic: cap.mic, sys: cap.sys, title: title)
+                lib.enqueueRecording(mixed: cap.mixed, mic: cap.mic, sys: cap.sys, title: title, meetCode: code)
                 self.app?.toast("录音已结束，正在后台转写（可以开始下一场了）")
-                self.phase = .idle; self.recorder = nil; self.meetingTitle = nil
+                self.phase = .idle; self.recorder = nil; self.meetingTitle = nil; self.meetCode = nil
             }
         }
     }

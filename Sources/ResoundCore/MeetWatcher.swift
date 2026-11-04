@@ -110,6 +110,11 @@ public final class MeetWatcher: @unchecked Sendable {
         return re.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)) != nil
     }
 
+    /// 从会议室 URL 取会议码（`abc-defg-hij`）；非会议室 URL 返回 nil。
+    public static func meetingCode(from url: String) -> String? {
+        isMeetingRoom(url) ? CalendarText.meetCode(in: url) : nil
+    }
+
     private func runAppleScript(_ source: String) -> String? {
         var errorDict: NSDictionary?
         guard let script = NSAppleScript(source: source) else { return nil }

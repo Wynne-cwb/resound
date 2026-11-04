@@ -20,8 +20,7 @@ public func reidentifySpeakers(_ rec: RecordingSummary, model: String,
     let (clusters, windows) = try await clusterRecording(
         audio: rec.audioURL, asrJSON: rec.transcriptURL, model: model, clusterThreshold: clusterThreshold)
 
-    let matcher = SpeakerMatchPolicy.matcher()
-    if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
+    let matcher = SpeakerMatchPolicy.matcher(indexPath: indexPath, embeddingDim: embeddingDim, recordingDir: rec.dir, log: log)
 
     // 每个堆：匹配已记住的人 → 真名（重复堆共享同名即合并）；否则匿名
     var clusterLabel: [Int: String] = [:]
@@ -193,8 +192,7 @@ public func identifySpeakers(_ rec: RecordingSummary, model: String,
 
     // Same gate as cluster-level naming: a single 4–15s window at 0.70/0.10 had 0% false accepts in the
     // 2026-11-02 calibration (old default 0.35 mislabeled unenrolled people in non-MOSS recordings).
-    let matcher = SpeakerMatchPolicy.matcher()
-    if let indexPath { matcher.setRefs((try? Index(path: indexPath, dim: embeddingDim))?.loadSpeakerRefs() ?? []) }
+    let matcher = SpeakerMatchPolicy.matcher(indexPath: indexPath, embeddingDim: embeddingDim, recordingDir: rec.dir, log: log)
 
     // 逐窗提声纹：匹中已注册库 → 真名；没匹中 → 留待聚类（库里没有的新人）。
     var winLabel = [String?](repeating: nil, count: windows.count)

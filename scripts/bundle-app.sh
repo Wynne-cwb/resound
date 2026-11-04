@@ -61,6 +61,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>NSMicrophoneUsageDescription</key><string>Resound 需要麦克风来录制你的语音。</string>
     <key>NSAppleEventsUsageDescription</key><string>Resound 需要控制你的浏览器来检测 Google Meet 会议。</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>Resound 读取日历日程，把会议录音关联到对应的会议（标题、参会人、议程链接）。</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

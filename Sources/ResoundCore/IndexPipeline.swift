@@ -279,11 +279,14 @@ public struct IndexPipeline {
         let refDocs = config.vaultPath.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
             .map { linkedDocumentTexts(vaultRoot: $0, recordingId: manifest.id) } ?? []
         if !refDocs.isEmpty { log("📎 纳入 \(refDocs.count) 篇关联文档作为背景") }
+        let meeting = CalendarLinker.load(dir: recDir).map { buildMeetingBlock($0) } ?? ""
+        if !meeting.isEmpty { log("📅 纳入关联日程作为背景") }
         log("📝 生成摘要（模板：\(tmpl.name)）…")
         let tSum = Date()
         let summary = try await Summarizer(chat: ChatClient(config: config, modelOverride: config.summaryModel, purpose: "summary"))
             .summarize(transcript: transcriptText,
-                       meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers),
+                       meta: .init(title: manifest.title, recordedAt: manifest.recordedAt, speakers: speakers,
+                                   meeting: meeting),
                        template: tmpl, referenceDocs: refDocs)
         log(String(format: "   ⏱ 摘要 LLM %.1fs（转录 %d 字 → 摘要 %d 字，单次调用）",
                    Date().timeIntervalSince(tSum), transcriptText.count, summary.count))
@@ -709,6 +712,8 @@ struct Manifest {
     let id: String, title: String, recordedAt: String
     let durationSec: Int, source: String, language: String
     let audioFile: String
+    /// Google Meet 会议码（会议录音才有；老录音没有该行 → nil）。
+    var meetCode: String? = nil
 }
 
 func parseManifest(_ url: URL) throws -> Manifest {
@@ -730,7 +735,8 @@ func parseManifest(_ url: URL) throws -> Manifest {
         durationSec: Int(m["duration_sec"] ?? "0") ?? 0,
         source: m["source"] ?? "",
         language: m["language"] ?? "",
-        audioFile: m["audio_file"] ?? "audio.m4a")
+        audioFile: m["audio_file"] ?? "audio.m4a",
+        meetCode: m["meet_code"].flatMap { $0.isEmpty ? nil : $0 })
 }
 
 /// 递归找 recordings/ 下所有含 recording.yaml 的目录。

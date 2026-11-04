@@ -87,6 +87,7 @@ final class LibraryModel: ObservableObject {
         var error: String? = nil        // 失败原因（供 UI 显示 + 重试前清空）
         var source: String = "import"   // "import"（用户文件，原处可重导）/ "meeting"（录音，url 是收尾后的混音）
         var title: String? = nil        // 入库标题：录音带会议名（否则重试会落回文件名 id）；导入留 nil 用 defaultTitle
+        var meetCode: String? = nil     // 会议录音的 Meet 会议码：入库后精确关联日历日程（sidecar `.meet` 跨重启保留）
         /// 会议录音分轨（已与 url 混音同轴）：给了就分开转录再合并（dual-track spec）。
         var micURL: URL? = nil
         var sysURL: URL? = nil
@@ -1214,7 +1215,7 @@ final class LibraryModel: ObservableObject {
     /// 会议录音收尾完成 → 排队转写，**立刻返回**（录音状态机随即回 idle，可以马上开下一场）。
     /// 混音+分轨先搬出 tmp 到 App Support：排队期间可能已在录下一场，留在 tmp 有被系统清掉的风险。
     /// 转写失败时该项留在录音库顶部，可重试 / Finder 取回，**音频不丢**。
-    func enqueueRecording(mixed: URL, mic: URL?, sys: URL?, title: String?) {
+    func enqueueRecording(mixed: URL, mic: URL?, sys: URL?, title: String?, meetCode: String? = nil) {
         let safeMixed = Self.stashAudio(mixed, into: Self.pendingRecordingsDir)
         let name = (title?.isEmpty == false) ? title! : safeMixed.deletingPathExtension().lastPathComponent
         var item = ImportItem(url: safeMixed, name: name, status: .queued)
@@ -1224,12 +1225,24 @@ final class LibraryModel: ObservableObject {
         item.sysURL = sys.map { Self.stashAudio($0, into: Self.pendingRecordingsDir) }
         // 会议名写成 sidecar：排队期间 App 退出后靠它恢复标题（否则重试只能落回文件名）。
         if let t = item.title { try? t.write(to: Self.titleSidecar(for: safeMixed), atomically: true, encoding: .utf8) }
+        item.meetCode = meetCode
+        if let c = meetCode { try? c.write(to: Self.meetSidecar(for: safeMixed), atomically: true, encoding: .utf8) }
         enqueueIngest([item])
     }
 
+    /// 「关联日历日程」开关键（SettingsModel 写、这里读）。
+    static let calendarLinkKey = "resound.toggle.calendarlink"
     private static let pendingRecordingsDir = "pending-recordings"
     private nonisolated static func titleSidecar(for audio: URL) -> URL {
         audio.appendingPathExtension("title")
+    }
+    private nonisolated static func meetSidecar(for audio: URL) -> URL {
+        audio.appendingPathExtension("meet")
+    }
+    private nonisolated static func loadMeetCode(for audio: URL) -> String? {
+        let code = (try? String(contentsOf: meetSidecar(for: audio), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return code?.isEmpty == false ? code : nil
     }
     /// Persisted `IngestPipeline.Plan` of a pending meeting recording: survives an app quit, so a
     /// recovered retry resumes into the same vault dir instead of creating a duplicate recording.
@@ -1265,7 +1278,7 @@ final class LibraryModel: ObservableObject {
         var found = 0
         for f in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let name = f.lastPathComponent
-            if name.hasSuffix(".title") || name.hasSuffix(".ingest") { continue }   // sidecar，跟着混音一起处理
+            if name.hasSuffix(".title") || name.hasSuffix(".ingest") || name.hasSuffix(".meet") { continue }   // sidecar，跟着混音一起处理
             if name.hasSuffix("-mic.wav") || name.hasSuffix("-sys.wav") {  // 分轨：清掉（在队列里的除外）
                 let inFlight = pendingImports.contains { Self.samePath($0.micURL, f) || Self.samePath($0.sysURL, f) }
                 if !inFlight { try? FileManager.default.removeItem(at: f) }
@@ -1280,6 +1293,7 @@ final class LibraryModel: ObservableObject {
             item.source = "meeting"
             item.title = (title?.isEmpty == false) ? title : nil
             item.plan = Self.loadPlan(for: f)
+            item.meetCode = Self.loadMeetCode(for: f)
             item.error = "上次退出前未完成转写（音频已保住，点重试即可）"
             if let plan = item.plan, let vault = vaultURL(),
                FileManager.default.fileExists(atPath: IngestPipeline(vaultRoot: vault).recordingDir(for: plan)
@@ -1331,6 +1345,11 @@ final class LibraryModel: ObservableObject {
                                 Task { @MainActor in self?.setPendingStatus(p.id, waiting ? .waitingNetwork : .transcribing) }
                             })
             }
+            // 日历关联放在建索引前：标题若从默认名换成日程名，索引镜像拿到的就是新标题。
+            if p.source == "meeting", UserDefaults.standard.object(forKey: Self.calendarLinkKey) as? Bool ?? true {
+                CalendarLinker.linkNewRecording(dir: out.recordingDir,
+                                                meetCode: p.meetCode ?? Self.loadMeetCode(for: p.url))
+            }
             if let cfg {
                 // labelSpeakers:false——随后的 diarization worker 会重算并覆盖 chunk 说话人，
                 // 这里再标注是纯浪费的整段解码+提声纹。
@@ -1345,7 +1364,8 @@ final class LibraryModel: ObservableObject {
             autoPushVault(p.source == "meeting" ? "rec: 会议录音 \(out.id)" : "rec: 导入 \(p.name)")
             // 录音（meeting）的待转写混音+分轨存在 App Support，成功入库后清掉，避免堆垃圾。
             if p.source == "meeting" {
-                for u in [p.url, p.micURL, p.sysURL, Self.titleSidecar(for: p.url), Self.planSidecar(for: p.url)].compactMap({ $0 }) {
+                for u in [p.url, p.micURL, p.sysURL, Self.titleSidecar(for: p.url), Self.planSidecar(for: p.url),
+                          Self.meetSidecar(for: p.url)].compactMap({ $0 }) {
                     try? FileManager.default.removeItem(at: u)
                 }
             }

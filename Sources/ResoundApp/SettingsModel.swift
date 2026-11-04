@@ -1,4 +1,5 @@
 import SwiftUI
+import EventKit
 import AppKit
 import AVFoundation
 import CoreGraphics
@@ -56,8 +57,13 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    /// 会议录音入库后自动关联系统日历里的日程。键与 LibraryModel.calendarLinkKey 一致。
+    @Published var calendarLink: Bool { didSet { setBool(oldValue, calendarLink, LibraryModel.calendarLinkKey) } }
+    /// 历史回填进行中（按钮转圈、防重复点）。
+    @Published var calendarBackfilling = false
+
     private static let defKey = "resound.defaultTemplate"
-    let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}", "{documents}"]
+    let placeholders = ["{date}", "{title}", "{speakers}", "{transcript}", "{documents}", "{meeting}"]
 
     init() {
         let d = UserDefaults.standard
@@ -68,6 +74,7 @@ final class SettingsModel: ObservableObject {
         autoStartRec = d.object(forKey: "resound.toggle.autostart") as? Bool ?? false   // 默认关：需用户显式开启自动录音
         autoStopRec = d.object(forKey: "resound.toggle.autostop") as? Bool ?? false     // 默认关：结束时弹窗确认，不静默停
         recBadge = d.object(forKey: RecBadgePanelController.recBadgeKey) as? Bool ?? true   // 默认开
+        calendarLink = d.object(forKey: LibraryModel.calendarLinkKey) as? Bool ?? true   // 默认开
     }
 
     private func setBool(_ old: Bool, _ new: Bool, _ key: String) { UserDefaults.standard.set(new, forKey: key) }
@@ -169,19 +176,51 @@ final class SettingsModel: ObservableObject {
             PermRow(label: "麦克风", desc: "录制会议中你自己的声音。", granted: mic),
             PermRow(label: "屏幕录制", desc: "采集屏幕中其他参会者的声音。", granted: screen),
             PermRow(label: "自动化 · \(DefaultBrowser.detect().name)", desc: "检测浏览器中开始的 Google Meet 会议。", granted: true),
+            PermRow(label: "日历", desc: "把会议录音关联到日程（标题、参会人、议程链接）。可选。", granted: SystemCalendar.isAuthorized),
         ]
-        needsAttention = permRows.contains { !$0.granted }
+        // Calendar is optional: a missing grant must not raise the "needs attention" badge.
+        needsAttention = permRows.contains { !$0.granted && $0.label != "日历" }
     }
 
     func openSystemSettings(_ label: String) {
+        // Calendar: ask in-app first (only shows the system prompt while undecided), fall back to System Settings.
+        if label == "日历", EKEventStore.authorizationStatus(for: .event) == .notDetermined {
+            Task { _ = await SystemCalendar().requestAccess(); loadStatus() }
+            return
+        }
         let url: String
         switch label {
         case "麦克风": url = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         case "屏幕录制": url = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        case "日历": url = "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars"
         default: url = "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
         }
         if let u = URL(string: url) { NSWorkspace.shared.open(u) }
         app?.toast("正在打开「系统设置 › 隐私与安全性」…")
+    }
+
+    // MARK: 日历关联
+
+    /// 设置页「关联历史录音」：给已有会议录音补关联日程（明确的才写，有歧义的跳过，见 CalendarLinker.backfill）。
+    func linkCalendarHistory() {
+        guard !calendarBackfilling else { return }
+        guard let vault = vaultURL() else { app?.toast("先在「存储与同步」里设置录音库目录"); return }
+        calendarBackfilling = true
+        Task {
+            let cal = SystemCalendar()
+            guard await cal.requestAccess() else {
+                calendarBackfilling = false; loadStatus()
+                app?.toast("没有日历访问权限：到「权限」里授权日历后再试")
+                return
+            }
+            loadStatus()
+            let rep = await Task.detached(priority: .utility) {
+                CalendarLinker.backfill(vaultRoot: vault, calendar: cal, dryRun: false) { AppLog.log("📅 \($0)") }
+            }.value
+            calendarBackfilling = false
+            app?.reloadLibrary()
+            app?.toast("已关联 \(rep.linked) 场；\(rep.ambiguous) 场有歧义未关联，\(rep.unmatched) 场无对应日程")
+        }
     }
 
     // MARK: 模板 CRUD

@@ -7,7 +7,7 @@ struct Resound: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "resound",
         abstract: "Resound — 录音 → 转录 → 按数据契约写入 vault",
-        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRebuild.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
+        subcommands: [Transcribe.self, Retranscribe.self, Record.self, RecordMeeting.self, WatchMeet.self, Diarize.self, DiarizeEval.self, SpeakerEval.self, SpeakerCluster.self, SpeakerEnroll.self, SpeakerRebuild.self, SpeakerRecognize.self, SpeakerLabel.self, SpeakerIdentify.self, CalendarLink.self, DiarizeCompare.self, Normalize.self, CorrectTranscript.self, Redate.self, NormalizeAudio.self, RecoverMeeting.self, ExtractDoc.self, ImportDoc.self, RetidyDoc.self, SuggestFolder.self, SuggestTags.self, IndexCommand.self, IndexPrune.self, Search.self, Ask.self, Summarize.self, Mcp.self, LLMUsage.self, LLMBench.self, Doctor.self]
     )
 }
 
@@ -392,6 +392,57 @@ struct SpeakerEnroll: AsyncParsableCommand {
                 audio: URL(fileURLWithPath: audio), labels: URL(fileURLWithPath: labels),
                 indexPath: indexURL, embeddingDim: cfg.embeddingDim, model: spk, per: per))
         }
+    }
+}
+
+/// resound calendar-link —— 把会议录音关联到系统日历里的日程（写 calendar.json + meet_code）
+struct CalendarLink: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "calendar-link",
+        abstract: "把会议录音关联到系统日历（EventKit）里的日程：先 --dry-run 预览；有歧义的用 --id + --pick 指定")
+
+    @Option(name: .long, help: "vault 根目录")
+    var vault: String
+
+    @Option(name: .long, help: "只处理这一条录音 id（缺省=全部会议录音）")
+    var id: String?
+
+    @Option(name: .long, help: "配合 --id：有歧义时选第 N 个候选（1 起），按手动关联落盘")
+    var pick: Int?
+
+    @Flag(name: .long, help: "只预览，不写入")
+    var dryRun = false
+
+    @Flag(name: .long, help: "已关联过的也重新匹配")
+    var force = false
+
+    func run() async throws {
+        let cal = SystemCalendar()
+        guard await cal.requestAccess() else {
+            print("❌ 没有日历访问权限。终端进程通常拿不到授权：请在 App「设置 › 通用」里点「关联历史录音」，")
+            print("   或在「系统设置 › 隐私与安全性 › 日历」给运行本命令的程序授权后重试。")
+            throw ExitCode.failure
+        }
+        let root = URL(fileURLWithPath: vault)
+        if let pick {
+            guard let id, let rec = listRecordings(vaultRoot: root).first(where: { $0.id == id }) else {
+                throw ValidationError("--pick 需要配合存在的 --id")
+            }
+            guard let r = CalendarLinker.resolve(dir: rec.dir, calendar: cal) else { throw ValidationError("不是会议录音") }
+            let cands: [CalendarEvent]
+            switch r.match {
+            case .ambiguous(let c): cands = c
+            case .linked(let e, _): cands = [e]
+            case .none: cands = []
+            }
+            guard pick >= 1, pick <= cands.count else { throw ValidationError("候选只有 \(cands.count) 个") }
+            let e = cands[pick - 1]
+            print("→ 「\(rec.title)」关联到「\(e.title)」")
+            if !dryRun { try CalendarLinker.apply(e, method: "manual", dir: rec.dir, meetCode: r.meetCode) }
+            return
+        }
+        let rep = CalendarLinker.backfill(vaultRoot: root, calendar: cal, onlyId: id, dryRun: dryRun, force: force)
+        print("\n关联 \(rep.linked)（改标题 \(rep.retitled)）· 有歧义 \(rep.ambiguous) · 无日程 \(rep.unmatched) · 已关联跳过 \(rep.skipped)"
+              + (dryRun ? "（--dry-run：未写入）" : ""))
     }
 }
 

@@ -151,11 +151,33 @@ struct SettingsView: View {
                 toggleRow("自动检测会议", "检测到 Google Meet 会议时提示录音；关闭后不再检测。", $vm.autoDetect, last: false)
                 toggleRow("自动开始录音", "检测到会议直接开始录音，无需确认；关则弹窗询问。", $vm.autoStartRec, last: false)
                 toggleRow("自动停止录音", "会议结束直接停止并转写；关则弹「停止录音？」一键确认。", $vm.autoStopRec, last: false)
-                toggleRow("录音浮窗", "录音时显示一个可拖动的小窗，提醒你正在录音并提供停止按钮。", $vm.recBadge, last: true)
+                toggleRow("录音浮窗", "录音时显示一个可拖动的小窗，提醒你正在录音并提供停止按钮。", $vm.recBadge, last: false)
+                toggleRow("关联日历日程", "会议录音入库后自动关联系统日历里的日程（标题、参会人、议程链接）。", $vm.calendarLink, last: false)
+                calendarBackfillRow
             }
             .background(pal.elev, in: RoundedRectangle(cornerRadius: 13, style: .continuous)).stroke(pal.border, corner: 13)
             .padding(.top, 18)
         }
+    }
+
+    private var calendarBackfillRow: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("关联历史录音").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(pal.text)
+                Text("给已有会议录音补关联日程：只关联明确的，有歧义的跳过；已关联的不重复处理。").font(.system(size: 12)).foregroundStyle(pal.text2)
+            }
+            Spacer()
+            Button { vm.linkCalendarHistory() } label: {
+                HStack(spacing: 6) {
+                    if vm.calendarBackfilling { ProgressView().controlSize(.small) }
+                    Text(vm.calendarBackfilling ? "关联中…" : "开始关联")
+                }
+                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 14).frame(height: 32)
+                .background(pal.accent, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }.buttonStyle(.plainHit).hoverCursor().disabled(vm.calendarBackfilling)
+        }
+        .padding(.horizontal, 18).padding(.vertical, 14)
     }
 
     private func toggleRow(_ label: String, _ desc: String, _ binding: Binding<Bool>, last: Bool) -> some View {
