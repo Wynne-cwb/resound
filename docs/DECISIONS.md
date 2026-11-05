@@ -1884,3 +1884,9 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **移植时补的坑：滞后连续性校验**。单测里两条**互不相关**的合成轨被误判出 10% 的「麦克风晚 420ms」——8s 窗口在 ±1.5s 里搜 297 个滞后，偶然相关到 0.45 并不难；误检会压掉真实内容。对策：某个窗口的滞后，必须在 ±3 个窗口（±6s）内有 ≥2 个窗口与它相差 ≤40ms 才认（真实回声路径的延迟是连续的，偶然峰值的落点是随机的）。已送 MOSS 的 4 段输出和改动前相差 −29～−51 dB（D 段那 4% 的「麦克风晚 1000ms」被正确去掉）。
 **验证**：①Swift 输出和 Python 原型逐样本相差 −43～−50 dB；②单测 `TrackDedupTests` 4 条（独立两轨 → nil；系统轨晚 250ms、麦克风晚 70ms 都认得出；副本被压、本人声音保留 ±1 dB）；③全库 81 场带分轨的录音只做检测：Python 判为重复（>50% 窗口相关 >0.5）的约 30 场全部检出，滞后、方向一致；Python 判为 0% 的里只有 2 场检出少量（7%、4%，滞后稳定在 60–90ms 的外放回声），其余都是「无跨轨重复」。④端到端（`moss-bench --mic --sys`，走生产路径「去重 → VAD → 归一 → MOSS」，07-31 3120s 片段）：重复句 64 对 → 1 对（只剩 1 处 1 秒的残片），主讲人 210s 归为同一人，和系统轨单独跑（214s）一致。调试命令：`resound track-dedup <mic> <sys> [--out]`、`resound moss-bench <audio> [--mic --sys]`。
 **未做**：回放用的 `audio.m4a` 仍有重音（另行决定是否也用去重混音）；已入库的约 30 场重复会议要重转才会受益（retranscribe 会删 `diarization.json` 并重跑说话人识别，需等声纹 session 结束后再定）。
+
+## 录音浮窗拖不动（2026-11-05）
+- **现象**：录音浮窗药丸按住拖不动（停止按钮能点）。
+- **根因**：浮窗靠 `isMovableByWindowBackground` 拖窗，但 macOS 27.2 上 SwiftUI `NSHostingView` 把药丸上的 mouseDown 全部吞掉，AppKit 的背景拖窗收不到；在药丸背后垫 `NSViewRepresentable`（`mouseDownCanMoveWindow` / `performDrag`）同样收不到 mouseDown。
+- **对策**：药丸加 SwiftUI `DragGesture(minimumDistance: 2)`，每次把窗口移动「当前位置 − 按下位置」（窗口坐标）；窗口自身位移会让下一事件的窗口坐标同步回退，故无需全局光标。拖完 `saveFrame` 记位置。
+- **验证**：同结构独立程序用 `NSWindow.sendEvent` 发事件（终端无 CGEvent 发送权限）：拖 (+200,−100) → 窗口移动 (+200,−100)，拖后单击停止按钮照常触发、窗口不动。真实鼠标拖动由用户在打包后确认。

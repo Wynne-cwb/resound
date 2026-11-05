@@ -85,7 +85,8 @@ final class RecBadgePanelController {
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = false
-        p.isMovableByWindowBackground = true   // 药丸主体即拖拽区；停止按钮自己吃掉点击，不触发拖窗
+        // SwiftUI swallows mouseDown, so background dragging never reaches AppKit; RecBadgeCard drags via onDrag.
+        p.isMovableByWindowBackground = false
         p.hidesOnDeactivate = false
         return p
     }
@@ -93,13 +94,25 @@ final class RecBadgePanelController {
     private func rebuildContent() {
         guard let panel, let recorder, let app else { return }
         let card = RecBadgeCard(rec: recorder, pal: .make(dark: app.isDark),
-                                onStop: { [weak recorder] in recorder?.stopAndIngest() })
+                                onStop: { [weak recorder] in recorder?.stopAndIngest() },
+                                onDrag: { [weak self] in self?.drag($0) },
+                                onDragEnd: { [weak self] in self?.panel?.saveFrame(usingName: Self.frameKey) })
             .fixedSize()
             .padding(14)   // 透明留白：给药丸阴影留出空间，不被 panel 边缘裁切
         let host = NSHostingView(rootView: card)
         host.layoutSubtreeIfNeeded()
         panel.setContentSize(host.fittingSize)
         panel.contentView = host
+    }
+
+    /// Moves the panel by (current − grab point) in window coordinates. The window's own movement shifts the
+    /// next event's window-relative location by the same amount, so the pill stays under the cursor.
+    private func drag(_ v: DragGesture.Value) {
+        guard let panel else { return }
+        var o = panel.frame.origin
+        o.x += v.location.x - v.startLocation.x
+        o.y -= v.location.y - v.startLocation.y   // SwiftUI y grows downward, AppKit upward
+        panel.setFrameOrigin(o)
     }
 
     /// 无记忆位置（或记忆位置已不在任何屏上）时贴鼠标所在屏右上角（含 14pt 透明留白即视觉边距；visibleFrame 已排除菜单栏）。
@@ -113,6 +126,8 @@ struct RecBadgeCard: View {
     @ObservedObject var rec: RecordingController
     let pal: Palette
     let onStop: () -> Void
+    let onDrag: (DragGesture.Value) -> Void
+    let onDragEnd: () -> Void
     @State private var pulse = false
 
     var body: some View {
@@ -133,6 +148,11 @@ struct RecBadgeCard: View {
         .padding(.init(top: 6, leading: 13, bottom: 6, trailing: 7))
         .background(pal.elev, in: Capsule(style: .continuous))
         .overlay(Capsule(style: .continuous).strokeBorder(pal.borderStrong, lineWidth: 1))
+        .contentShape(Capsule(style: .continuous))
+        // Whole pill drags the panel; a plain click on the stop button still goes to the button.
+        .gesture(DragGesture(minimumDistance: 2)
+            .onChanged(onDrag)
+            .onEnded { _ in onDragEnd() })
         .onAppear {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { pulse = true }
         }

@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-11-05（**修录音浮窗拖不动**：改用 SwiftUI 拖动手势，见 DECISIONS 2026-11-05；待用户确认真实拖动）
 > 最近更新：2026-11-04（**日历自动关联 P1+P2 已合入 main**：P1 会议码 + EventKit 匹配 + `calendar.json` + CLI `calendar-link` + 设置页开关/「关联历史录音」+ MCP 会议信息/参会人过滤；P2 参会人作说话人参考（未受邀 ≥0.80、受邀者消歧 ≥0.75、别名现学）+ 纪要 `{meeting}`。回放 52 场手标会议：认对 94.8%→98.5%、匿名 5.1%→1.3%、认错 0.13%→0.16%。**待用户**：①设置›权限 授权日历 → 设置›通用「关联历史录音」②已关联录音「重新识别说话人」③开一场真实 Meet 验收会议码。见 DECISIONS 2026-11-03~04、[设计](superpowers/specs/2026-11-03-calendar-link-design.md)）
 > 最近更新：2026-11-02（**分轨重复语音去重：已接入 MOSS 管线，已 commit（本分支）+ 重打包（当前运行的是本 worktree 的 build/Resound.app，未合 main/未 push）**。约一半带分轨的会议里一轨是另一轨的延迟副本，MOSS 会把回声当成幻影说话人、每句话重复一遍。现在入库/重转前先做跨轨去重（[TrackDedup](../Sources/ResoundCore/TrackDedup.swift)：按窗口跟踪滞后、保留更干净的一份、软增益压另一份），无重复的会议原样上传；重复密集片段实测重复句 64/45 对 → 0。单测 + 全库 81 场检测 + 端到端已验。**待用户**：①合 main / push ②是否重转已有的约 30 场重复会议（会删 diarization.json，需等声纹 session 结束）③回放 `audio.m4a` 是否也去重。详见 [DECISIONS](DECISIONS.md) 2026-11-02「麦克风轨 / 系统轨重复语音去重」）
 > 最近更新：2026-11-03（**声纹模型横评结论：保持 CAM++**——7 个 sherpa-onnx 官方模型在 54 人手标窗口上对比，CAM++ 准确率最高且最快档；ERes2NetV2/large、ResNet293 超 30 分钟淘汰；AS-norm/多声纹后端也不如质心。候选模型与缓存已清理。见 DECISIONS 2026-11-03）
