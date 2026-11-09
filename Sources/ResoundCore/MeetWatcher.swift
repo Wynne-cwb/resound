@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreAudio
+import ScriptingBridge
 
 /// 系统默认浏览器（会议检测的目标）。团队成员不都用 Chrome，检测跟着默认浏览器走。
 /// Chromium 系（Chrome/Edge/Brave/Vivaldi/Arc）与 Safari 的 AppleScript 方言略有差异；
@@ -36,6 +37,7 @@ public struct DefaultBrowser: Sendable {
 
 /// Google Meet 检测：轮询默认浏览器标签 URL(找会议室链接) + 麦克风占用确认在通话。
 /// 不需浏览器扩展，只需自动化权限(首次弹 TCC：Resound 想控制 <浏览器>)。
+/// Tabs are read via ScriptingBridge, per browser instance by pid (see `browserTabs()`).
 public final class MeetWatcher: @unchecked Sendable {
 
     public enum Event {
@@ -47,45 +49,58 @@ public final class MeetWatcher: @unchecked Sendable {
 
     public init(browser: DefaultBrowser = .detect()) { self.browser = browser }
 
-    // MARK: 浏览器标签轮询（AppleScript / Apple Events）
+    // MARK: 浏览器标签轮询（ScriptingBridge / Apple Events）
 
     /// 返回当前打开的某个 Meet 会议室的 (URL, 会议名)。会议名取自浏览器标签标题
     /// (日历预订的会议标题通常会出现在标签页标题里)；无会议/浏览器不支持返回 nil。
     public func browserMeeting() -> (url: String, title: String?)? {
         guard browser.kind != .unsupported else { return nil }
-        // Safari 的标签标题属性叫 name，Chromium 系叫 title；URL/标题可能是 missing value
-        // （about:blank 等），直接拼接会让整段脚本报错 → 先落地成空串。
-        let titleProp = browser.kind == .safari ? "name" : "title"
-        // 每个标签输出 "URL\t标题"，用换行分隔。
-        let script = """
-        if application id "\(browser.bundleID)" is running then
-            set out to ""
-            tell application id "\(browser.bundleID)"
-                repeat with w in windows
-                    repeat with t in tabs of w
-                        set u to URL of t
-                        if u is missing value then set u to ""
-                        set n to \(titleProp) of t
-                        if n is missing value then set n to ""
-                        set out to out & u & "\t" & n & "\n"
-                    end repeat
-                end repeat
-            end tell
-            return out
-        else
-            return ""
-        end if
-        """
-        guard let raw = runAppleScript(script) else { return nil }
-        for line in raw.split(whereSeparator: \.isNewline) {
-            let parts = line.components(separatedBy: "\t")
-            let u = parts.first ?? ""
-            if Self.isMeetingRoom(u) {
-                let title = parts.count > 1 ? Self.cleanMeetingTitle(parts[1]) : nil
-                return (u, title)
+        return Self.firstMeeting(in: browserTabs())
+    }
+
+    /// Picks the first meeting-room tab from a list of (URL, title) pairs.
+    static func firstMeeting(in tabs: [(url: String, title: String)]) -> (url: String, title: String?)? {
+        guard let hit = tabs.first(where: { isMeetingRoom($0.url) }) else { return nil }
+        return (hit.url, cleanMeetingTitle(hit.title))
+    }
+
+    /// All tabs (URL, title) across **every running instance** of the default browser.
+    ///
+    /// Do not use AppleScript `tell application id "<bundle id>"`: several instances can share one
+    /// bundle id (e.g. a scraper/automation Chrome started with `--user-data-dir`), and `application id`
+    /// resolves to only one of them (observed: the most recently launched, with zero windows). The
+    /// Chrome actually hosting the meeting is never asked, so the whole meeting goes undetected
+    /// silently. ScriptingBridge addresses each instance by pid instead, and only targets processes
+    /// that are already running, so it never launches the browser.
+    func browserTabs() -> [(url: String, title: String)] {
+        // Safari calls the tab title property `name`; Chromium browsers call it `title`.
+        let titleKey = browser.kind == .safari ? "name" : "title"
+        var out: [(url: String, title: String)] = []
+        for instance in NSRunningApplication.runningApplications(withBundleIdentifier: browser.bundleID)
+        where !instance.isTerminated {
+            guard let app = SBApplication(processIdentifier: instance.processIdentifier) else { continue }
+            app.timeout = 300   // ticks (1/60s) = 5s; a hung instance must not stall the poll loop
+            // Guard every KVC hop with responds(to:): a key missing from the browser's scripting
+            // dictionary raises an ObjC exception that Swift cannot catch (would crash the app).
+            guard app.responds(to: NSSelectorFromString("windows")),
+                  let windows = app.value(forKey: "windows") as? SBElementArray else { continue }
+            for case let window as SBObject in windows {
+                guard window.responds(to: NSSelectorFromString("tabs")),
+                      let tabs = window.value(forKey: "tabs") as? SBElementArray,
+                      let first = tabs.firstObject as? SBObject,
+                      first.responds(to: NSSelectorFromString("URL")),
+                      first.responds(to: NSSelectorFromString(titleKey)) else { continue }
+                // Bulk getters: one Apple event per property per window instead of one per tab.
+                // URL/title can be missing value (about:blank etc.) → NSNull → empty string.
+                let urls = (tabs.value(forKey: "URL") as? [Any]) ?? []
+                let titles = (tabs.value(forKey: titleKey) as? [Any]) ?? []
+                for (i, u) in urls.enumerated() {
+                    let title = i < titles.count ? (titles[i] as? String ?? "") : ""
+                    out.append((u as? String ?? "", title))
+                }
             }
         }
-        return nil
+        return out
     }
 
     /// 标签标题清洗成会议名：去掉「Google Meet」装饰、未读数前缀；只剩 "Meet"/空 → nil。
@@ -113,14 +128,6 @@ public final class MeetWatcher: @unchecked Sendable {
     /// 从会议室 URL 取会议码（`abc-defg-hij`）；非会议室 URL 返回 nil。
     public static func meetingCode(from url: String) -> String? {
         isMeetingRoom(url) ? CalendarText.meetCode(in: url) : nil
-    }
-
-    private func runAppleScript(_ source: String) -> String? {
-        var errorDict: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return nil }
-        let result = script.executeAndReturnError(&errorDict)
-        if errorDict != nil { return nil }   // 无权限/浏览器未开/脚本错 → 当作没有会议
-        return result.stringValue
     }
 
     // MARK: 麦克风占用（CoreAudio）

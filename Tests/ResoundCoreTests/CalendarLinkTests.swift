@@ -22,6 +22,15 @@ final class CalendarLinkTests: XCTestCase {
         XCTAssertEqual(MeetWatcher.meetingCode(from: "https://meet.google.com/ayn-krbe-sad?authuser=0"), "ayn-krbe-sad")
         XCTAssertEqual(MeetWatcher.meetingCode(from: "https://meet.google.com/meet/qzq-ityb-ztv"), "qzq-ityb-ztv")
         XCTAssertNil(MeetWatcher.meetingCode(from: "https://meet.google.com/landing"))
+        // Picks the meeting tab out of mixed tabs from several browser instances.
+        let picked = MeetWatcher.firstMeeting(in: [
+            ("about:blank", ""),
+            ("https://meet.google.com/landing", "Google Meet"),
+            ("https://meet.google.com/meet/abq-bbqr-roz", "Meet - OS Notification 迁移方案二次评审"),
+        ])
+        XCTAssertEqual(picked?.url, "https://meet.google.com/meet/abq-bbqr-roz")
+        XCTAssertEqual(picked?.title, "OS Notification 迁移方案二次评审")
+        XCTAssertNil(MeetWatcher.firstMeeting(in: [("https://meet.google.com/", "Meet")]))
         XCTAssertEqual(CalendarText.meetCode(in: "Join: https://meet.google.com/bno-ujdp-mhv\nPhone…"), "bno-ujdp-mhv")
     }
 

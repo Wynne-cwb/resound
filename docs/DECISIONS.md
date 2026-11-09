@@ -1890,3 +1890,9 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 - **根因**：浮窗靠 `isMovableByWindowBackground` 拖窗，但 macOS 27.2 上 SwiftUI `NSHostingView` 把药丸上的 mouseDown 全部吞掉，AppKit 的背景拖窗收不到；在药丸背后垫 `NSViewRepresentable`（`mouseDownCanMoveWindow` / `performDrag`）同样收不到 mouseDown。
 - **对策**：药丸加 SwiftUI `DragGesture(minimumDistance: 2)`，每次把窗口移动「当前位置 − 按下位置」（窗口坐标）；窗口自身位移会让下一事件的窗口坐标同步回退，故无需全局光标。拖完 `saveFrame` 记位置。
 - **验证**：同结构独立程序用 `NSWindow.sendEvent` 发事件（终端无 CGEvent 发送权限）：拖 (+200,−100) → 窗口移动 (+200,−100)，拖后单击停止按钮照常触发、窗口不动。真实鼠标拖动由用户在打包后确认。
+
+## 踩坑：Meet 检测再次静默失效——同 bundle id 的第二个 Chrome 实例（2026-11-09）
+**现象**：开着 `https://meet.google.com/meet/abq-bbqr-roz` 的会，麦克风占用中，仍不弹「开始录音」。
+**取证**：URL 正则早已兼容 `/meet/`（非上次的坑）。`ps` 看到两个 Chrome：日常 Chrome（pid 66290，会议窗口在此）+ 当天 14:27 起的爬虫 Chrome（`--user-data-dir=~/.cn_scraper_login_dianping --remote-debugging-port`）。`tell application id "com.google.Chrome" to count windows` 返回 **0**——`application id` 解析到了零窗口的爬虫实例；爬虫退出后立刻变回 1。同 bundle id 多实例时 AppleScript 只能寻址其中一个，真正开会的实例根本没被问到，零报错。
+**修**：[MeetWatcher.browserTabs()](../Sources/ResoundCore/MeetWatcher.swift) 弃 NSAppleScript，改 ScriptingBridge `SBApplication(processIdentifier:)` 按 pid 遍历 `NSRunningApplication.runningApplications(withBundleIdentifier:)` 的每个实例；每级 KVC 先 `responds(to:)`（键不存在会抛 ObjC 异常，Swift 接不住会崩）；tabs 用批量 getter（每窗每属性 1 个 Apple event）；`timeout` 5s 防挂死实例卡住轮询。只寻址已运行进程，不会拉起浏览器（保留原 `is running` 语义）。
+**验证**：`swift build` + CalendarLinkTests 19 条过（新增 `firstMeeting(in:)` 断言）；起第二个 Chrome 实例（独立 user-data-dir）同时在跑时，worktree 版 `resound watch-meet` 正确检出该会议与会议名。注：这次自起的第二实例下旧路径恰好解析到了原实例（返回 1），——更正：那个「1」其实是新实例的 about:blank 窗口，旧版 App 随即连续两轮读不到会议、触发 `.ended` 自动停录，把用户进行中的会议录音切成两段（17:14:56 停、17:15:06 用户手动续上，丢约 10s）。**教训：在用户录音期间做会影响检测输入的实测（起浏览器实例、改标签）会直接触发自动停录——这类验证必须等录音结束。** 会后（18:25）入库完成后重打包替换 App，确认包内链接 ScriptingBridge。**未验证**：新包对真实会议的弹窗（需下一场 Meet）。
