@@ -1896,3 +1896,12 @@ Claude design 重做了「侧栏折叠按钮 / Library 文件夹 / Ask 历史」
 **取证**：URL 正则早已兼容 `/meet/`（非上次的坑）。`ps` 看到两个 Chrome：日常 Chrome（pid 66290，会议窗口在此）+ 当天 14:27 起的爬虫 Chrome（`--user-data-dir=~/.cn_scraper_login_dianping --remote-debugging-port`）。`tell application id "com.google.Chrome" to count windows` 返回 **0**——`application id` 解析到了零窗口的爬虫实例；爬虫退出后立刻变回 1。同 bundle id 多实例时 AppleScript 只能寻址其中一个，真正开会的实例根本没被问到，零报错。
 **修**：[MeetWatcher.browserTabs()](../Sources/ResoundCore/MeetWatcher.swift) 弃 NSAppleScript，改 ScriptingBridge `SBApplication(processIdentifier:)` 按 pid 遍历 `NSRunningApplication.runningApplications(withBundleIdentifier:)` 的每个实例；每级 KVC 先 `responds(to:)`（键不存在会抛 ObjC 异常，Swift 接不住会崩）；tabs 用批量 getter（每窗每属性 1 个 Apple event）；`timeout` 5s 防挂死实例卡住轮询。只寻址已运行进程，不会拉起浏览器（保留原 `is running` 语义）。
 **验证**：`swift build` + CalendarLinkTests 19 条过（新增 `firstMeeting(in:)` 断言）；起第二个 Chrome 实例（独立 user-data-dir）同时在跑时，worktree 版 `resound watch-meet` 正确检出该会议与会议名。注：这次自起的第二实例下旧路径恰好解析到了原实例（返回 1），——更正：那个「1」其实是新实例的 about:blank 窗口，旧版 App 随即连续两轮读不到会议、触发 `.ended` 自动停录，把用户进行中的会议录音切成两段（17:14:56 停、17:15:06 用户手动续上，丢约 10s）。**教训：在用户录音期间做会影响检测输入的实测（起浏览器实例、改标签）会直接触发自动停录——这类验证必须等录音结束。** 会后（18:25）入库完成后重打包替换 App，确认包内链接 ScriptingBridge。**未验证**：新包对真实会议的弹窗（需下一场 Meet）。
+
+## 踩坑：MOSS 转写连续超时——线上 Modal 部署停在 07-22，只要 L4（2026-11-12）
+**现象**：「AI-Native Delivery: Progress & Blockers」（52min，切 3 片）两次都在提交后整 1 小时报 `MOSS 推理超时（>3600s）`。
+**取证**：Modal 日志 21:36–21:46 只有客户端 `GET → 202` 轮询、没有推理容器；容器 22:04 才起来（客户端 21:46 已放弃）——是**排队等 GPU**，不是推理慢/挂。`modal app history moss-transcribe` 显示用户 workspace（wynne2chan）最后部署是 **2026-07-22 v5**：11-01 的 `gpu=["L4","A10G"]` 备选卡型（7b6c932，Pino 在自己 workspace 部署过）和 07-29 的服务端降级解析**都没上线**，线上只要 L4，L4 荒时一直排队。
+**修**：重新 `modal deploy Sources/ResoundCore/Resources/moss_modal.py` → v6（22:41，endpoint/密钥不变）。重试后 GPU 3 分钟内就位（中途一次 preemption，Modal 自动用同输入重跑），23:13 转写完成。
+**部署踩坑**：系统 python3 是 3.9，`str | None` 注解在本地解析就挂（未上传，线上未受影响）→ 用 `uv venv --python 3.12`；modal 客户端 1.6.4 在本机网络报「Could not connect to the Modal server」，1.2.6 正常 → 固定 `modal==1.2.6`。
+**连带**：转写成功后建索引时 aihubmix `qwen3-embedding-8b` 返回 400 `no_available_channel`（服务商临时无通道，客户端已有 5 次退避重试仍失败）；几分钟后恢复，App 重试走「已入库只补索引」路径，不重跑 MOSS。
+**模型版本现状**：HF 权重自 07-08 未变；`from_pretrained` 未锁 revision，每次冷启动跟随 HF main（volume 已有最新 `10304d9`）；镜像里的 GitHub 推理包/transformers 冻结在 07-22 构建时。用户决定**暂不**加版本锁定和定期更新检查。
+**教训**：改了 `moss_modal.py` 不等于线上生效——提交后必须在用户自己的 workspace 重新部署，并用 `modal app history` 核对线上版本。

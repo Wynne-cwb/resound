@@ -1,6 +1,7 @@
 # 当前状态 (STATE)
 
 > "现在的快照"。过时就改。细节/历史查 [DECISIONS.md](DECISIONS.md)。
+> 最近更新：2026-11-12（**MOSS 线上部署落后修复**：用户 Modal 停在 07-22 只要 L4 → 排队超时；已重部署 v6（L4+A10G），失败会议已转写成功并补索引。见 DECISIONS 2026-11-12）
 > 最近更新：2026-11-09（**修 Meet 检测静默失效 / 中途误停录（第二个 Chrome 实例）**：同 bundle id 的另一个 Chrome 抢走 AppleScript 寻址 → 改 ScriptingBridge 按 pid 查所有实例。已编译+单测+双实例实测，**已重打包替换 `Resound/build/Resound.app`（18:25，旧包留在 `Resound.app.prev`）**；**未 commit**。**待用户**：下一场真实 Meet 验收弹窗；确认 commit。见 DECISIONS 2026-11-09）
 > 最近更新：2026-11-05（**修录音浮窗拖不动**：改用 SwiftUI 拖动手势，见 DECISIONS 2026-11-05；待用户确认真实拖动）
 > 最近更新：2026-11-04（**日历自动关联 P1+P2 已合入 main**：P1 会议码 + EventKit 匹配 + `calendar.json` + CLI `calendar-link` + 设置页开关/「关联历史录音」+ MCP 会议信息/参会人过滤；P2 参会人作说话人参考（未受邀 ≥0.80、受邀者消歧 ≥0.75、别名现学）+ 纪要 `{meeting}`。回放 52 场手标会议：认对 94.8%→98.5%、匿名 5.1%→1.3%、认错 0.13%→0.16%。**待用户**：①设置›权限 授权日历 → 设置›通用「关联历史录音」②已关联录音「重新识别说话人」③开一场真实 Meet 验收会议码。见 DECISIONS 2026-11-03~04、[设计](superpowers/specs/2026-11-03-calendar-link-design.md)）
